@@ -16,7 +16,7 @@ from .config import (
 )
 from .storage import _udict, save_data
 from .stats_store import record_game_fields
-from .xp import apply_xp_change, grant_reward_boost
+from .xp import apply_xp_change, grant_prestige_scaled_reward_boost
 from .roles import enforce_level6_exclusive
 from .time_windows import _today_local, _date_key          # local day keys:contentReference[oaicite:8]{index=8}
 
@@ -183,7 +183,11 @@ class AnagramCog(commands.Cog):
 
         # Check correctness (single attempt per puzzle)
         if norm_guess == norm_answer:
-            boost = await grant_reward_boost(ctx.author, ANAGRAM_WIN_XP, source="anagram solve")
+            boost = await grant_prestige_scaled_reward_boost(
+                ctx.author,
+                ANAGRAM_WIN_XP,
+                source="anagram solve",
+            )
             record_game_fields(
                 ctx.guild.id,
                 ctx.author.id,

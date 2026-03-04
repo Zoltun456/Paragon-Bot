@@ -55,6 +55,10 @@ It provides:
 
 ### Non-Admin
 - `!roulette @user` (alias: `!r`)
+- No XP cost
+- 30 minute personal cooldown per user
+- Success chance scales by prestige and approaches a 50% cap
+- Timeout ranges from 10s to 5m based on prestige gap of loser vs winner
 
 ### Admin
 - None

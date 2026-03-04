@@ -13,7 +13,7 @@ from .guild_setup import get_log_channel
 from .time_windows import _today_local, _date_key, is_active_hours
 from .storage import _udict, save_data
 from .stats_store import record_game_fields
-from .xp import apply_xp_change, grant_reward_boost
+from .xp import apply_xp_change, grant_prestige_scaled_reward_boost
 from .roles import enforce_level6_exclusive
 from .ownership import owner_only
 
@@ -204,7 +204,11 @@ class WordleCog(commands.Cog):
 
         if guess == target:
             st["done"] = True; st["win"] = True
-            boost = await grant_reward_boost(ctx.author, WORDLE_WIN_XP, source="wordle clear")
+            boost = await grant_prestige_scaled_reward_boost(
+                ctx.author,
+                WORDLE_WIN_XP,
+                source="wordle clear",
+            )
             record_game_fields(
                 ctx.guild.id,
                 ctx.author.id,

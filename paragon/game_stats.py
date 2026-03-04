@@ -127,13 +127,15 @@ def _game_stats_lines(games: dict) -> list[str]:
 
     rt = _as_dict(games.get("roulette"))
     if rt:
+        plays = _as_float(rt.get("plays", 0))
+        avg_chance_pct = (_as_float(rt.get("chance_pct_total", 0.0)) / plays) if plays > 0 else 0.0
         out.append(
             "Roulette: "
             f"plays {_fmt_num(rt.get('plays', 0))} | "
             f"successes {_fmt_num(rt.get('successes', 0))} | "
             f"backfires {_fmt_num(rt.get('backfires', 0))} | "
             f"timeouts {_fmt_num(rt.get('got_timed_out', 0))} | "
-            f"spent {_fmt_num(rt.get('xp_spent_total', 0))}"
+            f"avg odds {avg_chance_pct:.2f}%"
         )
 
     th = _as_dict(games.get("thanks"))

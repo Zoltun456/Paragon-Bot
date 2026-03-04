@@ -146,6 +146,56 @@ async def grant_reward_boost(member, reward_xp: int | float, *, source: str = "a
     )
 
 
+def prestige_reward_scale(
+    prestige_level: int,
+    *,
+    min_scale: float = 0.25,
+    curve: float = 25.0,
+    power: float = 1.15,
+) -> float:
+    """
+    Return a multiplier in [min_scale, 1.0] for prestige-dampened reward boosts.
+    - Low prestige stays near 1.0
+    - Higher prestige trends toward min_scale
+    """
+    p = max(0, int(prestige_level))
+    floor = max(0.0, min(1.0, float(min_scale)))
+    c = max(1e-9, float(curve))
+    pw = max(0.1, float(power))
+    decay = 1.0 / (1.0 + (float(p) / c) ** pw)
+    return floor + ((1.0 - floor) * decay)
+
+
+async def grant_prestige_scaled_reward_boost(
+    member,
+    reward_xp: int | float,
+    *,
+    source: str = "activity",
+) -> dict:
+    """
+    Convert a reward into a temporary XP/min boost, dampened by prestige.
+    This is intended for game rewards where high prestige should get smaller boosts.
+    """
+    u = _udict(member.guild.id, member.id)
+    prestige = int(u.get("prestige", 0))
+    base_pct, base_minutes = _reward_to_boost(reward_xp)
+    scale = prestige_reward_scale(prestige)
+    pct = max(0.0, base_pct * scale)
+    minutes = max(1, int(round(base_minutes * scale)))
+    result = await grant_fixed_boost(
+        member,
+        pct=pct,
+        minutes=minutes,
+        source=source,
+        reward_seed_xp=reward_xp,
+    )
+    result["prestige"] = int(prestige)
+    result["scale"] = float(scale)
+    result["base_percent"] = float(base_pct * 100.0)
+    result["base_minutes"] = int(base_minutes)
+    return result
+
+
 async def grant_fixed_boost(
     member,
     *,
