@@ -44,6 +44,7 @@ HELP_DESCRIPTIONS = {
     "guildgamestats": "Admin: show aggregated server game stats.",
     "role": "Admin: toggle a Discord role on a member.",
     "xprate": "Admin: show passive XP/min rates.",
+    "boostall": "Admin: give all non-bot members an XP-rate boost for a duration.",
     "setxp": "Admin: set total XP for users or roles.",
     "adjust": "Admin: add or subtract XP from a user.",
 }

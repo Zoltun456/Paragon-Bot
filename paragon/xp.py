@@ -203,6 +203,7 @@ async def grant_fixed_boost(
     minutes: int,
     source: str = "activity",
     reward_seed_xp: int | float = 0,
+    persist: bool = True,
 ) -> dict:
     """
     Grant an explicit temporary XP/min boost.
@@ -230,7 +231,8 @@ async def grant_fixed_boost(
         pct=float(pct),
         minutes=int(minutes),
     )
-    await save_data()
+    if persist:
+        await save_data()
 
     prestige = int(u.get("prestige", 0))
     total_mult = prestige_multiplier(prestige) * _actual_boost_multiplier(u, now=now)

@@ -8,6 +8,7 @@ from .stats_store import record_xp_change
 from .xp import (
     apply_xp_change,
     _compute_level_from_total_xp,
+    grant_fixed_boost,
     get_gain_state,
 )
 from .roles import sync_level_roles, enforce_level6_exclusive, announce_level_up
@@ -126,6 +127,59 @@ class AdminCog(commands.Cog):
                 await ctx.send("\n".join(chunk))
         else:
             await ctx.reply(msg)
+
+    @commands.command(name="boostall")
+    @owner_only()
+    async def boostall(self, ctx: commands.Context, percent: float, minutes: int):
+        """
+        Grant all non-bot members a temporary XP rate boost.
+        Usage: !boostall <percent> <minutes>
+        Example: !boostall 25 60  -> +25% XP/min for 60 minutes to everyone
+        """
+        pct_raw = float(percent)
+        mins = int(minutes)
+
+        if pct_raw <= 0:
+            await ctx.reply("Percent must be greater than 0.")
+            return
+        if pct_raw > 500:
+            await ctx.reply("Percent is too high. Use a value between 0 and 500.")
+            return
+        if mins < 1 or mins > 1440:
+            await ctx.reply("Minutes must be between 1 and 1440.")
+            return
+
+        members = [m for m in ctx.guild.members if not m.bot]
+        if not members:
+            await ctx.reply("No eligible non-bot members found.")
+            return
+
+        pct_decimal = pct_raw / 100.0
+        source = f"admin boostall by {ctx.author.id}"
+        applied = 0
+        failed = 0
+
+        for m in members:
+            try:
+                await grant_fixed_boost(
+                    m,
+                    pct=pct_decimal,
+                    minutes=mins,
+                    source=source,
+                    persist=False,
+                )
+                applied += 1
+            except Exception:
+                failed += 1
+
+        await save_data()
+
+        msg = (
+            f"Applied **+{pct_raw:g}% XP/min** for **{mins}m** to **{applied}** member(s)."
+        )
+        if failed:
+            msg += f" Failed: **{failed}**."
+        await ctx.reply(msg)
 
     @commands.command(name="setxp")
     @owner_only()

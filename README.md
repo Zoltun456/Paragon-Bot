@@ -153,6 +153,7 @@ It provides:
 ### Admin
 - `!role @user @role` (toggle role)
 - `!xprate [@user ...]`
+- `!boostall <percent> <minutes>` (grant all non-bot members a temporary XP-rate boost)
 - `!setxp <targets...> <xp>`
 - `!adjust @user <+amount|-amount>`
 
