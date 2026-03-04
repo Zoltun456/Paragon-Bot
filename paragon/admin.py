@@ -1,0 +1,313 @@
+from typing import Optional, Union, Iterable
+import discord
+from discord.ext import commands
+
+from .config import BASE_XP_PER_MINUTE
+from .storage import _gdict, _udict, save_data
+from .stats_store import record_xp_change
+from .xp import (
+    apply_xp_change,
+    level_progress,
+    _total_xp_to_reach_level,
+    _compute_level_from_total_xp,
+    get_gain_state,
+)
+from .roles import sync_level_roles, enforce_level6_exclusive, announce_level_up, sync_all_roles
+from .ownership import owner_only
+
+# ---- Helpers ----
+def _set_member_xp_fields(member: discord.Member, xp_amount: int, *, source: str = "admin setxp"):
+        u = _udict(member.guild.id, member.id)
+        old_level = int(u.get("level", 1))
+        old_xp = float(u.get("xp_f", u.get("xp", 0)))
+
+        u["xp_f"] = float(xp_amount)
+        u["xp"] = int(xp_amount)
+        u["level"] = _compute_level_from_total_xp(int(xp_amount))
+        delta = float(xp_amount) - old_xp
+        if delta != 0.0:
+            record_xp_change(member.guild.id, member.id, delta, source=source)
+        return old_level, u["level"]
+
+class AdminCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    @commands.command(name="role")
+    @owner_only()
+    async def role(self, ctx: commands.Context, member: discord.Member, role: discord.Role):
+        """
+        Adds or removes a role from a member.
+        Usage: !role @user @role
+        - Toggles the role: adds if missing, removes if present.
+        """
+
+        try:
+            # Prevent the bot from editing roles above its own
+            if role >= ctx.guild.me.top_role:
+                await ctx.reply("⚠️ I can't manage that role — it’s higher than my top role.")
+                return
+
+            # Toggle role
+            if role in member.roles:
+                await member.remove_roles(role, reason=f"Removed by {ctx.author}")
+                await ctx.reply(f"✅ Removed **{role.name}** from **{member.display_name}**.")
+            else:
+                await member.add_roles(role, reason=f"Added by {ctx.author}")
+                await ctx.reply(f"✅ Added **{role.name}** to **{member.display_name}**.")
+
+        except discord.Forbidden:
+            await ctx.reply("❌ Missing permission to manage roles or edit that user.")
+        except discord.HTTPException as e:
+            await ctx.reply(f"⚠️ Discord API error: {e}")
+        except Exception as e:
+            await ctx.reply(f"❌ Unexpected error: {type(e).__name__}: {e}")
+
+
+    @commands.command(name="xprate")
+    @owner_only()
+    ## @commands.has_permissions(administrator=True)
+    async def xprate(self, ctx: commands.Context, member: discord.Member = None):
+        """
+        Show passive XP/min gain rate(s).
+        - !xprate           -> list all current guild members' rates
+        - !xprate @user     -> show that user's rate only
+        Uses live XP engine math (prestige + active boosts + compression mode, if enabled).
+        """
+        async def rate_for(m: discord.Member) -> tuple[float, int, float, int]:
+            u = _udict(ctx.guild.id, m.id)
+            prestige = int(u.get("prestige", 0))
+            st = await get_gain_state(m)
+            rate = float(st.get("rate_per_min", BASE_XP_PER_MINUTE))
+            p_mult = float(st.get("prestige_multiplier", 1.0))
+            boost_count = len(st.get("boosts", []))
+            return rate, prestige, p_mult, boost_count
+
+        # Single user
+        if member is not None:
+            if member.bot:
+                await ctx.reply("Bots do not earn XP.")
+                return
+            rate, p, p_mult, n_boosts = await rate_for(member)
+            await ctx.reply(
+                f"**{member.display_name}** — Prestige **{p}** (x{p_mult:.3f}) | "
+                f"Active boosts: **{n_boosts}** | **{rate:.3f} XP/min**"
+            )
+            return
+
+        # All users (current guild members only, no bots)
+        rows = []
+        for m in ctx.guild.members:
+            if m.bot: 
+                continue
+            rate, p, p_mult, n_boosts = await rate_for(m)
+            rows.append((rate, p, p_mult, n_boosts, m.display_name))
+
+        if not rows:
+            await ctx.reply("No human members found.")
+            return
+
+        rows.sort(key=lambda t: (-t[0], t[4].lower()))
+        lines = [f"📈 **Passive XP Rates** (BASE={BASE_XP_PER_MINUTE:g}, live prestige+boost math)"]
+        for rate, p, p_mult, n_boosts, name in rows:
+            lines.append(f"- **{name}** — P{p} (x{p_mult:.3f}), boosts:{n_boosts} → {rate:.3f} XP/min")
+        # Avoid overly long messages by chunking if needed
+        msg = "\n".join(lines)
+        if len(msg) > 1900:
+            # crude chunking
+            chunk = []
+            total_sent = 0
+            for line in lines:
+                if sum(len(x) + 1 for x in chunk) + len(line) > 1900:
+                    await ctx.send("\n".join(chunk))
+                    total_sent += 1
+                    chunk = [line]
+                else:
+                    chunk.append(line)
+            if chunk:
+                await ctx.send("\n".join(chunk))
+        else:
+            await ctx.reply(msg)
+
+    @commands.command(name="inactiveloss", aliases=["inactivexp"])
+    @owner_only()
+    async def inactiveloss(self, ctx: commands.Context, mode: Optional[str] = None):
+        """
+        Toggle or set inactive XP loss for this server.
+        Usage:
+          !inactiveloss            -> show current state
+          !inactiveloss on         -> enable inactive loss
+          !inactiveloss off        -> disable inactive loss
+          !inactiveloss toggle     -> flip the current state
+        """
+        g = _gdict(ctx.guild.id)
+        settings = g.get("settings") or {}
+        if "inactive_loss_enabled" not in settings:
+            settings["inactive_loss_enabled"] = True
+        g["settings"] = settings
+
+        current = bool(settings["inactive_loss_enabled"])
+
+        if mode is None:
+            state = "ENABLED" if current else "DISABLED"
+            await ctx.reply(f"Inactive XP loss is currently **{state}**. Use `!inactiveloss on|off|toggle`.")
+            return
+
+        m = mode.lower()
+        if m in ("on", "enable", "enabled"):
+            settings["inactive_loss_enabled"] = True
+        elif m in ("off", "disable", "disabled"):
+            settings["inactive_loss_enabled"] = False
+        elif m in ("toggle", "flip", "switch"):
+            settings["inactive_loss_enabled"] = not current
+        else:
+            await ctx.reply("Usage: `!inactiveloss [on|off|toggle]`")
+            return
+
+        await save_data()
+        new_state = "ENABLED" if settings["inactive_loss_enabled"] else "DISABLED"
+        await ctx.reply(f"✅ Inactive XP loss is now **{new_state}**.")
+
+    @commands.command(name="syncroles")
+    @owner_only()
+    async def syncroles(self, ctx):
+        g = _gdict(ctx.guild.id); users = g.get("users", {})
+        updated = 0
+        for uid_str, u in users.items():
+            m = ctx.guild.get_member(int(uid_str))
+            if not m or m.bot: continue
+            await sync_level_roles(m, int(u.get("level", 1))); updated += 1
+        await enforce_level6_exclusive(ctx.guild)
+        await ctx.reply(f"Synced roles for {updated} user(s).")
+
+    @commands.command(name="migrate")
+    @owner_only()
+    async def migrate(self, ctx, mode: str = "flat3"):
+        if mode.lower().strip() != "flat3":
+            await ctx.reply("Only `flat3` is supported. Example: `!migrate flat3`"); return
+        g = _gdict(ctx.guild.id); users = g.get("users", {})
+        target_level = 3
+        target_xp = _total_xp_to_reach_level(target_level)
+        changed = 0
+        for uid_str, u in users.items():
+            old_xp = float(u.get("xp_f", u.get("xp", 0)))
+            u["xp_f"] = float(target_xp); u["xp"] = int(target_xp); u["level"] = target_level
+            delta = float(target_xp) - old_xp
+            if delta != 0.0:
+                try:
+                    uid = int(uid_str)
+                except Exception:
+                    uid = 0
+                if uid > 0:
+                    record_xp_change(ctx.guild.id, uid, delta, source="admin migrate flat3")
+            changed += 1
+        await save_data()
+        await sync_all_roles(ctx.guild)
+        await ctx.reply(f"Flattened {changed} user(s) to **Level 3** (XP {target_xp}) and synced roles.")
+
+    @commands.command(name="setxp")
+    @owner_only()
+    async def setxp(self, ctx: commands.Context,
+                    targets: commands.Greedy[Union[discord.Member, discord.Role]],
+                    xp_amount: int):
+        """
+        Set XP for one or more members. Supports user mentions and role mentions.
+        Examples:
+          !setxp @user 3000
+          !setxp @Role 3000
+          !setxp @everyone 3000
+          !setxp @user1 @user2 1500
+        """
+        xp_amount = max(0, int(xp_amount))
+
+        # Resolve targets -> concrete members
+        members: set[discord.Member] = set()
+        for t in targets:
+            if isinstance(t, discord.Member):
+                members.add(t)
+            elif isinstance(t, discord.Role):
+                # includes @everyone (guild.default_role)
+                members.update(t.members)
+
+        # If nothing parsed (e.g., user forgot a mention), default to self
+        if not members:
+            if isinstance(ctx.author, discord.Member):
+                members.add(ctx.author)
+            else:
+                await ctx.reply("No valid targets. Mention users or roles, e.g. `!setxp @everyone 3000`.")
+                return
+
+        updated = 0
+        leveled_up: list[tuple[discord.Member, int]] = []
+
+        for m in members:
+            old_level, new_level = _set_member_xp_fields(m, xp_amount)
+            if new_level > old_level:
+                leveled_up.append((m, new_level))
+            updated += 1
+            # Optional: throttle extremely large batches to be nice to rate limits.
+
+        await save_data()
+
+        # Sync roles and (optionally) announce
+        # For bulk operations, consider suppressing announcements to avoid spam.
+        for m, new_level in leveled_up:
+            try:
+                await announce_level_up(m, new_level)
+            except Exception:
+                pass
+        for m in members:
+            try:
+                u = _udict(ctx.guild.id, m.id)
+                await sync_level_roles(m, int(u.get("level", 1)))
+            except Exception:
+                pass
+
+        await enforce_level6_exclusive(ctx.guild)
+        await ctx.reply(f"✅ Set XP for **{updated}** member(s) → **{xp_amount}**.")
+
+    @commands.command(name="setlevel")
+    @owner_only()
+    async def setlevel(self, ctx, member: discord.Member, level: int, xp_into: int = 0):
+        level = max(1, min(6, int(level)))
+        base_total = _total_xp_to_reach_level(level)
+        need = level_progress(base_total)[2]
+        xp_into = max(0, min(need, int(xp_into)))
+        total_xp = base_total + xp_into
+        u = _udict(ctx.guild.id, member.id); old = int(u.get("level", 1))
+        old_xp = float(u.get("xp_f", u.get("xp", 0)))
+        u["xp_f"] = float(total_xp); u["xp"] = int(total_xp); u["level"] = _compute_level_from_total_xp(total_xp)
+        delta = float(total_xp) - old_xp
+        if delta != 0.0:
+            record_xp_change(ctx.guild.id, member.id, delta, source="admin setlevel")
+        await save_data()
+        if u["level"] != old and u["level"] > old:
+            await announce_level_up(member, u["level"])
+        await sync_level_roles(member, u["level"]); await enforce_level6_exclusive(ctx.guild)
+        lvl, into, need = level_progress(total_xp)
+        await ctx.reply(f"Set {member.display_name} → Level {lvl}, {into}/{need} XP (Total {total_xp}).")
+
+    @commands.command(name="adjust")
+    @owner_only()
+    async def adjust(self, ctx, member: discord.Member, delta: str):
+        s = delta.strip().replace(",", "")
+        if not (s.startswith("+") or s.startswith("-")):
+            await ctx.reply("Please include a sign on the amount, e.g. `+100` or `-15`."); return
+        try: delta_xp = int(s)
+        except ValueError:
+            await ctx.reply("That amount isn’t a valid number. Use `+100` or `-15`."); return
+        if delta_xp == 0:
+            await ctx.reply("No change (amount is 0)."); return
+        changed = await apply_xp_change(member, delta_xp, source="admin adjust")
+        if changed:
+            old, new = changed
+            if new > old: await announce_level_up(member, new)
+            await sync_level_roles(member, new)
+        else:
+            u = _udict(ctx.guild.id, member.id)
+            await sync_level_roles(member, int(u.get("level", 1)))
+        await enforce_level6_exclusive(ctx.guild)
+        u = _udict(ctx.guild.id, member.id)
+        total = int(u.get("xp_f", u.get("xp", 0))); lvl, into, need = level_progress(total)
+        sign = "+" if delta_xp > 0 else ""
+        await ctx.reply(f"Adjusted {member.display_name} by **{sign}{delta_xp} XP**. Now: Level {lvl} {into}/{need} (Total {total}).")

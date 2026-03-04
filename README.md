@@ -1,0 +1,188 @@
+# Paragon Bot
+
+Paragon is a Discord XP/game bot with persistent per-guild storage.
+
+It provides:
+- Passive XP gain
+- XP boosts and prestige progression
+- Voice utilities
+- Multiple games (Wordle, Anagram, Blackjack, Coinflip, Lotto, Roulette, Surprise drops)
+- User and guild game statistics
+- Owner/admin management commands
+
+## Runtime Notes
+
+- Default command prefix: `!` (configurable will come later)
+- Data is stored per guild in `paragon_data/<guild_id>.db`
+- If cloning, bot requires `DISCORD_TOKEN` in an `.env` that has proper permissions set in Discord's dev portal
+
+## Command Reference (By Cog)
+
+`Admin` below means elevated access for that command (owner/admin checks in code).  
+`Non-Admin` means regular members can use it.
+
+## CoreCog
+
+### Non-Admin
+- `!re`
+- `!rank [@member]` (aliases: `!xp`, `!level`)
+- `!leaderboard [limit]` (aliases: `!lb`, `!xps`)
+- `!boosts [@member]` (aliases: `!rate`, `!mult`)
+
+### Admin
+- None
+
+## WordleCog
+
+### Non-Admin
+- `!wordle [guess]` (aliases: `!w`, `!wd`)
+
+### Admin
+- `!resetwordle`
+
+## CoinFlipCog
+
+### Non-Admin
+- `!cf <amount>` (alias: `!coinflip`)
+- `!cf accept [@challenger]`
+- `!cf cancel`
+
+### Admin
+- None
+
+## RouletteCog
+
+### Non-Admin
+- `!roulette @user` (alias: `!r`)
+
+### Admin
+- None
+
+## SurpriseCog
+
+### Non-Admin
+- `!claim`
+
+### Admin
+- `!claimnow`
+
+## AnagramCog
+
+### Non-Admin
+- `!anagram [guess]` (alias: `!a`)
+
+### Admin
+- None
+
+## ThanksCog
+
+### Non-Admin
+- `!thanks @user` (alias: `!thx`)
+
+### Admin
+- None
+
+## LottoCog
+
+### Non-Admin
+- `!lotto [ticket_count]` (alias: `!l`)
+- `!lotto @user` to inspect ticket count
+
+### Admin
+- `!poplatto` (force draw)
+- `!lottotoggle`
+
+## PermShieldCog
+
+### Non-Admin
+- `!permshield [minutes|@user]` (alias: `!ps`)
+
+### Admin
+- `!psset @user <minutes|off|clear>`
+
+## XPShieldCog
+
+### Non-Admin
+- `!xpshield [minutes|@user]` (alias: `!xs`)
+
+### Admin
+- None
+
+## PrestigeCog
+
+### Non-Admin
+- `!prestige [@self]` (alias: `!p`)
+
+### Admin
+- `!setp <amount> @user`
+
+## BlackjackCog
+
+### Non-Admin
+- `!blackjack [arg]` (alias: `!bj`)
+  - Common use:
+  - `!bj` (open/show table state)
+  - `!bj <amount|all>` (set bet)
+  - `!bj hit`
+  - `!bj stand`
+  - `!bj dd` / `!bj doubledown`
+  - `!bj surrender`
+  - `!bj split`
+
+### Admin
+- `!bjreset`
+- `!bjdebug`
+- `!bjstate`
+- `!bjintents`
+
+## VoiceCog
+
+### Non-Admin
+- `!join`
+- `!leave` (aliases: `!disconnect`, `!dc`)
+
+### Admin
+- `!voicehealth`
+
+## StatsCog
+
+### Non-Admin
+- `!gamestats` (aliases: `!stats`, `!mystats`) for your own stats
+
+### Admin
+- `!gamestats @user` (view someone else)
+- `!guildgamestats` (alias: `!serverstats`)
+
+## AdminCog
+
+### Non-Admin
+- None
+
+### Admin
+- `!role @user @role` (toggle role)
+- `!xprate [@user ...]`
+- `!inactiveloss <on|off>` (alias: `!inactivexp`)
+- `!syncroles`
+- `!migrate flat3`
+- `!setxp <targets...> <xp>`
+- `!setlevel @user <level> [xp_into]`
+- `!adjust @user <+amount|-amount>`
+
+## Loaded Cogs
+
+Current entrypoint (`Paragon.py`) loads:
+- `CoreCog`
+- `WordleCog`
+- `CoinFlipCog`
+- `RouletteCog`
+- `SurpriseCog`
+- `AnagramCog`
+- `ThanksCog`
+- `LottoCog`
+- `PermShieldCog`
+- `XPShieldCog`
+- `PrestigeCog`
+- `BlackjackCog`
+- `VoiceCog`
+- `StatsCog`
+- `AdminCog`
