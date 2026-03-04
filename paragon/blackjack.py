@@ -29,6 +29,7 @@ SUITS = ["♠", "♥", "♦", "♣"]
 RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
 
 EMOJI_DEAL = "▶️"
+EMOJI_ALL_IN = "💵"
 EMOJI_HIT = "🟩"
 EMOJI_STAND = "🟥"
 EMOJI_DD = "2️⃣"
@@ -37,6 +38,10 @@ EMOJI_SPLIT = "✂️"
 
 # Accept both unicode and the Discord alias for the play arrow
 DEAL_EMOJIS = {"▶", "▶️", "arrow_forward"}
+ALL_IN_EMOJIS = {"💵", "dollar"}
+
+MESSAGE_RETENTION_SECONDS = 24 * 60 * 60
+MESSAGE_CLEANUP_INTERVAL_SECONDS = 5 * 60
 
 # Map normalized emoji -> action
 ACTION_EMOJI_MAP = {
@@ -102,14 +107,15 @@ def _table(gid: int) -> dict:
     g = _gdict(gid)
     st = g.setdefault("blackjack", {})
     st.setdefault("dealing_lock", False)
-    st.setdefault("active", False)
+    st.setdefault("active", True)  # legacy flag; table is always available
     st.setdefault("players", {})  # uid -> per-player dict (see below)
     st.setdefault("shoe", [])
     st.setdefault("dealer", [])
-    st.setdefault("phase", "idle")  # idle|betting|dealing|acting|dealer|payout
+    st.setdefault("phase", "betting")  # betting|dealing|acting|dealer|payout
     st.setdefault("turn_idx", 0)
     st.setdefault("channel_id", 0)
     st.setdefault("last_action_ts", 0)
+    st.setdefault("last_cleanup_ts", 0)
     st.setdefault("turn_started_ts", 0)
     st.setdefault("deal_msg_id", 0)     # current deal-button message id
     st.setdefault("action_msg_id", 0)   # current action prompt id
@@ -133,9 +139,10 @@ def in_right_channel(ctx: commands.Context) -> bool:
 # =========================
 class BlackjackCog(commands.Cog):
     """
-    Blackjack in one channel, always open:
+    Blackjack in one channel, always available:
       - `!bj <amount>` sets your bet.
       - React **▶️** on the *deal button* to start the hand.
+      - React **💵** on the deal button for all-in (`!bj all`).
       - On your turn, react: 🟩 Hit • 🟥 Stand • 2️⃣ Double • 🏳️ Surrender • ✂️ Split (when legal)
 
     Split rules:
@@ -147,9 +154,9 @@ class BlackjackCog(commands.Cog):
     Debug:
       !bjdebug on/off/toggle, !bjstate, !bjintents
 
-    Anti-stall:
+    Housekeeping:
+      - Blackjack-channel messages older than 24 hours are cleared.
       - Acting player inactivity >120s: removed/refunded.
-      - Table idle >5m: closed automatically.
     """
 
     def __init__(self, bot: commands.Bot):
@@ -294,6 +301,132 @@ class BlackjackCog(commands.Cog):
     # =========================
     # Deal button helpers
     # =========================
+    async def _resolve_member(self, guild: discord.Guild, user_id: int) -> Optional[discord.Member]:
+        member = guild.get_member(user_id)
+        if member:
+            return member
+        try:
+            return await guild.fetch_member(user_id)
+        except Exception:
+            return None
+
+    async def _cleanup_old_blackjack_messages(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+        *,
+        force: bool = False,
+    ):
+        st = _table(guild.id)
+        now = now_ts()
+        last_cleanup = int(st.get("last_cleanup_ts", 0))
+        if not force and (now - last_cleanup) < MESSAGE_CLEANUP_INTERVAL_SECONDS:
+            return
+
+        cutoff_ts = discord.utils.utcnow().timestamp() - MESSAGE_RETENTION_SECONDS
+        deleted_ids: set[int] = set()
+        try:
+            async for msg in channel.history(limit=None, oldest_first=True):
+                if msg.created_at.timestamp() >= cutoff_ts:
+                    break
+                if msg.pinned:
+                    continue
+                try:
+                    await msg.delete()
+                    deleted_ids.add(msg.id)
+                except (discord.NotFound, discord.Forbidden):
+                    continue
+                except discord.HTTPException:
+                    await asyncio.sleep(0.2)
+                    continue
+        except (discord.Forbidden, discord.HTTPException):
+            # Missing permissions or transient API errors; try again on next cycle.
+            st["last_cleanup_ts"] = now
+            await save_data()
+            return
+
+        if st.get("deal_msg_id", 0) in deleted_ids:
+            st["deal_msg_id"] = 0
+        if st.get("action_msg_id", 0) in deleted_ids:
+            st["action_msg_id"] = 0
+
+        st["last_cleanup_ts"] = now
+        await save_data()
+
+    async def _set_player_bet(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+        member: discord.Member,
+        raw_amount: str,
+    ) -> bool:
+        st = _table(guild.id)
+        if st["phase"] not in ("betting", "idle"):
+            await channel.send("Bets are locked for the current hand.")
+            return False
+
+        p = self._player(guild.id, member.id)
+        u = _udict(guild.id, member.id)
+        xp_cur = int(u.get("xp_f", u.get("xp", 0)))
+        locked_cur = int(p.get("locked", 0))
+        spendable = xp_cur + locked_cur
+
+        a = raw_amount.lower().strip()
+        if a == "all":
+            # All-in includes currently reserved bet XP.
+            amt = min(spendable, BJ_MAX_BET)
+            if amt < BJ_MIN_BET:
+                await channel.send(
+                    f"All-in for **{member.display_name}** would be **{amt} XP**, below the minimum bet (**{BJ_MIN_BET} XP**)."
+                )
+                return False
+            note = " (all-in)"
+        elif a.isdigit():
+            amt = int(a)
+            note = ""
+            if amt < BJ_MIN_BET or amt > BJ_MAX_BET:
+                await channel.send(f"Bet must be between **{BJ_MIN_BET}** and **{BJ_MAX_BET}** XP.")
+                return False
+            if spendable < amt:
+                await channel.send(
+                    f"**{member.display_name}** only has **{spendable} XP** available and cannot bet **{amt} XP**."
+                )
+                return False
+        else:
+            await channel.send("Bet must be a number or `all`.")
+            return False
+
+        # Reserve/deduct bet so it cannot be spent elsewhere.
+        reserve_delta = locked_cur - amt
+        if reserve_delta != 0:
+            await self._apply_member_xp(
+                guild,
+                member,
+                reserve_delta,
+                sync_level=False,
+                source="blackjack ante",
+            )
+
+        p["bet"] = amt
+        p["locked"] = amt
+        p["status"] = "betting"
+        p["in_table"] = True
+        record_game_fields(
+            guild.id,
+            member.id,
+            "blackjack",
+            bets_set=1,
+            stake_set_total=amt,
+        )
+        self._touch(st)
+        st["phase"] = "betting"
+        await save_data()
+
+        await self._broadcast(channel, f"💰 **{member.display_name}** set bet **{amt} XP**{note}.")
+        if not st.get("deal_msg_id"):
+            await self._post_new_deal_button(guild, channel)
+        return True
+
     async def _expire_old_deal_button(self, guild: discord.Guild, channel: discord.TextChannel):
         st = _table(guild.id); old_id = st.get("deal_msg_id")
         if not old_id: return
@@ -309,9 +442,14 @@ class BlackjackCog(commands.Cog):
 
     async def _post_new_deal_button(self, guild: discord.Guild, channel: discord.TextChannel):
         st = _table(guild.id)
-        m = await channel.send("🪙 **Place bets** with `!bj <amount>`; then react **▶️** here to deal the next hand.")
+        m = await channel.send(
+            "🪙 **Place bets** with `!bj <amount>` (or `!bj all`). "
+            "Then react **▶️** to deal, or **💵** to go all-in."
+        )
         st["deal_msg_id"] = m.id
         try: await m.add_reaction(EMOJI_DEAL)
+        except Exception: pass
+        try: await m.add_reaction(EMOJI_ALL_IN)
         except Exception: pass
         await save_data()
 
@@ -325,6 +463,7 @@ class BlackjackCog(commands.Cog):
             await ctx.reply("Run this in the Blackjack channel."); return
 
         st = _table(ctx.guild.id)
+        await self._expire_old_deal_button(ctx.guild, ctx.channel)
         refunds = []
         for uid_str, p in list(st.get("players", {}).items()):
             uid = int(uid_str)
@@ -342,7 +481,7 @@ class BlackjackCog(commands.Cog):
                 "in_table": True, "natural_bj": False,
             })
         st.update({
-            "active": False, "phase": "idle", "players": {}, "dealer": [],
+            "active": True, "phase": "betting", "players": {}, "dealer": [],
             "shoe": [], "turn_idx": 0, "dealing_lock": False,
             "last_action_ts": 0, "turn_started_ts": 0,
             "deal_msg_id": 0, "action_msg_id": 0,
@@ -353,7 +492,8 @@ class BlackjackCog(commands.Cog):
             await ctx.send("\n".join(lines))
         else:
             await ctx.send("♻️ **Blackjack reset by admin.** No active bets to refund.")
-        await ctx.send("🛑 **Blackjack table closed.** Use `!bj` to open again.")
+        await ctx.send("♻️ **Blackjack table reset. Betting is open.**")
+        await self._post_new_deal_button(ctx.guild, ctx.channel)
 
     @commands.command(name="blackjack", aliases=["bj"])
     async def blackjack(self, ctx: commands.Context, arg: Optional[str] = None):
@@ -362,12 +502,7 @@ class BlackjackCog(commands.Cog):
         configured_channel_id = int(get_blackjack_channel_id(ctx.guild.id) or 0)
         st["channel_id"] = configured_channel_id if configured_channel_id > 0 else ctx.channel.id
 
-        # Open table
-        if not st["active"]:
-            st["active"] = True; st["phase"] = "betting"; self._touch(st); await save_data()
-            await self._broadcast(ctx, "🃏 **Blackjack is open!** Use `!bj <amount>` to set your bet.")
-            await self._post_new_deal_button(ctx.guild, ctx.channel)
-            return
+        await self._cleanup_old_blackjack_messages(ctx.guild, ctx.channel)
 
         if arg is None:
             await self._show_table(ctx)
@@ -381,62 +516,7 @@ class BlackjackCog(commands.Cog):
 
         # set bet (supports numbers and 'all')
         if a.isdigit() or a == "all":
-            if st["phase"] not in ("betting", "idle"):
-                await ctx.reply("Bets are locked for the current hand.")
-                return
-
-            p = self._player(ctx.guild.id, ctx.author.id)
-            u = _udict(ctx.guild.id, ctx.author.id)
-            xp_cur = int(u.get("xp_f", u.get("xp", 0)))
-            locked_cur = int(p.get("locked", 0))
-            spendable = xp_cur + locked_cur
-
-            if a == "all":
-                # All-in includes currently reserved bet XP.
-                amt = min(spendable, BJ_MAX_BET)
-                if amt < BJ_MIN_BET:
-                    await ctx.reply(f"All-in would be **{amt} XP**, which is below the minimum bet (**{BJ_MIN_BET} XP**).")
-                    return
-                note = " (all-in)"
-            else:
-                amt = int(a)
-                note = ""
-                if amt < BJ_MIN_BET or amt > BJ_MAX_BET:
-                    await ctx.reply(f"Bet must be between **{BJ_MIN_BET}** and **{BJ_MAX_BET}** XP.")
-                    return
-                if spendable < amt:
-                    await ctx.reply(f"You only have **{spendable} XP** available for betting, cannot bet **{amt} XP**.")
-                    return
-
-            # Reserve/deduct bet so it cannot be spent elsewhere.
-            reserve_delta = locked_cur - amt
-            if reserve_delta != 0:
-                await self._apply_member_xp(
-                    ctx.guild,
-                    ctx.author,
-                    reserve_delta,
-                    sync_level=False,
-                    source="blackjack ante",
-                )
-
-            p["bet"] = amt
-            p["locked"] = amt
-            p["status"] = "betting"
-            p["in_table"] = True
-            record_game_fields(
-                ctx.guild.id,
-                ctx.author.id,
-                "blackjack",
-                bets_set=1,
-                stake_set_total=amt,
-            )
-            self._touch(st)
-            st["phase"] = "betting"
-            await save_data()
-
-            await self._broadcast(ctx, f"💰 **{ctx.author.display_name}** set bet **{amt} XP**{note}.")
-            if not _table(ctx.guild.id).get("deal_msg_id"):
-                await self._post_new_deal_button(ctx.guild, ctx.channel)
+            await self._set_player_bet(ctx.guild, ctx.channel, ctx.author, a)
             return
 
         if a in ("deal", "start"):
@@ -484,11 +564,9 @@ class BlackjackCog(commands.Cog):
     # =========================
     async def _show_table(self, ctx: commands.Context):
         st = _table(ctx.guild.id)
-        if not st["active"]:
-            await ctx.reply("No active table."); return
         seated = self._seated_order(st, ctx.guild)
         dealer = st.get("dealer", [])
-        lines = ["**Table**"]
+        lines = ["**Blackjack Table**"]
         if not dealer:
             lines.append("Dealer: (none)")
         elif st.get("phase") in ("dealing", "acting"):
@@ -516,6 +594,8 @@ class BlackjackCog(commands.Cog):
                 if p.get("doubled2"): tags.append("H2 DD")
             label = f" ({', '.join(tags)})" if tags else ""
             lines.append(f"- **{m.display_name}** bet **{p.get('bet',0)}**: {' | '.join(parts)}{label}")
+        if not seated:
+            lines.append("No seated players yet. Place a bet with `!bj <amount>` or `!bj all`.")
         await ctx.reply("\n".join(lines))
 
     # =========================
@@ -523,10 +603,9 @@ class BlackjackCog(commands.Cog):
     # =========================
     async def _begin_deal_core(self, guild: discord.Guild, channel: discord.TextChannel):
         st = _table(guild.id)
-        if not st["active"]:
-            st["active"] = True; st["phase"] = "betting"; await save_data()
-        if st.get("phase") != "betting":
-            await channel.send("A hand is already in progress or the table isn’t ready. Dealing only when bets are open."); return
+        if st.get("phase") not in ("betting", "idle"):
+            await channel.send("A hand is already in progress. Wait for payouts to finish."); return
+        st["phase"] = "betting"
         if st.get("dealing_lock"):
             await channel.send("Dealing is already starting… hang on."); return
 
@@ -1049,8 +1128,17 @@ class BlackjackCog(commands.Cog):
                 await self._dprint(guild, ch, "deal emoji accepted → begin deal")
                 try: await self._begin_deal_core(guild, ch)
                 except Exception as e: await self._dprint(guild, ch, f"_begin_deal_core error: {type(e).__name__}: {e}")
+            elif em_name in ALL_IN_EMOJIS or payload.emoji.name in ALL_IN_EMOJIS:
+                member = await self._resolve_member(guild, payload.user_id)
+                if not member or member.bot:
+                    return
+                await self._set_player_bet(guild, ch, member, "all")
             else:
-                await self._dprint(guild, ch, f"deal emoji not accepted: '{em_name}' not in {DEAL_EMOJIS}")
+                await self._dprint(
+                    guild,
+                    ch,
+                    f"deal emoji not accepted: '{em_name}' not in {DEAL_EMOJIS | ALL_IN_EMOJIS}",
+                )
             return
 
         # Action prompt
@@ -1109,27 +1197,13 @@ class BlackjackCog(commands.Cog):
     async def guard_loop(self):
         for guild in self.bot.guilds:
             st = _table(guild.id)
-            if not st.get("active"): continue
             fallback_channel_id = int(get_blackjack_channel_id(guild.id) or 0)
             ch = guild.get_channel(int(st.get("channel_id", 0) or fallback_channel_id))
             if not isinstance(ch, discord.TextChannel): continue
 
-            last = int(st.get("last_action_ts", 0))
-            if last and now_ts() - last > 5 * 60:
-                for uid_str, p in list(st.get("players", {}).items()):
-                    locked = int(p.get("locked", 0))
-                    if locked <= 0:
-                        continue
-                    member = guild.get_member(int(uid_str))
-                    if member:
-                        await self._apply_member_xp(guild, member, locked, source="blackjack refund")
-                st.update({
-                    "active": False, "phase": "idle", "players": {}, "dealer": [],
-                    "turn_idx": 0, "turn_started_ts": 0, "dealing_lock": False,
-                    "deal_msg_id": 0, "action_msg_id": 0
-                })
-                await save_data(); await ch.send("⏱️ **Blackjack table closed due to inactivity (5 minutes).**")
-                continue
+            await self._cleanup_old_blackjack_messages(guild, ch)
+            if st.get("phase") in ("betting", "idle") and not st.get("deal_msg_id"):
+                await self._post_new_deal_button(guild, ch)
 
             if st.get("phase") != "acting": continue
 
@@ -1152,11 +1226,12 @@ class BlackjackCog(commands.Cog):
 
                 if not any(x.get("in_table") for x in st["players"].values()):
                     st.update({
-                        "active": False, "phase": "idle", "players": {}, "dealer": [],
+                        "active": True, "phase": "betting", "players": {}, "dealer": [],
                         "turn_idx": 0, "turn_started_ts": 0, "dealing_lock": False,
                         "deal_msg_id": 0, "action_msg_id": 0
                     })
-                    await save_data(); await ch.send("🛑 **Blackjack table closed (no seated players).**")
+                    await save_data(); await ch.send("🪑 No active players remain. Betting is open for the next hand.")
+                    await self._post_new_deal_button(guild, ch)
                     continue
 
                 acting_ids = [uid for uid in self._seated_order(st, guild)

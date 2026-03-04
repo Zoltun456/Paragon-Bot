@@ -92,22 +92,6 @@ It provides:
 - `!poplatto` (force draw)
 - `!lottotoggle`
 
-## PermShieldCog
-
-### Non-Admin
-- `!permshield [minutes|@user]` (alias: `!ps`)
-
-### Admin
-- `!psset @user <minutes|off|clear>`
-
-## XPShieldCog
-
-### Non-Admin
-- `!xpshield [minutes|@user]` (alias: `!xs`)
-
-### Admin
-- None
-
 ## PrestigeCog
 
 ### Non-Admin
@@ -179,8 +163,6 @@ Current entrypoint (`Paragon.py`) loads:
 - `AnagramCog`
 - `ThanksCog`
 - `LottoCog`
-- `PermShieldCog`
-- `XPShieldCog`
 - `PrestigeCog`
 - `BlackjackCog`
 - `VoiceCog`

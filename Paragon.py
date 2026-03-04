@@ -9,7 +9,6 @@ from paragon.config import AUTHOR_USER_ID, COMMAND_PREFIX, TOKEN
 from paragon.core import CoreCog
 from paragon.game_stats import StatsCog
 from paragon.lotto import LottoCog
-from paragon.permshield import PermShieldCog
 from paragon.prestige import PrestigeCog
 from paragon.roulette import RouletteCog
 from paragon.storage import load_data
@@ -17,7 +16,6 @@ from paragon.surprise import SurpriseCog
 from paragon.thanks import ThanksCog
 from paragon.voice import VoiceCog
 from paragon.wordle import WordleCog
-from paragon.xpshield import XPShieldCog
 
 
 def create_bot() -> commands.Bot:
@@ -29,7 +27,7 @@ def create_bot() -> commands.Bot:
         voice_states=True,
         reactions=True,
     )
-    return commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
+    return commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 
 
 bot = create_bot()
@@ -49,8 +47,6 @@ def setup_cogs_sync() -> None:
     bot.add_cog(AnagramCog(bot))
     bot.add_cog(ThanksCog(bot))
     bot.add_cog(LottoCog(bot))
-    bot.add_cog(PermShieldCog(bot))
-    bot.add_cog(XPShieldCog(bot))
     bot.add_cog(PrestigeCog(bot))
     bot.add_cog(BlackjackCog(bot))
     bot.add_cog(VoiceCog(bot))

@@ -56,6 +56,75 @@ class CoreCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    def _is_admin_command(self, cmd: commands.Command) -> bool:
+        if cmd.cog_name == "AdminCog":
+            return True
+        for check in getattr(cmd, "checks", []):
+            module = getattr(check, "__module__", "")
+            if module.endswith(".ownership"):
+                return True
+        return False
+
+    def _format_help_entry(self, ctx: commands.Context, cmd: commands.Command) -> str:
+        usage = f"{ctx.clean_prefix}{cmd.name}"
+        if cmd.signature:
+            usage = f"{usage} {cmd.signature}"
+
+        summary = (cmd.short_doc or "No description available.").strip()
+        if cmd.aliases:
+            aliases = ", ".join(f"{ctx.clean_prefix}{a}" for a in cmd.aliases)
+            return f"`{usage}` - {summary} (aliases: {aliases})"
+        return f"`{usage}` - {summary}"
+
+    async def _send_help_chunks(self, ctx: commands.Context, lines: list[str]):
+        chunks: list[str] = []
+        current: list[str] = []
+        current_len = 0
+
+        for line in lines:
+            add_len = len(line) + 1
+            if current and (current_len + add_len) > 1900:
+                chunks.append("\n".join(current))
+                current = [line]
+                current_len = add_len
+            else:
+                current.append(line)
+                current_len += add_len
+
+        if current:
+            chunks.append("\n".join(current))
+
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                await ctx.reply(chunk)
+            else:
+                await ctx.send(chunk)
+
+    @commands.command(name="help")
+    async def help_command(self, ctx: commands.Context):
+        cmds = [c for c in self.bot.commands if not c.hidden]
+        cmds.sort(key=lambda c: c.name.lower())
+
+        general_cmds = [c for c in cmds if not self._is_admin_command(c)]
+        admin_cmds = [c for c in cmds if self._is_admin_command(c)]
+
+        lines = ["**Paragon Command Help**", "", "**General Commands**"]
+        if general_cmds:
+            for cmd in general_cmds:
+                lines.append(f"- {self._format_help_entry(ctx, cmd)}")
+        else:
+            lines.append("- No general commands found.")
+
+        lines.append("")
+        lines.append("**Admin Commands (owner-only)**")
+        if admin_cmds:
+            for cmd in admin_cmds:
+                lines.append(f"- {self._format_help_entry(ctx, cmd)}")
+        else:
+            lines.append("- No admin commands found.")
+
+        await self._send_help_chunks(ctx, lines)
+
     @commands.Cog.listener()
     async def on_ready(self):
         load_data()
