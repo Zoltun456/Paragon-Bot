@@ -24,13 +24,14 @@ It provides:
 ## CoreCog
 
 ### Non-Admin
+- `!help`
 - `!re`
 - `!rank [@member]` (aliases: `!xp`, `!level`)
 - `!leaderboard [limit]` (aliases: `!lb`, `!xps`)
 - `!boosts [@member]` (aliases: `!rate`, `!mult`)
 
 ### Admin
-- None
+- `!adminhelp`
 
 ## WordleCog
 
@@ -148,11 +149,7 @@ It provides:
 ### Admin
 - `!role @user @role` (toggle role)
 - `!xprate [@user ...]`
-- `!inactiveloss <on|off>` (alias: `!inactivexp`)
-- `!syncroles`
-- `!migrate flat3`
 - `!setxp <targets...> <xp>`
-- `!setlevel @user <level> [xp_into]`
 - `!adjust @user <+amount|-amount>`
 
 ## Loaded Cogs

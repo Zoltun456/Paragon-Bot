@@ -1,6 +1,6 @@
 # paragon/core.py
 # core v2
-from typing import Optional, Dict
+from typing import Optional
 import discord
 from discord.ext import commands, tasks
 
@@ -9,6 +9,44 @@ from .guild_setup import ensure_guild_setup
 from .storage import load_data, _gdict, _udict
 from .xp import apply_delta, get_gain_state
 from .roles import enforce_level6_exclusive
+from .ownership import owner_only
+
+HELP_DESCRIPTIONS = {
+    "help": "Show member-facing commands and usage.",
+    "adminhelp": "Show admin-only commands and usage.",
+    "re": "Quick bot responsiveness check.",
+    "rank": "Show total XP, current gain rate, and active boosts.",
+    "leaderboard": "Show top users by total XP.",
+    "boosts": "Show active XP boost breakdown for a user.",
+    "wordle": "Play Wordle (daily progression/guess command).",
+    "resetwordle": "Admin: reset the current Wordle session.",
+    "cf": "Start, accept, or cancel coinflip wagers.",
+    "roulette": "Challenge another user to roulette.",
+    "claim": "Claim the active surprise drop.",
+    "claimnow": "Admin: spawn a surprise drop immediately.",
+    "anagram": "Play the anagram phrase challenge.",
+    "thanks": "Send a thanks reward to another user.",
+    "lotto": "Buy lottery tickets or check pot and ticket counts.",
+    "poplatto": "Admin: force an immediate lottery draw.",
+    "lottotime": "Admin: view or set daily lottery draw time (ET).",
+    "lottotoggle": "Admin: enable or disable the lottery.",
+    "prestige": "Spend XP to increase your prestige tier.",
+    "setp": "Admin: set a user's prestige tier.",
+    "blackjack": "View table, place bets, and play blackjack.",
+    "bjreset": "Admin: reset blackjack table state and refunds.",
+    "bjdebug": "Admin: toggle blackjack debug logging.",
+    "bjstate": "Admin: print internal blackjack state.",
+    "bjintents": "Admin: show Discord intent flags.",
+    "join": "Join your current voice channel.",
+    "leave": "Disconnect the bot from voice.",
+    "voicehealth": "Admin: run voice system health checks.",
+    "gamestats": "Show per-user game stats and XP ledger.",
+    "guildgamestats": "Admin: show aggregated server game stats.",
+    "role": "Admin: toggle a Discord role on a member.",
+    "xprate": "Admin: show passive XP/min rates.",
+    "setxp": "Admin: set total XP for users or roles.",
+    "adjust": "Admin: add or subtract XP from a user.",
+}
 
 def _settings(gid: int) -> dict:
     g = _gdict(gid)
@@ -65,16 +103,30 @@ class CoreCog(commands.Cog):
                 return True
         return False
 
+    def _command_description(self, cmd: commands.Command) -> str:
+        mapped = HELP_DESCRIPTIONS.get(cmd.name)
+        if mapped:
+            return mapped
+        short = (cmd.short_doc or "").strip()
+        if short:
+            return short
+        return "No description set."
+
     def _format_help_entry(self, ctx: commands.Context, cmd: commands.Command) -> str:
         usage = f"{ctx.clean_prefix}{cmd.name}"
         if cmd.signature:
             usage = f"{usage} {cmd.signature}"
 
-        summary = (cmd.short_doc or "No description available.").strip()
+        summary = self._command_description(cmd)
         if cmd.aliases:
             aliases = ", ".join(f"{ctx.clean_prefix}{a}" for a in cmd.aliases)
             return f"`{usage}` - {summary} (aliases: {aliases})"
         return f"`{usage}` - {summary}"
+
+    def _sorted_visible_commands(self) -> list[commands.Command]:
+        cmds = [c for c in self.bot.commands if not c.hidden]
+        cmds.sort(key=lambda c: c.name.lower())
+        return cmds
 
     async def _send_help_chunks(self, ctx: commands.Context, lines: list[str]):
         chunks: list[str] = []
@@ -102,21 +154,30 @@ class CoreCog(commands.Cog):
 
     @commands.command(name="help")
     async def help_command(self, ctx: commands.Context):
-        cmds = [c for c in self.bot.commands if not c.hidden]
-        cmds.sort(key=lambda c: c.name.lower())
+        cmds = self._sorted_visible_commands()
+        normal_cmds = [c for c in cmds if (not self._is_admin_command(c)) or c.name == "adminhelp"]
 
-        general_cmds = [c for c in cmds if not self._is_admin_command(c)]
-        admin_cmds = [c for c in cmds if self._is_admin_command(c)]
-
-        lines = ["**Paragon Command Help**", "", "**General Commands**"]
-        if general_cmds:
-            for cmd in general_cmds:
+        lines = [
+            "**Paragon Command Help**",
+            "Admin tools are listed separately with `!adminhelp`.",
+            "",
+            "**Commands**",
+        ]
+        if normal_cmds:
+            for cmd in normal_cmds:
                 lines.append(f"- {self._format_help_entry(ctx, cmd)}")
         else:
-            lines.append("- No general commands found.")
+            lines.append("- No member commands found.")
 
-        lines.append("")
-        lines.append("**Admin Commands (owner-only)**")
+        await self._send_help_chunks(ctx, lines)
+
+    @commands.command(name="adminhelp")
+    @owner_only()
+    async def admin_help_command(self, ctx: commands.Context):
+        cmds = self._sorted_visible_commands()
+        admin_cmds = [c for c in cmds if self._is_admin_command(c)]
+
+        lines = ["**Paragon Admin Command Help**", ""]
         if admin_cmds:
             for cmd in admin_cmds:
                 lines.append(f"- {self._format_help_entry(ctx, cmd)}")

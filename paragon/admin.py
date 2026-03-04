@@ -1,18 +1,16 @@
-from typing import Optional, Union, Iterable
+from typing import Union
 import discord
 from discord.ext import commands
 
 from .config import BASE_XP_PER_MINUTE
-from .storage import _gdict, _udict, save_data
+from .storage import _udict, save_data
 from .stats_store import record_xp_change
 from .xp import (
     apply_xp_change,
-    level_progress,
-    _total_xp_to_reach_level,
     _compute_level_from_total_xp,
     get_gain_state,
 )
-from .roles import sync_level_roles, enforce_level6_exclusive, announce_level_up, sync_all_roles
+from .roles import sync_level_roles, enforce_level6_exclusive, announce_level_up
 from .ownership import owner_only
 
 # ---- Helpers ----
@@ -129,82 +127,6 @@ class AdminCog(commands.Cog):
         else:
             await ctx.reply(msg)
 
-    @commands.command(name="inactiveloss", aliases=["inactivexp"])
-    @owner_only()
-    async def inactiveloss(self, ctx: commands.Context, mode: Optional[str] = None):
-        """
-        Toggle or set inactive XP loss for this server.
-        Usage:
-          !inactiveloss            -> show current state
-          !inactiveloss on         -> enable inactive loss
-          !inactiveloss off        -> disable inactive loss
-          !inactiveloss toggle     -> flip the current state
-        """
-        g = _gdict(ctx.guild.id)
-        settings = g.get("settings") or {}
-        if "inactive_loss_enabled" not in settings:
-            settings["inactive_loss_enabled"] = True
-        g["settings"] = settings
-
-        current = bool(settings["inactive_loss_enabled"])
-
-        if mode is None:
-            state = "ENABLED" if current else "DISABLED"
-            await ctx.reply(f"Inactive XP loss is currently **{state}**. Use `!inactiveloss on|off|toggle`.")
-            return
-
-        m = mode.lower()
-        if m in ("on", "enable", "enabled"):
-            settings["inactive_loss_enabled"] = True
-        elif m in ("off", "disable", "disabled"):
-            settings["inactive_loss_enabled"] = False
-        elif m in ("toggle", "flip", "switch"):
-            settings["inactive_loss_enabled"] = not current
-        else:
-            await ctx.reply("Usage: `!inactiveloss [on|off|toggle]`")
-            return
-
-        await save_data()
-        new_state = "ENABLED" if settings["inactive_loss_enabled"] else "DISABLED"
-        await ctx.reply(f"✅ Inactive XP loss is now **{new_state}**.")
-
-    @commands.command(name="syncroles")
-    @owner_only()
-    async def syncroles(self, ctx):
-        g = _gdict(ctx.guild.id); users = g.get("users", {})
-        updated = 0
-        for uid_str, u in users.items():
-            m = ctx.guild.get_member(int(uid_str))
-            if not m or m.bot: continue
-            await sync_level_roles(m, int(u.get("level", 1))); updated += 1
-        await enforce_level6_exclusive(ctx.guild)
-        await ctx.reply(f"Synced roles for {updated} user(s).")
-
-    @commands.command(name="migrate")
-    @owner_only()
-    async def migrate(self, ctx, mode: str = "flat3"):
-        if mode.lower().strip() != "flat3":
-            await ctx.reply("Only `flat3` is supported. Example: `!migrate flat3`"); return
-        g = _gdict(ctx.guild.id); users = g.get("users", {})
-        target_level = 3
-        target_xp = _total_xp_to_reach_level(target_level)
-        changed = 0
-        for uid_str, u in users.items():
-            old_xp = float(u.get("xp_f", u.get("xp", 0)))
-            u["xp_f"] = float(target_xp); u["xp"] = int(target_xp); u["level"] = target_level
-            delta = float(target_xp) - old_xp
-            if delta != 0.0:
-                try:
-                    uid = int(uid_str)
-                except Exception:
-                    uid = 0
-                if uid > 0:
-                    record_xp_change(ctx.guild.id, uid, delta, source="admin migrate flat3")
-            changed += 1
-        await save_data()
-        await sync_all_roles(ctx.guild)
-        await ctx.reply(f"Flattened {changed} user(s) to **Level 3** (XP {target_xp}) and synced roles.")
-
     @commands.command(name="setxp")
     @owner_only()
     async def setxp(self, ctx: commands.Context,
@@ -266,27 +188,6 @@ class AdminCog(commands.Cog):
         await enforce_level6_exclusive(ctx.guild)
         await ctx.reply(f"✅ Set XP for **{updated}** member(s) → **{xp_amount}**.")
 
-    @commands.command(name="setlevel")
-    @owner_only()
-    async def setlevel(self, ctx, member: discord.Member, level: int, xp_into: int = 0):
-        level = max(1, min(6, int(level)))
-        base_total = _total_xp_to_reach_level(level)
-        need = level_progress(base_total)[2]
-        xp_into = max(0, min(need, int(xp_into)))
-        total_xp = base_total + xp_into
-        u = _udict(ctx.guild.id, member.id); old = int(u.get("level", 1))
-        old_xp = float(u.get("xp_f", u.get("xp", 0)))
-        u["xp_f"] = float(total_xp); u["xp"] = int(total_xp); u["level"] = _compute_level_from_total_xp(total_xp)
-        delta = float(total_xp) - old_xp
-        if delta != 0.0:
-            record_xp_change(ctx.guild.id, member.id, delta, source="admin setlevel")
-        await save_data()
-        if u["level"] != old and u["level"] > old:
-            await announce_level_up(member, u["level"])
-        await sync_level_roles(member, u["level"]); await enforce_level6_exclusive(ctx.guild)
-        lvl, into, need = level_progress(total_xp)
-        await ctx.reply(f"Set {member.display_name} → Level {lvl}, {into}/{need} XP (Total {total_xp}).")
-
     @commands.command(name="adjust")
     @owner_only()
     async def adjust(self, ctx, member: discord.Member, delta: str):
@@ -308,6 +209,6 @@ class AdminCog(commands.Cog):
             await sync_level_roles(member, int(u.get("level", 1)))
         await enforce_level6_exclusive(ctx.guild)
         u = _udict(ctx.guild.id, member.id)
-        total = int(u.get("xp_f", u.get("xp", 0))); lvl, into, need = level_progress(total)
+        total = int(u.get("xp_f", u.get("xp", 0)))
         sign = "+" if delta_xp > 0 else ""
-        await ctx.reply(f"Adjusted {member.display_name} by **{sign}{delta_xp} XP**. Now: Level {lvl} {into}/{need} (Total {total}).")
+        await ctx.reply(f"Adjusted {member.display_name} by **{sign}{delta_xp} XP**. New total: **{total} XP**.")
