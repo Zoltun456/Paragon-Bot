@@ -120,7 +120,9 @@ def _game_stats_lines(games: dict) -> list[str]:
             f"tickets {_fmt_num(lt.get('tickets_bought', 0))} | "
             f"spent {_fmt_num(lt.get('xp_spent_total', 0))} | "
             f"jackpots {_fmt_num(lt.get('jackpots_won', 0))} | "
-            f"boost seed {_fmt_num(lt.get('boost_seed_xp_total', 0))}"
+            f"boost seed {_fmt_num(lt.get('boost_seed_xp_total', 0))} | "
+            f"boost % total {_fmt_num(lt.get('boost_percent_total', 0))}% | "
+            f"boost mins {_fmt_num(lt.get('boost_minutes_total', 0))}"
         )
 
     rt = _as_dict(games.get("roulette"))
@@ -313,7 +315,7 @@ class StatsCog(commands.Cog):
                         "matches_played", "puzzles_played", "solves", "fails",
                         "tickets_bought", "jackpots_won", "plays", "successes", "backfires",
                         "claims", "sent", "received", "xp_wagered_total", "xp_profit_total",
-                        "xp_spent_total", "boost_seed_xp_total",
+                        "xp_spent_total", "boost_seed_xp_total", "boost_percent_total", "boost_minutes_total",
                     }
                 )
                 lines.append(f"- {game}: {summary if summary else 'tracked'}")

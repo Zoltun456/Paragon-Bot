@@ -87,9 +87,12 @@ It provides:
 ### Non-Admin
 - `!lotto [ticket_count]` (alias: `!l`)
 - `!lotto @user` to inspect ticket count
+- Jackpot reward is a temporary XP-rate boost (not direct XP)
+- Daily auto-draw defaults to **6:00 PM ET**
 
 ### Admin
 - `!poplatto` (force draw)
+- `!lottotime [time]` (set draw time, e.g. `!lottotime 6pm`)
 - `!lottotoggle`
 
 ## PrestigeCog

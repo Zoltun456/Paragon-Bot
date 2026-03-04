@@ -136,12 +136,35 @@ async def grant_reward_boost(member, reward_xp: int | float, *, source: str = "a
     Convert a reward into a temporary XP/min multiplier boost.
     Returns a summary dict for user-facing messaging.
     """
+    pct, minutes = _reward_to_boost(reward_xp)
+    return await grant_fixed_boost(
+        member,
+        pct=pct,
+        minutes=minutes,
+        source=source,
+        reward_seed_xp=reward_xp,
+    )
+
+
+async def grant_fixed_boost(
+    member,
+    *,
+    pct: int | float,
+    minutes: int,
+    source: str = "activity",
+    reward_seed_xp: int | float = 0,
+) -> dict:
+    """
+    Grant an explicit temporary XP/min boost.
+    - pct is decimal form (0.25 = +25%)
+    - minutes is duration in whole minutes
+    """
     u = _udict(member.guild.id, member.id)
     now = _now_ts()
     changed = _prune_expired_boosts(u, now=now)
     boosts = _coerce_boosts(u)
-
-    pct, minutes = _reward_to_boost(reward_xp)
+    pct = max(0.0, float(pct))
+    minutes = max(1, int(minutes))
     until = now + (minutes * 60)
     boosts.append({
         "pct": float(pct),
@@ -153,7 +176,7 @@ async def grant_reward_boost(member, reward_xp: int | float, *, source: str = "a
         member.guild.id,
         member.id,
         source=str(source).strip() or "activity",
-        reward_seed_xp=float(reward_xp),
+        reward_seed_xp=float(reward_seed_xp),
         pct=float(pct),
         minutes=int(minutes),
     )
