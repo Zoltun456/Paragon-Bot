@@ -22,6 +22,13 @@ def _as_float(name: str, default: float) -> float:
     return float(raw)
 
 
+def _as_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return bool(default)
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _resolve_data_path(env_name: str, *candidates: str) -> str:
     raw = os.getenv(env_name)
     if raw and raw.strip():
@@ -72,6 +79,7 @@ BJ_DAILY_RESET_HOUR = _as_int("BJ_DAILY_RESET_HOUR", 0)
 BJ_DAILY_RESET_MINUTE = _as_int("BJ_DAILY_RESET_MINUTE", 0)
 BJ_TURN_TIMEOUT_SECONDS = _as_int("BJ_TURN_TIMEOUT_SECONDS", 5 * 60)
 BJ_SEAT_IDLE_TIMEOUT_SECONDS = _as_int("BJ_SEAT_IDLE_TIMEOUT_SECONDS", 5 * 60)
+BJ_COOLDOWN_ENABLED = _as_bool("BJ_COOLDOWN_ENABLED", True)
 
 # Prestige
 PRESTIGE_BOARD_LIMIT = _as_int("PRESTIGE_BOARD_LIMIT", 10)

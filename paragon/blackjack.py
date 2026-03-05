@@ -17,6 +17,7 @@ from .config import (
     BJ_DAILY_RESET_MINUTE,
     BJ_TURN_TIMEOUT_SECONDS,
     BJ_SEAT_IDLE_TIMEOUT_SECONDS,
+    BJ_COOLDOWN_ENABLED,
 )
 from .guild_setup import get_blackjack_channel_id
 from .storage import _gdict, _udict, save_data
@@ -212,6 +213,7 @@ def _table(gid: int) -> dict:
     st.setdefault("action_msg_id", 0)   # current action prompt id
     st.setdefault("reset_hour", int(BJ_DAILY_RESET_HOUR))
     st.setdefault("reset_minute", int(BJ_DAILY_RESET_MINUTE))
+    st.setdefault("cooldown_enabled", bool(BJ_COOLDOWN_ENABLED))
     st.setdefault("last_cycle_key", "")
     st["reset_hour"], st["reset_minute"] = _sanitize_reset_time(
         st.get("reset_hour", BJ_DAILY_RESET_HOUR),
@@ -262,6 +264,10 @@ class BlackjackCog(commands.Cog):
     def _entry_cost(self) -> int:
         return 0
 
+    def _cooldown_enabled(self, gid: int) -> bool:
+        st = _table(gid)
+        return bool(st.get("cooldown_enabled", BJ_COOLDOWN_ENABLED))
+
     def _current_cycle_key(self, gid: int) -> str:
         st = _table(gid)
         h, m = _sanitize_reset_time(st.get("reset_hour", BJ_DAILY_RESET_HOUR), st.get("reset_minute", BJ_DAILY_RESET_MINUTE))
@@ -288,6 +294,8 @@ class BlackjackCog(commands.Cog):
 
     def _is_locked(self, gid: int, uid: int) -> tuple[bool, dict]:
         d = self._daily_state(gid, uid, self._current_cycle_key(gid))
+        if not self._cooldown_enabled(gid):
+            return False, d
         return bool(d.get("locked", False)), d
 
     async def _roll_cycle_if_needed(self, guild: discord.Guild, channel: Optional[discord.TextChannel] = None):
@@ -305,33 +313,71 @@ class BlackjackCog(commands.Cog):
             except Exception:
                 pass
 
-    def _win_boost_profile(self, prestige: int, streak: int, *, natural: bool) -> tuple[float, int]:
-        scale = prestige_reward_scale(max(0, int(prestige)), min_scale=0.45, curve=24.0, power=1.10)
-        streak_mult = 1.0 + min(0.60, 0.08 * float(max(0, int(streak))))
-        pct = 0.12 * scale * streak_mult
-        minutes = int(round((32.0 + (4.0 * min(max(0, int(streak)), 8))) * scale))
-        if natural:
-            pct *= 1.45
-            minutes = int(round(minutes * 1.25))
-        pct = max(0.04, min(0.50, pct))
-        minutes = max(10, min(240, minutes))
-        return pct, minutes
+    def _pop_existing_blackjack_boost_minutes(self, gid: int, uid: int) -> int:
+        """
+        Keep only one blackjack boost stack by removing existing blackjack-win boosts.
+        Returns the longest remaining blackjack boost duration in whole minutes.
+        """
+        u = _udict(gid, uid)
+        raw = u.get("xp_boosts")
+        if not isinstance(raw, list):
+            raw = []
+        now = now_ts()
+        kept = []
+        remaining = 0
+        for b in raw:
+            if not isinstance(b, dict):
+                continue
+            try:
+                until = int(b.get("until", 0))
+            except Exception:
+                until = 0
+            src = str(b.get("source", "")).strip().lower()
+            if until <= now:
+                continue
+            if src.startswith("blackjack win"):
+                left = max(0, until - now)
+                left_min = max(1, int((left + 59) // 60))
+                remaining = max(remaining, left_min)
+                continue
+            kept.append(b)
+        u["xp_boosts"] = kept
+        return remaining
 
-    def _loss_debuff_profile(self, prestige: int, *, dealer_natural: bool) -> tuple[float, int]:
-        pct = 0.38 + min(0.30, 0.008 * float(max(0, int(prestige))))
-        minutes = int(round(90 + min(210, 3 * max(0, int(prestige)))))
+    def _win_boost_profile(self, prestige: int, streak: int, *, natural: bool) -> tuple[float, int]:
+        # Start strong and ramp multiplicatively by streak.
+        s = max(1, int(streak))
+        scale = prestige_reward_scale(max(0, int(prestige)), min_scale=0.75, curve=60.0, power=1.0)
+        pct = 0.30 * (1.32 ** float(s - 1)) * scale
+        minutes_add = 30 + min(80, (s - 1) * 8)
+        if natural:
+            pct *= 1.25
+            minutes_add += 20
+        pct = max(0.20, min(4.00, pct))
+        minutes_add = max(30, min(180, int(minutes_add)))
+        return pct, minutes_add
+
+    def _loss_debuff_profile(self, prestige: int, streak: int, *, dealer_natural: bool) -> tuple[float, int]:
+        # Loss scales by streak but remains capped to keep risk bounded.
+        _p = max(0, int(prestige))  # reserved for future tuning
+        s = max(1, int(streak))
+        pct = 0.20 * (1.18 ** float(s - 1))
+        minutes = 75 + min(180, (s - 1) * 12)
         if dealer_natural:
-            pct *= 1.12
+            pct *= 1.10
             minutes = int(round(minutes * 1.10))
-        pct = max(0.25, min(0.85, pct))
-        minutes = max(30, min(360, minutes))
+        pct = max(0.15, min(0.50, pct))
+        minutes = max(45, min(360, int(minutes)))
         return pct, minutes
 
     async def _apply_win_effect(self, guild: discord.Guild, member: discord.Member, *, natural: bool) -> dict:
         d = self._daily_state(guild.id, member.id, self._current_cycle_key(guild.id))
         prestige = int(_udict(guild.id, member.id).get("prestige", 0))
-        streak = int(d.get("streak", 0))
-        pct, minutes = self._win_boost_profile(prestige, streak, natural=natural)
+        streak_before = int(d.get("streak", 0))
+        streak_now = streak_before + 1
+        pct, minutes_add = self._win_boost_profile(prestige, streak_now, natural=natural)
+        remaining = self._pop_existing_blackjack_boost_minutes(guild.id, member.id)
+        minutes = max(1, min(720, remaining + minutes_add))
         boost = await grant_fixed_boost(
             member,
             pct=pct,
@@ -343,14 +389,18 @@ class BlackjackCog(commands.Cog):
         d["locked"] = False
         d["locked_ts"] = 0
         d["last_result"] = "win"
-        d["streak"] = streak + 1
+        d["streak"] = streak_now
         await save_data()
         return boost
 
     async def _apply_loss_effect(self, guild: discord.Guild, member: discord.Member, *, dealer_natural: bool) -> dict:
         d = self._daily_state(guild.id, member.id, self._current_cycle_key(guild.id))
         prestige = int(_udict(guild.id, member.id).get("prestige", 0))
-        pct, minutes = self._loss_debuff_profile(prestige, dealer_natural=dealer_natural)
+        # End any active blackjack win boost when the streak breaks.
+        self._pop_existing_blackjack_boost_minutes(guild.id, member.id)
+        streak_for_loss = max(1, int(d.get("streak", 0)))
+        pct, minutes = self._loss_debuff_profile(prestige, streak_for_loss, dealer_natural=dealer_natural)
+        cooldown_on = self._cooldown_enabled(guild.id)
         debuff = await grant_fixed_debuff(
             member,
             pct=pct,
@@ -359,8 +409,8 @@ class BlackjackCog(commands.Cog):
             reward_seed_xp=self._entry_cost(),
             persist=False,
         )
-        d["locked"] = True
-        d["locked_ts"] = now_ts()
+        d["locked"] = bool(cooldown_on)
+        d["locked_ts"] = now_ts() if cooldown_on else 0
         d["last_result"] = "loss"
         d["streak"] = 0
         await save_data()
@@ -696,8 +746,7 @@ class BlackjackCog(commands.Cog):
     async def _post_new_deal_button(self, guild: discord.Guild, channel: discord.TextChannel):
         st = _table(guild.id)
         m = await channel.send(
-            f"Blackjack table: react **{EMOJI_JOIN}** to enter (no cost), "
-            f"**{EMOJI_LEAVE}** to leave, then **{EMOJI_DEAL}** to deal."
+            f"**{EMOJI_DEAL}** DEAL | **{EMOJI_JOIN}** ENTER | **{EMOJI_LEAVE}** LEAVE"
         )
         st["deal_msg_id"] = m.id
         try: await m.add_reaction(EMOJI_DEAL)
@@ -782,6 +831,47 @@ class BlackjackCog(commands.Cog):
             f"Next reset: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**."
         )
 
+    @commands.command(name="bjcooldown")
+    @owner_only()
+    async def bjcooldown(self, ctx: commands.Context, mode: Optional[str] = None):
+        st = _table(ctx.guild.id)
+        current = bool(st.get("cooldown_enabled", BJ_COOLDOWN_ENABLED))
+        if mode is None or not mode.strip():
+            await ctx.reply(f"Blackjack daily lockout cooldown is currently **{'ENABLED' if current else 'DISABLED'}**.")
+            return
+
+        raw = mode.strip().lower()
+        if raw in ("on", "enable", "enabled", "true", "1"):
+            new_val = True
+        elif raw in ("off", "disable", "disabled", "false", "0"):
+            new_val = False
+        elif raw in ("toggle", "flip"):
+            new_val = not current
+        else:
+            await ctx.reply("Usage: `!bjcooldown [on|off|toggle]`")
+            return
+
+        st["cooldown_enabled"] = bool(new_val)
+        unlocked = 0
+        if not new_val:
+            users = _gdict(ctx.guild.id).get("users", {})
+            for u in users.values():
+                if not isinstance(u, dict):
+                    continue
+                d = u.get("blackjack_daily")
+                if not isinstance(d, dict):
+                    continue
+                if d.get("locked"):
+                    unlocked += 1
+                d["locked"] = False
+                d["locked_ts"] = 0
+        await save_data()
+
+        if new_val:
+            await ctx.reply("Blackjack daily lockout cooldown is now **ENABLED**.")
+        else:
+            await ctx.reply(f"Blackjack daily lockout cooldown is now **DISABLED**. Cleared locks for **{unlocked}** user(s).")
+
     @commands.command(name="blackjack", aliases=["bj"])
     async def blackjack(self, ctx: commands.Context, arg: Optional[str] = None):
         if not in_right_channel(ctx):
@@ -849,6 +939,7 @@ class BlackjackCog(commands.Cog):
             f"action_msg_id={st.get('action_msg_id')}",
             f"channel_id={st.get('channel_id')}",
             f"reset={st.get('reset_hour')}:{int(st.get('reset_minute', 0)):02d} ET",
+            f"cooldown_enabled={bool(st.get('cooldown_enabled', BJ_COOLDOWN_ENABLED))}",
             f"players={list(st.get('players', {}).keys())}",
         ]))
 
@@ -872,6 +963,7 @@ class BlackjackCog(commands.Cog):
             "**Blackjack Table**",
             "Entry cost: **none**",
             f"Daily reset: **{_draw_time_label(h, m)}** (next {nxt.strftime('%Y-%m-%d %I:%M %p ET')})",
+            f"Daily lockout cooldown: **{'ENABLED' if self._cooldown_enabled(ctx.guild.id) else 'DISABLED'}**",
         ]
 
         if not dealer:
@@ -895,7 +987,9 @@ class BlackjackCog(commands.Cog):
             lines.append(f"No seated players. React **{EMOJI_JOIN}** on the deal prompt to enter.")
 
         locked, d = self._is_locked(ctx.guild.id, ctx.author.id)
-        if locked:
+        if not self._cooldown_enabled(ctx.guild.id):
+            lines.append("Cooldown is disabled. Losses do not lock you out.")
+        elif locked:
             lines.append("You are currently locked out until the next blackjack reset.")
         else:
             lines.append(f"You are eligible. Current streak: **{int(d.get('streak', 0))}**")
@@ -973,6 +1067,7 @@ class BlackjackCog(commands.Cog):
             dealer_total, dealer_bj = value_of_hand(st["dealer"])
             if dealer_bj:
                 out_lines = ["Dealer has a natural blackjack."]
+                cooldown_on = self._cooldown_enabled(guild.id)
                 for uid in ready:
                     p = st["players"][str(uid)]
                     member = guild.get_member(uid)
@@ -987,7 +1082,8 @@ class BlackjackCog(commands.Cog):
                         record_game_fields(guild.id, uid, "blackjack", losses=1, xp_profit_total=-locked_amt)
                         if member:
                             debuff = await self._apply_loss_effect(guild, member, dealer_natural=True)
-                            out_lines.append(f"- **{member.display_name}**: loss and lockout (debuff -{debuff['percent']:.1f}% for {debuff['minutes']}m)")
+                            lock_text = "lockout" if cooldown_on else "no lockout"
+                            out_lines.append(f"- **{member.display_name}**: loss ({lock_text}; debuff -{debuff['percent']:.1f}% for {debuff['minutes']}m)")
                         p["in_table"] = False
 
                     p["bet"] = 0; p["locked"] = 0; p["status"] = "done"; p["finished"] = True
@@ -1340,7 +1436,10 @@ class BlackjackCog(commands.Cog):
             if member and any_loss:
                 debuff = await self._apply_loss_effect(guild, member, dealer_natural=False)
                 p["in_table"] = False
-                effect_line = f"debuff -{debuff['percent']:.1f}% for {debuff['minutes']}m; locked until reset"
+                if self._cooldown_enabled(guild.id):
+                    effect_line = f"debuff -{debuff['percent']:.1f}% for {debuff['minutes']}m; locked until reset"
+                else:
+                    effect_line = f"debuff -{debuff['percent']:.1f}% for {debuff['minutes']}m; cooldown disabled"
                 record_game_fields(
                     guild.id,
                     uid,
@@ -1537,11 +1636,3 @@ class BlackjackCog(commands.Cog):
     @guard_loop.before_loop
     async def _before_guard(self):
         await self.bot.wait_until_ready()
-
-
-
-
-
-
-
-

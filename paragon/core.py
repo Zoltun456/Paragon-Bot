@@ -6,10 +6,10 @@ from discord.ext import commands, tasks
 
 from .config import AFK_CHANNEL_ID
 from .guild_setup import ensure_guild_setup
-from .storage import load_data, _gdict, _udict
-from .xp import apply_delta, get_gain_state
+from .storage import load_data, _gdict, _udict, save_data
+from .xp import apply_delta, get_gain_state, grant_fixed_boost, grant_fixed_debuff
 from .roles import enforce_level6_exclusive
-from .ownership import owner_only
+from .ownership import owner_only, is_control_user_id
 
 HELP_DESCRIPTIONS = {
     "help": "Show member-facing commands and usage.",
@@ -17,7 +17,7 @@ HELP_DESCRIPTIONS = {
     "re": "Quick bot responsiveness check.",
     "rank": "Show total XP, current gain rate, and active boosts.",
     "leaderboard": "Show top users by total XP.",
-    "boosts": "Show active XP boost breakdown for a user.",
+    "boosts": "Show boosts for a user, or admin-manage boosts: !boosts {add|remove|clear} {+/-}{rate} {time} {@user|@role|@everyone}.",
     "wordle": "Play Wordle (daily progression/guess command).",
     "resetwordle": "Admin: reset the current Wordle session.",
     "cf": "Start, accept, or cancel coinflip wagers.",
@@ -35,6 +35,7 @@ HELP_DESCRIPTIONS = {
     "blackjack": "Join/leave the blackjack table, deal hands, and play until you lose.",
     "bjreset": "Admin: reset blackjack table state and refunds.",
     "bjtime": "Admin: view or set daily blackjack reset time (ET).",
+    "bjcooldown": "Admin: enable/disable blackjack daily lockout cooldown.",
     "bjdebug": "Admin: toggle blackjack debug logging.",
     "bjstate": "Admin: print internal blackjack state.",
     "bjintents": "Admin: show Discord intent flags.",
@@ -45,7 +46,6 @@ HELP_DESCRIPTIONS = {
     "guildgamestats": "Admin: show aggregated server game stats.",
     "role": "Admin: toggle a Discord role on a member.",
     "xprate": "Admin: show passive XP/min rates.",
-    "boostall": "Admin: give all non-bot members an XP-rate boost for a duration.",
     "setxp": "Admin: set total XP for users or roles.",
     "adjust": "Admin: add or subtract XP from a user.",
 }
@@ -95,6 +95,34 @@ def is_inactive_state(vstate: discord.VoiceState) -> bool:
 class CoreCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    def _can_manage_boosts(self, ctx: commands.Context) -> bool:
+        if is_control_user_id(ctx.guild, ctx.author.id):
+            return True
+        perms = getattr(ctx.author, "guild_permissions", None)
+        return bool(perms and perms.administrator)
+
+    def _resolve_boost_targets(self, ctx: commands.Context) -> list[discord.Member]:
+        members: set[discord.Member] = set(ctx.message.mentions)
+        for role in ctx.message.role_mentions:
+            members.update(role.members)
+        if "@everyone" in (ctx.message.content or ""):
+            members.update(ctx.guild.members)
+        return sorted([m for m in members if not m.bot], key=lambda m: m.id)
+
+    def _parse_signed_rate(self, token: str) -> tuple[str, float]:
+        t = (token or "").strip()
+        if len(t) < 2 or t[0] not in "+-":
+            raise ValueError("Rate must be signed, e.g. +25 or -20.")
+        sign = t[0]
+        amount = float(t[1:])
+        if amount <= 0:
+            raise ValueError("Rate amount must be greater than 0.")
+        if sign == "+" and amount > 500:
+            raise ValueError("Positive rate is too high. Use up to 500.")
+        if sign == "-" and amount > 95:
+            raise ValueError("Negative rate is too high. Use up to 95.")
+        return sign, amount
 
     def _is_admin_command(self, cmd: commands.Command) -> bool:
         if cmd.cog_name == "AdminCog":
@@ -275,9 +303,7 @@ class CoreCog(commands.Cog):
             lines.append(f"`{i:>2}.` {medal} **{name}** - {total} XP")
         await ctx.reply("\n".join(lines))
 
-    @commands.command(name="boosts", aliases=["rate", "mult"])
-    async def boosts(self, ctx, member: Optional[discord.Member] = None):
-        member = member or ctx.author
+    async def _send_boost_view(self, ctx: commands.Context, member: discord.Member):
         st = await get_gain_state(member)
         lines = [
             f"**{member.display_name}** gain rate: **{st['rate_per_min']:.2f} XP/min** (base {st['base_per_min']:.2f}, x{st['multiplier']:.2f})"
@@ -301,6 +327,121 @@ class CoreCog(commands.Cog):
             if len(debuffs) > 8:
                 lines.append(f"- ...and {len(debuffs) - 8} more")
         await ctx.reply("\n".join(lines))
+
+    @commands.command(name="boosts", aliases=["rate", "mult"])
+    async def boosts(self, ctx: commands.Context, *args: str):
+        if not args:
+            await self._send_boost_view(ctx, ctx.author)
+            return
+
+        action = str(args[0]).strip().lower()
+        if action not in {"add", "remove", "clear"}:
+            try:
+                member = await commands.MemberConverter().convert(ctx, args[0])
+            except commands.BadArgument:
+                await ctx.reply(
+                    "Usage: `!boosts @user` or `!boosts {add|remove|clear} {+/-}{rate} {time} {@user|@role|@everyone}`"
+                )
+                return
+            await self._send_boost_view(ctx, member)
+            return
+
+        if not self._can_manage_boosts(ctx):
+            await ctx.reply("You don't have permission to manage boosts.")
+            return
+
+        if len(args) < 3:
+            await ctx.reply("Usage: `!boosts {add|remove|clear} {+/-}{rate} {time} {@user|@role|@everyone}`")
+            return
+
+        try:
+            sign, amount = self._parse_signed_rate(args[1])
+        except ValueError as e:
+            await ctx.reply(str(e))
+            return
+
+        try:
+            minutes = int(args[2])
+        except ValueError:
+            await ctx.reply("Time must be an integer number of minutes.")
+            return
+
+        if action in {"add", "remove"} and (minutes < 1 or minutes > 1440):
+            await ctx.reply("Time must be between 1 and 1440 minutes for add/remove.")
+            return
+
+        targets = self._resolve_boost_targets(ctx)
+        if not targets:
+            await ctx.reply("Mention target(s): `@user`, `@role`, or `@everyone`.")
+            return
+
+        if action == "add":
+            pct = amount / 100.0
+            source = f"admin boosts {sign} add by {ctx.author.id}"
+            applied = 0
+            failed = 0
+            for m in targets:
+                try:
+                    if sign == "+":
+                        await grant_fixed_boost(m, pct=pct, minutes=minutes, source=source, persist=False)
+                    else:
+                        await grant_fixed_debuff(m, pct=pct, minutes=minutes, source=source, persist=False)
+                    applied += 1
+                except Exception:
+                    failed += 1
+            await save_data()
+            label = "+" if sign == "+" else "-"
+            msg = f"Applied **{label}{amount:g}%** for **{minutes}m** to **{applied}** member(s)."
+            if failed:
+                msg += f" Failed: **{failed}**."
+            await ctx.reply(msg)
+            return
+
+        now = int(discord.utils.utcnow().timestamp())
+        key = "xp_boosts" if sign == "+" else "xp_debuffs"
+        target_pct = amount / 100.0
+        tolerance_pct = 0.0005
+        tolerance_minutes = 2
+        touched = 0
+        removed_entries = 0
+        for m in targets:
+            u = _udict(ctx.guild.id, m.id)
+            raw = u.get(key)
+            if not isinstance(raw, list):
+                raw = []
+            kept = []
+            removed_for_member = 0
+            for b in raw:
+                if not isinstance(b, dict):
+                    continue
+                try:
+                    pct = float(b.get("pct", 0.0))
+                    until = int(b.get("until", 0))
+                except Exception:
+                    continue
+                if until <= now:
+                    continue
+                mins_left = max(0, int((until - now + 59) // 60))
+                pct_match = abs(pct - target_pct) <= tolerance_pct
+                mins_match = abs(mins_left - minutes) <= tolerance_minutes
+                if action == "remove" and pct_match and mins_match:
+                    removed_for_member += 1
+                    continue
+                kept.append(b)
+
+            if action == "clear":
+                removed_for_member = len(kept)
+                kept = []
+
+            if removed_for_member > 0:
+                touched += 1
+                removed_entries += removed_for_member
+            u[key] = kept
+
+        await save_data()
+        op_label = "Removed" if action == "remove" else "Cleared"
+        type_label = "positive" if sign == "+" else "negative"
+        await ctx.reply(f"{op_label} **{removed_entries}** {type_label} boost entries across **{touched}** member(s).")
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx, error):
