@@ -1,4 +1,4 @@
-# Paragon Bot
+﻿# Paragon Bot
 
 Paragon is a Discord XP/game bot with persistent per-guild storage.
 
@@ -12,7 +12,7 @@ It provides:
 
 ## Runtime Notes
 
-- Default command prefix: `!` (configurable will come later)
+- Default command prefix: `!` (set via `COMMAND_PREFIX` in `.env`)
 - Data is stored per guild in `paragon_data/<guild_id>.db`
 - If cloning, bot requires `DISCORD_TOKEN` in an `.env` that has proper permissions set in Discord's dev portal
 
@@ -47,6 +47,8 @@ It provides:
 - `!cf <amount>` (alias: `!coinflip`)
 - `!cf accept [@challenger]`
 - `!cf cancel`
+- Max bet is **unlimited by default** (`CF_MAX_BET=-1`).  
+  Set `CF_MAX_BET` to a non-negative value to enforce a cap.
 
 ### Admin
 - None
@@ -114,15 +116,26 @@ It provides:
 - `!blackjack [arg]` (alias: `!bj`)
   - Common use:
   - `!bj` (open/show table state)
-  - `!bj <amount|all>` (set bet)
+  - `!bj join` / `!bj enter` / `!bj buyin` (enter table)
+  - `!bj leave` / `!bj stop` / `!bj exit` (leave table)
+  - Or react on the table prompt:
+    - `:dollar:` enter table
+    - `:octagonal_sign:` leave table
+    - `:arrow_forward:` deal
   - `!bj hit`
   - `!bj stand`
   - `!bj dd` / `!bj doubledown`
   - `!bj surrender`
   - `!bj split`
+- Entry is **free** (no XP cost).
+- Daily eligibility is reset on a configurable ET schedule (default midnight ET).
+- Win: grants a scaled XP-rate buff and you can keep playing.
+- Loss: applies a scaled XP-rate debuff and locks you out until reset.
+- Push: no buff/debuff.
 
 ### Admin
 - `!bjreset`
+- `!bjtime [time]` (view/set daily reset time, ET; e.g. `!bjtime 12:00am`)
 - `!bjdebug`
 - `!bjstate`
 - `!bjintents`
@@ -173,3 +186,4 @@ Current entrypoint (`Paragon.py`) loads:
 - `VoiceCog`
 - `StatsCog`
 - `AdminCog`
+
