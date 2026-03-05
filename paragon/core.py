@@ -43,6 +43,7 @@ HELP_DESCRIPTIONS = {
     "leave": "Disconnect the bot from voice.",
     "voicehealth": "Admin: run voice system health checks.",
     "wakeup": "Move an AFK user through random voice channels and into yours, then return them to AFK if silent.",
+    "say": "Join a mentioned user's voice channel, speak a TTS message, then leave.",
     "gamestats": "Show per-user game stats and XP ledger.",
     "guildgamestats": "Admin: show aggregated server game stats.",
     "role": "Admin: toggle a Discord role on a member.",

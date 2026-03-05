@@ -10,7 +10,7 @@ from discord.ext import commands
 from .config import resolve_afk_channel_id
 
 WAKEUP_HOPS = 10
-WAKEUP_WAIT_SECONDS = 60
+WAKEUP_WAIT_SECONDS = 15
 WAKEUP_HOP_DELAY_SECONDS = 0.6
 
 

@@ -137,6 +137,12 @@ WORD_REGEX = re.compile(rf"^[A-Za-z]{{{WORDLE_WORD_LENGTH}}}$")
 CF_MAX_BET = _as_int("CF_MAX_BET", -1)
 CF_TTL_SECONDS = _as_int("CF_TTL_SECONDS", 120)
 
+# TTS (ElevenLabs)
+ELEVEN_API = os.getenv("ELEVEN_API", "").strip()
+ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "21m00Tcm4TlvDq8ikWAM").strip()
+ELEVEN_MODEL_ID = os.getenv("ELEVEN_MODEL_ID", "eleven_flash_v2_5").strip()
+ELEVEN_OUTPUT_FORMAT = os.getenv("ELEVEN_OUTPUT_FORMAT", "mp3_44100_128").strip()
+
 
 def _looks_like_afk_name(name: str) -> bool:
     n = str(name or "").strip().lower()

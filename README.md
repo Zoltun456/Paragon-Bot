@@ -15,6 +15,7 @@ It provides:
 - Default command prefix: `!` (set via `COMMAND_PREFIX` in `.env`)
 - Data is stored per guild in `paragon_data/<guild_id>.db`
 - If cloning, bot requires `DISCORD_TOKEN` in an `.env` that has proper permissions set in Discord's dev portal
+- `!say` requires `ELEVEN_API` in `.env` and FFmpeg available on the host
 
 ## Command Reference (By Cog)
 
@@ -156,6 +157,17 @@ It provides:
 ### Admin
 - `!voicehealth`
 
+## TTSCog
+
+### Non-Admin
+- `!say {message} {@user}`
+- Bot joins the mentioned user's voice channel, plays TTS, then leaves.
+- Voice/profile is deterministic per caller (same user keeps the same voice style across servers).
+- If available voices are limited, per-user voice settings (stability/similarity/style/speed/seed) still vary output.
+
+### Admin
+- None
+
 ## WakeupCog
 
 ### Non-Admin
@@ -203,6 +215,7 @@ Current entrypoint (`Paragon.py`) loads:
 - `PrestigeCog`
 - `BlackjackCog`
 - `VoiceCog`
+- `TTSCog`
 - `WakeupCog`
 - `StatsCog`
 - `AdminCog`
