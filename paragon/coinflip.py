@@ -15,6 +15,12 @@ def _get_user_xp_int(member: discord.Member) -> int:
     u = _udict(member.guild.id, member.id)
     return int(u.get("xp_f", u.get("xp", 0)))
 
+def _coinflip_cap_enabled() -> bool:
+    return int(CF_MAX_BET) >= 0
+
+def _coinflip_cap_label() -> str:
+    return str(CF_MAX_BET) if _coinflip_cap_enabled() else "unlimited"
+
 class CoinFlipCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -26,7 +32,10 @@ class CoinFlipCog(commands.Cog):
     async def cf(self, ctx, action_or_amount: Optional[str] = None, maybe_user: Optional[discord.Member] = None):
         chan_id = ctx.channel.id
         if action_or_amount is None:
-            await ctx.reply(f"Usage:\n`!cf <amount>` to challenge (max {CF_MAX_BET})\n`!cf accept [@challenger]`\n`!cf cancel`")
+            await ctx.reply(
+                f"Usage:\n`!cf <amount>` to challenge (max {_coinflip_cap_label()})\n"
+                f"`!cf accept [@challenger]`\n`!cf cancel`"
+            )
             return
         action = action_or_amount.strip().lower()
 
@@ -118,7 +127,7 @@ class CoinFlipCog(commands.Cog):
             await ctx.reply("Usage: `!cf <amount>` (number) or `!cf accept` / `!cf cancel`."); return
         if amount <= 0:
             await ctx.reply("Bet must be a positive number."); return
-        if amount > CF_MAX_BET:
+        if _coinflip_cap_enabled() and amount > CF_MAX_BET:
             await ctx.reply(f"Max bet is **{CF_MAX_BET} XP**."); return
         cur_xp = _get_user_xp_int(ctx.author)
         if cur_xp < amount:

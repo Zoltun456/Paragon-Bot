@@ -86,6 +86,27 @@ def _coerce_boosts(u: dict) -> list[dict]:
     return out
 
 
+def _coerce_debuffs(u: dict) -> list[dict]:
+    raw = u.get("xp_debuffs")
+    if not isinstance(raw, list):
+        raw = []
+    out = []
+    for b in raw:
+        if not isinstance(b, dict):
+            continue
+        try:
+            pct = float(b.get("pct", 0.0))
+            until = int(b.get("until", 0))
+        except Exception:
+            continue
+        if pct <= 0.0 or until <= 0:
+            continue
+        source = str(b.get("source", "activity")).strip() or "activity"
+        out.append({"pct": pct, "until": until, "source": source})
+    u["xp_debuffs"] = out
+    return out
+
+
 def _prune_expired_boosts(u: dict, *, now: Optional[int] = None) -> bool:
     now = _now_ts() if now is None else int(now)
     boosts = _coerce_boosts(u)
@@ -93,6 +114,16 @@ def _prune_expired_boosts(u: dict, *, now: Optional[int] = None) -> bool:
     changed = len(kept) != len(boosts)
     if changed:
         u["xp_boosts"] = kept
+    return changed
+
+
+def _prune_expired_debuffs(u: dict, *, now: Optional[int] = None) -> bool:
+    now = _now_ts() if now is None else int(now)
+    debuffs = _coerce_debuffs(u)
+    kept = [b for b in debuffs if int(b.get("until", 0)) > now]
+    changed = len(kept) != len(debuffs)
+    if changed:
+        u["xp_debuffs"] = kept
     return changed
 
 
@@ -106,18 +137,32 @@ def _raw_boost_multiplier(u: dict, *, now: Optional[int] = None) -> float:
     return 1.0 + total_pct
 
 
+def _debuff_multiplier(u: dict, *, now: Optional[int] = None) -> float:
+    now = _now_ts() if now is None else int(now)
+    debuffs = _coerce_debuffs(u)
+    mult = 1.0
+    for b in debuffs:
+        if int(b.get("until", 0)) <= now:
+            continue
+        pct = max(0.0, min(0.95, float(b.get("pct", 0.0))))
+        mult *= max(0.05, 1.0 - pct)
+    return max(0.05, mult)
+
+
 def _actual_boost_multiplier(u: dict, *, now: Optional[int] = None) -> float:
     raw = _raw_boost_multiplier(u, now=now)
+    debuff_mult = _debuff_multiplier(u, now=now)
     if PRESTIGE_COMPRESSION_MODE == "global":
-        return compress_stack_multiplier(raw)
-    return raw
+        return compress_stack_multiplier(raw) * debuff_mult
+    return raw * debuff_mult
 
 
 def _progress_boost_multiplier(u: dict, *, now: Optional[int] = None) -> float:
     raw = _raw_boost_multiplier(u, now=now)
+    debuff_mult = _debuff_multiplier(u, now=now)
     if PRESTIGE_COMPRESSION_MODE in ("global", "progress_only"):
-        return compress_stack_multiplier(raw)
-    return raw
+        return compress_stack_multiplier(raw) * debuff_mult
+    return raw * debuff_mult
 
 
 def _reward_to_boost(reward_xp: int | float) -> tuple[float, int]:
@@ -213,6 +258,7 @@ async def grant_fixed_boost(
     u = _udict(member.guild.id, member.id)
     now = _now_ts()
     changed = _prune_expired_boosts(u, now=now)
+    changed = _prune_expired_debuffs(u, now=now) or changed
     boosts = _coerce_boosts(u)
     pct = max(0.0, float(pct))
     minutes = max(1, int(minutes))
@@ -248,6 +294,59 @@ async def grant_fixed_boost(
     }
 
 
+async def grant_fixed_debuff(
+    member,
+    *,
+    pct: int | float,
+    minutes: int,
+    source: str = "activity",
+    reward_seed_xp: int | float = 0,
+    persist: bool = True,
+) -> dict:
+    """
+    Grant an explicit temporary XP/min debuff.
+    - pct is decimal form (0.25 = -25%)
+    - minutes is duration in whole minutes
+    """
+    u = _udict(member.guild.id, member.id)
+    now = _now_ts()
+    changed = _prune_expired_boosts(u, now=now)
+    changed = _prune_expired_debuffs(u, now=now) or changed
+    debuffs = _coerce_debuffs(u)
+    pct = max(0.0, min(0.95, float(pct)))
+    minutes = max(1, int(minutes))
+    until = now + (minutes * 60)
+    debuffs.append({
+        "pct": float(pct),
+        "until": int(until),
+        "source": str(source).strip() or "activity",
+    })
+    u["xp_debuffs"] = debuffs
+    record_xp_boost(
+        member.guild.id,
+        member.id,
+        source=str(source).strip() or "activity",
+        reward_seed_xp=float(reward_seed_xp),
+        pct=float(-pct),
+        minutes=int(minutes),
+    )
+    if persist:
+        await save_data()
+
+    prestige = int(u.get("prestige", 0))
+    total_mult = prestige_multiplier(prestige) * _actual_boost_multiplier(u, now=now)
+    rate_per_min = BASE_XP_PER_MINUTE * total_mult
+    return {
+        "pct": float(pct),
+        "percent": float(pct * 100.0),
+        "minutes": int(minutes),
+        "until": int(until),
+        "rate_per_min": float(rate_per_min),
+        "source": str(source).strip() or "activity",
+        "pruned": bool(changed),
+    }
+
+
 async def get_gain_state(member) -> dict:
     """
     Runtime state for rank/boost UI and prestige pacing display.
@@ -255,7 +354,9 @@ async def get_gain_state(member) -> dict:
     u = _udict(member.guild.id, member.id)
     now = _now_ts()
     changed = _prune_expired_boosts(u, now=now)
+    changed = _prune_expired_debuffs(u, now=now) or changed
     boosts = _coerce_boosts(u)
+    debuffs = _coerce_debuffs(u)
     if changed:
         await save_data()
 
@@ -290,11 +391,25 @@ async def get_gain_state(member) -> dict:
             "percent": float(pct * 100.0),
         })
 
+    debuff_rows = []
+    for b in sorted(debuffs, key=lambda x: int(x.get("until", 0))):
+        until = int(b.get("until", 0))
+        if until <= now:
+            continue
+        left_min = max(1, math.ceil((until - now) / 60.0))
+        pct = max(0.0, min(0.95, float(b.get("pct", 0.0))))
+        debuff_rows.append({
+            "source": str(b.get("source", "activity")),
+            "minutes_left": int(left_min),
+            "percent": float(pct * 100.0),
+        })
+
     return {
         "base_per_min": float(BASE_XP_PER_MINUTE),
         "multiplier": float(total_mult_actual),  # compatibility for !rank
         "rate_per_min": float(rate_per_min),
         "boosts": rows,
+        "debuffs": debuff_rows,
         "prestige": int(prestige),
         "prestige_multiplier": float(p_mult),
         "boost_multiplier_raw": float(b_raw),
@@ -367,6 +482,7 @@ async def apply_delta(
     u = _udict(member.guild.id, member.id)
     now = _now_ts()
     changed = _prune_expired_boosts(u, now=now)
+    changed = _prune_expired_debuffs(u, now=now) or changed
     prestige = int(u.get("prestige", 0))
     total_mult = prestige_multiplier(prestige) * _actual_boost_multiplier(u, now=now)
     gain_per_min = BASE_XP_PER_MINUTE * total_mult

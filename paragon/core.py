@@ -32,8 +32,9 @@ HELP_DESCRIPTIONS = {
     "lottotoggle": "Admin: enable or disable the lottery.",
     "prestige": "Spend XP to increase your prestige tier.",
     "setp": "Admin: set a user's prestige tier.",
-    "blackjack": "View table, place bets, and play blackjack.",
+    "blackjack": "Join/leave the blackjack table, deal hands, and play until you lose.",
     "bjreset": "Admin: reset blackjack table state and refunds.",
+    "bjtime": "Admin: view or set daily blackjack reset time (ET).",
     "bjdebug": "Admin: toggle blackjack debug logging.",
     "bjstate": "Admin: print internal blackjack state.",
     "bjintents": "Admin: show Discord intent flags.",
@@ -234,11 +235,18 @@ class CoreCog(commands.Cog):
         total = int(u.get("xp_f", u.get("xp", 0)))
         st = await get_gain_state(member)
         boosts = st.get("boosts", [])
+        debuffs = st.get("debuffs", [])
         if boosts:
             first = boosts[0]
-            extra = f" | Active boosts: **{len(boosts)}** (next expires in {first['minutes_left']}m)"
+            boost_extra = f"Active boosts: **{len(boosts)}** (next expires in {first['minutes_left']}m)"
         else:
-            extra = " | Active boosts: **0**"
+            boost_extra = "Active boosts: **0**"
+        if debuffs:
+            first_d = debuffs[0]
+            debuff_extra = f"Active debuffs: **{len(debuffs)}** (next expires in {first_d['minutes_left']}m)"
+        else:
+            debuff_extra = "Active debuffs: **0**"
+        extra = f" | {boost_extra} | {debuff_extra}"
         await ctx.reply(
             f"**{member.display_name}** Total XP: **{total}**"
             f" | Rate: **{st['rate_per_min']:.2f} XP/min** (x{st['multiplier']:.2f})"
@@ -275,6 +283,7 @@ class CoreCog(commands.Cog):
             f"**{member.display_name}** gain rate: **{st['rate_per_min']:.2f} XP/min** (base {st['base_per_min']:.2f}, x{st['multiplier']:.2f})"
         ]
         boosts = st.get("boosts", [])
+        debuffs = st.get("debuffs", [])
         if not boosts:
             lines.append("No active boosts.")
         else:
@@ -283,6 +292,14 @@ class CoreCog(commands.Cog):
                 lines.append(f"- **+{b['percent']:.1f}%** for **{b['minutes_left']}m** ({b['source']})")
             if len(boosts) > 8:
                 lines.append(f"- ...and {len(boosts) - 8} more")
+        if not debuffs:
+            lines.append("No active debuffs.")
+        else:
+            lines.append("Active debuffs:")
+            for d in debuffs[:8]:
+                lines.append(f"- **-{d['percent']:.1f}%** for **{d['minutes_left']}m** ({d['source']})")
+            if len(debuffs) > 8:
+                lines.append(f"- ...and {len(debuffs) - 8} more")
         await ctx.reply("\n".join(lines))
 
     @commands.Cog.listener()

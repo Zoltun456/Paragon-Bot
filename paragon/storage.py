@@ -134,6 +134,7 @@ def _udict(gid: int, uid: int) -> dict:
             "xp_f": 0.0,
             "level": 1,
             "xp_boosts": [],
+            "xp_debuffs": [],
             "total_active_minutes": 0,
             "total_inactive_minutes": 0,
             "bucket_active_remainder": 0,
@@ -148,6 +149,8 @@ def _udict(gid: int, uid: int) -> dict:
         u["level"] = 1
     if "xp_boosts" not in u or not isinstance(u.get("xp_boosts"), list):
         u["xp_boosts"] = []
+    if "xp_debuffs" not in u or not isinstance(u.get("xp_debuffs"), list):
+        u["xp_debuffs"] = []
     return u
 
 
