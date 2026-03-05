@@ -570,12 +570,41 @@ class BlackjackCog(commands.Cog):
             return
 
         cutoff_ts = discord.utils.utcnow().timestamp() - MESSAGE_RETENTION_SECONDS
+        bot_user_id = int(self.bot.user.id) if self.bot and self.bot.user else 0
+        preserve_ids: set[int] = set()
+        for k in ("deal_msg_id", "action_msg_id"):
+            try:
+                mid = int(st.get(k, 0) or 0)
+            except Exception:
+                mid = 0
+            if mid > 0:
+                preserve_ids.add(mid)
+
+        # Fallback: if deal_msg_id was lost, keep the newest table prompt-looking bot message.
+        if int(st.get("deal_msg_id", 0) or 0) <= 0:
+            try:
+                async for recent in channel.history(limit=40, oldest_first=False):
+                    if bot_user_id and recent.author.id != bot_user_id:
+                        continue
+                    content = str(recent.content or "")
+                    if "DEAL" in content and "ENTER" in content and "LEAVE" in content:
+                        preserve_ids.add(recent.id)
+                        break
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
         deleted_ids: set[int] = set()
         try:
             async for msg in channel.history(limit=None, oldest_first=True):
                 if msg.created_at.timestamp() >= cutoff_ts:
                     break
                 if msg.pinned:
+                    continue
+                # Only clean up bot-authored messages; never touch user messages.
+                if bot_user_id and msg.author.id != bot_user_id:
+                    continue
+                # Never delete currently active blackjack prompts.
+                if msg.id in preserve_ids:
                     continue
                 try:
                     await msg.delete()
