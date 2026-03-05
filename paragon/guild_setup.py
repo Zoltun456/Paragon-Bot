@@ -35,6 +35,19 @@ def _channels_dict(guild_id: int) -> dict:
     return channels
 
 
+def _find_text_channel_by_name(guild: discord.Guild, name: str) -> Optional[discord.TextChannel]:
+    target = str(name or "").strip().lower()
+    if not target:
+        return None
+    for ch in guild.text_channels:
+        try:
+            if str(ch.name).strip().lower() == target:
+                return ch
+        except Exception:
+            continue
+    return None
+
+
 def get_log_channel_id(guild_id: int) -> int:
     channels = _channels_dict(guild_id)
     return _as_int(channels.get(LOG_CHANNEL_KEY), 0)
@@ -114,7 +127,7 @@ async def _get_or_create_text_channel(
             channel = by_id
 
     if channel is None:
-        by_name = dget(guild.text_channels, name=name)
+        by_name = _find_text_channel_by_name(guild, name) or dget(guild.text_channels, name=name)
         if isinstance(by_name, discord.TextChannel):
             channel = by_name
 
@@ -127,7 +140,11 @@ async def _get_or_create_text_channel(
         elif overwrites is not None:
             await channel.edit(overwrites=overwrites, reason="Paragon owner access sync")
     except (discord.Forbidden, discord.HTTPException):
-        return None
+        # If a matching channel already exists, still return it so caller can persist its ID.
+        if channel is not None:
+            return channel
+        # Creation failed; final fallback to any matching existing channel by name.
+        return _find_text_channel_by_name(guild, name)
 
     return channel
 
@@ -141,6 +158,8 @@ async def ensure_guild_setup(guild: discord.Guild) -> bool:
         stored_id=get_log_channel_id(guild.id),
         name=LOG_CHANNEL_NAME,
     )
+    if log_channel is None:
+        log_channel = _find_text_channel_by_name(guild, LOG_CHANNEL_NAME)
     if log_channel and _as_int(channels.get(LOG_CHANNEL_KEY), 0) != log_channel.id:
         channels[LOG_CHANNEL_KEY] = int(log_channel.id)
         changed = True
@@ -150,6 +169,8 @@ async def ensure_guild_setup(guild: discord.Guild) -> bool:
         stored_id=get_blackjack_channel_id(guild.id),
         name=BLACKJACK_CHANNEL_NAME,
     )
+    if blackjack_channel is None:
+        blackjack_channel = _find_text_channel_by_name(guild, BLACKJACK_CHANNEL_NAME)
     if blackjack_channel and _as_int(channels.get(BLACKJACK_CHANNEL_KEY), 0) != blackjack_channel.id:
         channels[BLACKJACK_CHANNEL_KEY] = int(blackjack_channel.id)
         changed = True
@@ -160,6 +181,8 @@ async def ensure_guild_setup(guild: discord.Guild) -> bool:
         name=OWNER_CHANNEL_NAME,
         overwrites=_owner_channel_overwrites(guild),
     )
+    if owner_channel is None:
+        owner_channel = _find_text_channel_by_name(guild, OWNER_CHANNEL_NAME)
     if owner_channel and _as_int(channels.get(OWNER_CHANNEL_KEY), 0) != owner_channel.id:
         channels[OWNER_CHANNEL_KEY] = int(owner_channel.id)
         changed = True
