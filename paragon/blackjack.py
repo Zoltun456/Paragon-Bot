@@ -348,10 +348,10 @@ class BlackjackCog(commands.Cog):
         # Start strong and ramp multiplicatively by streak.
         s = max(1, int(streak))
         scale = prestige_reward_scale(max(0, int(prestige)), min_scale=0.75, curve=60.0, power=1.0)
-        pct = 0.30 * (1.32 ** float(s - 1)) * scale
+        pct = 0.30 * (1.55 ** float(s - 1)) * scale
         minutes_add = 30 + min(80, (s - 1) * 8)
         if natural:
-            pct *= 1.25
+            pct *= 1.30
             minutes_add += 20
         pct = max(0.20, min(4.00, pct))
         minutes_add = max(30, min(180, int(minutes_add)))
@@ -396,8 +396,6 @@ class BlackjackCog(commands.Cog):
     async def _apply_loss_effect(self, guild: discord.Guild, member: discord.Member, *, dealer_natural: bool) -> dict:
         d = self._daily_state(guild.id, member.id, self._current_cycle_key(guild.id))
         prestige = int(_udict(guild.id, member.id).get("prestige", 0))
-        # End any active blackjack win boost when the streak breaks.
-        self._pop_existing_blackjack_boost_minutes(guild.id, member.id)
         streak_for_loss = max(1, int(d.get("streak", 0)))
         pct, minutes = self._loss_debuff_profile(prestige, streak_for_loss, dealer_natural=dealer_natural)
         cooldown_on = self._cooldown_enabled(guild.id)
