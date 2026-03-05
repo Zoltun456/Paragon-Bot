@@ -17,7 +17,7 @@ HELP_DESCRIPTIONS = {
     "re": "Quick bot responsiveness check.",
     "rank": "Show total XP, current gain rate, and active boosts.",
     "leaderboard": "Show top users by total XP.",
-    "boosts": "Show boosts for a user, or admin-manage boosts: !boosts {add|remove|clear} {+/-}{rate} {time} {@user|@role|@everyone}.",
+    "boosts": "Show boosts for a user, or admin-manage boosts: add/remove use signed rate+time, clear uses targets only.",
     "wordle": "Play Wordle (daily progression/guess command).",
     "resetwordle": "Admin: reset the current Wordle session.",
     "cf": "Start, accept, or cancel coinflip wagers.",
@@ -340,7 +340,7 @@ class CoreCog(commands.Cog):
                 member = await commands.MemberConverter().convert(ctx, args[0])
             except commands.BadArgument:
                 await ctx.reply(
-                    "Usage: `!boosts @user` or `!boosts {add|remove|clear} {+/-}{rate} {time} {@user|@role|@everyone}`"
+                    "Usage: `!boosts @user` | `!boosts add {+/-}{rate} {time} {target}` | `!boosts remove {+/-}{rate} {time} {target}` | `!boosts clear {target}`"
                 )
                 return
             await self._send_boost_view(ctx, member)
@@ -350,8 +350,35 @@ class CoreCog(commands.Cog):
             await ctx.reply("You don't have permission to manage boosts.")
             return
 
+        if action == "clear":
+            targets = self._resolve_boost_targets(ctx)
+            if not targets:
+                await ctx.reply("Usage: `!boosts clear {@user|@role|@everyone}`")
+                return
+
+            touched = 0
+            removed_pos_total = 0
+            removed_neg_total = 0
+            for m in targets:
+                u = _udict(ctx.guild.id, m.id)
+                pos = u.get("xp_boosts")
+                neg = u.get("xp_debuffs")
+                removed_pos = len(pos) if isinstance(pos, list) else 0
+                removed_neg = len(neg) if isinstance(neg, list) else 0
+                if removed_pos or removed_neg:
+                    touched += 1
+                removed_pos_total += removed_pos
+                removed_neg_total += removed_neg
+                u["xp_boosts"] = []
+                u["xp_debuffs"] = []
+            await save_data()
+            await ctx.reply(
+                f"Cleared all boosts for **{touched}** member(s). Removed **{removed_pos_total}** positive and **{removed_neg_total}** negative entries."
+            )
+            return
+
         if len(args) < 3:
-            await ctx.reply("Usage: `!boosts {add|remove|clear} {+/-}{rate} {time} {@user|@role|@everyone}`")
+            await ctx.reply("Usage: `!boosts add {+/-}{rate} {time} {target}` or `!boosts remove {+/-}{rate} {time} {target}`")
             return
 
         try:
@@ -366,7 +393,7 @@ class CoreCog(commands.Cog):
             await ctx.reply("Time must be an integer number of minutes.")
             return
 
-        if action in {"add", "remove"} and (minutes < 1 or minutes > 1440):
+        if minutes < 1 or minutes > 1440:
             await ctx.reply("Time must be between 1 and 1440 minutes for add/remove.")
             return
 
@@ -429,17 +456,13 @@ class CoreCog(commands.Cog):
                     continue
                 kept.append(b)
 
-            if action == "clear":
-                removed_for_member = len(kept)
-                kept = []
-
             if removed_for_member > 0:
                 touched += 1
                 removed_entries += removed_for_member
             u[key] = kept
 
         await save_data()
-        op_label = "Removed" if action == "remove" else "Cleared"
+        op_label = "Removed"
         type_label = "positive" if sign == "+" else "negative"
         await ctx.reply(f"{op_label} **{removed_entries}** {type_label} boost entries across **{touched}** member(s).")
 
