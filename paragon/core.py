@@ -142,20 +142,24 @@ class CoreCog(commands.Cog):
             return short
         return "No description set."
 
-    def _format_help_entry(self, ctx: commands.Context, cmd: commands.Command) -> str:
+    def _format_help_entry(self, ctx: commands.Context, cmd: commands.Command, *, admin_view: bool = False) -> str:
         if cmd.name == "boosts":
-            usage = (
-                f"{ctx.clean_prefix}boosts [@user] | "
-                f"{ctx.clean_prefix}boosts add {{+/-}}{{rate}} {{time}} {{@user|@role|@everyone}} | "
-                f"{ctx.clean_prefix}boosts remove {{+/-}}{{rate}} {{time}} {{@user|@role|@everyone}} | "
-                f"{ctx.clean_prefix}boosts clear {{@user|@role|@everyone}}"
-            )
+            if admin_view:
+                usage = (
+                    f"{ctx.clean_prefix}boosts add {{+/-}}{{rate}} {{time}} {{@user|@role|@everyone}} | "
+                    f"{ctx.clean_prefix}boosts remove {{+/-}}{{rate}} {{time}} {{@user|@role|@everyone}} | "
+                    f"{ctx.clean_prefix}boosts clear {{@user|@role|@everyone}}"
+                )
+                summary = "Admin: manage boosts/debuffs for users, roles, or everyone."
+            else:
+                usage = f"{ctx.clean_prefix}boosts [@user]"
+                summary = "Show active boosts/debuffs for you or a mentioned user."
         else:
             usage = f"{ctx.clean_prefix}{cmd.name}"
             if cmd.signature:
                 usage = f"{usage} {cmd.signature}"
+            summary = self._command_description(cmd)
 
-        summary = self._command_description(cmd)
         if cmd.aliases:
             aliases = ", ".join(f"{ctx.clean_prefix}{a}" for a in cmd.aliases)
             return f"`{usage}` - {summary} (aliases: {aliases})"
@@ -203,7 +207,7 @@ class CoreCog(commands.Cog):
         ]
         if normal_cmds:
             for cmd in normal_cmds:
-                lines.append(f"- {self._format_help_entry(ctx, cmd)}")
+                lines.append(f"- {self._format_help_entry(ctx, cmd, admin_view=False)}")
         else:
             lines.append("- No member commands found.")
 
@@ -213,12 +217,12 @@ class CoreCog(commands.Cog):
     @owner_only()
     async def admin_help_command(self, ctx: commands.Context):
         cmds = self._sorted_visible_commands()
-        admin_cmds = [c for c in cmds if self._is_admin_command(c)]
+        admin_cmds = [c for c in cmds if self._is_admin_command(c) or c.name == "boosts"]
 
         lines = ["**Paragon Admin Command Help**", ""]
         if admin_cmds:
             for cmd in admin_cmds:
-                lines.append(f"- {self._format_help_entry(ctx, cmd)}")
+                lines.append(f"- {self._format_help_entry(ctx, cmd, admin_view=True)}")
         else:
             lines.append("- No admin commands found.")
 

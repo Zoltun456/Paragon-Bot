@@ -28,13 +28,15 @@ It provides:
 - `!re`
 - `!rank [@member]` (aliases: `!xp`, `!level`)
 - `!leaderboard [limit]` (aliases: `!lb`, `!xps`)
-- `!boosts [@member]` (aliases: `!rate`, `!mult`) to view a user's active boosts/debuffs
+- `!boosts [@member]` (aliases: `!rate`, `!mult`) to view a user's active boosts/debuffs  
+  (This is the `boosts` line shown in `!help`.)
 
 ### Admin
 - `!adminhelp`
 - `!boosts add {+/-}{rate} {time} {@user|@role|@everyone}`
 - `!boosts remove {+/-}{rate} {time} {@user|@role|@everyone}`
-- `!boosts clear {@user|@role|@everyone}`
+- `!boosts clear {@user|@role|@everyone}`  
+  (These are the `boosts` variants shown in `!adminhelp`.)
 
 ## WordleCog
 

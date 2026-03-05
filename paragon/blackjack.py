@@ -58,7 +58,7 @@ LEAVE_EMOJIS = {EMOJI_LEAVE, "octagonal_sign"}
 
 RESET_TIME_RE = re.compile(r"(\d{1,2})(?::(\d{1,2}))?(am|pm)?$")
 
-MESSAGE_RETENTION_SECONDS = 24 * 60 * 60
+MESSAGE_RETENTION_SECONDS = 30 * 60 # Messages deleted from channel after 30 min
 MESSAGE_CLEANUP_INTERVAL_SECONDS = 5 * 60
 
 # Map normalized emoji -> action
