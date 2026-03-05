@@ -151,9 +151,10 @@ class AnagramCog(commands.Cog):
 
         # If no guess provided, (re)show current scrambled or generate a new one
         if guess is None:
+            p = ctx.clean_prefix
             if st.get("awaiting") and st.get("scrambled"):
                 left = ANAGRAM_DAILY_LIMIT - used
-                await ctx.reply(f"🧩 **Anagram:** `{st['scrambled']}`\nAttempts left today: **{used}/{ANAGRAM_DAILY_LIMIT}**\nReply with `!a <guess>`.")
+                await ctx.reply(f"🧩 **Anagram:** `{st['scrambled']}`\nAttempts left today: **{used}/{ANAGRAM_DAILY_LIMIT}**\nReply with `{p}a <guess>`.")
                 return
             # Generate new puzzle for this slot
             phrase = _phrase_for(ctx.author.id, today, st["idx"])
@@ -163,12 +164,12 @@ class AnagramCog(commands.Cog):
             st["awaiting"] = True
             record_game_fields(ctx.guild.id, ctx.author.id, "anagram", puzzles_started=1)
             await save_data()
-            await ctx.reply(f"🧩 **Anagram:** `{scrambled}`\nAttempts used today: **{used}/{ANAGRAM_DAILY_LIMIT}**\nReply with `!a <guess>`.")
+            await ctx.reply(f"🧩 **Anagram:** `{scrambled}`\nAttempts used today: **{used}/{ANAGRAM_DAILY_LIMIT}**\nReply with `{p}a <guess>`.")
             return
 
         # A guess was provided
         if not st.get("awaiting"):
-            await ctx.reply("No active puzzle. Type `!a` to get one first.")
+            await ctx.reply(f"No active puzzle. Type `{ctx.clean_prefix}a` to get one first.")
             return
 
         answer = st.get("answer", "")

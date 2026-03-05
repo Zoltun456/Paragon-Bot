@@ -10,6 +10,7 @@ from discord.ext import commands, tasks
 from .config import (
     DROP_MIN_MINUTES, DROP_MAX_MINUTES,
     DROP_MIN_XP, DROP_MAX_XP,
+    COMMAND_PREFIX,
 )
 from .guild_setup import get_log_channel
 from .storage import _gdict, save_data
@@ -90,13 +91,13 @@ class SurpriseCog(commands.Cog):
         # Try to @here (requires “Mention @everyone” permission in that channel)
         try:
             await ch.send(
-                f"@here 🎁 **Surprise Drop!** Type `!claim` to trigger a timed XP boost (power seed **{reward}**).",
+                f"@here 🎁 **Surprise Drop!** Type `{COMMAND_PREFIX}claim` to trigger a timed XP boost (power seed **{reward}**).",
                 allowed_mentions=discord.AllowedMentions(everyone=True),
             )
         except Exception:
             # Fallback without an actual ping
             try:
-                await ch.send(f"🎁 **Surprise Drop!** Type `!claim` to trigger a timed XP boost (power seed **{reward}**).")
+                await ch.send(f"🎁 **Surprise Drop!** Type `{COMMAND_PREFIX}claim` to trigger a timed XP boost (power seed **{reward}**).")
             except Exception:
                 pass
 

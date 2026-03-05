@@ -39,7 +39,8 @@ class ThanksCog(commands.Cog):
     @commands.command(name="thanks", aliases=["thx"])
     async def thanks(self, ctx: commands.Context, target: Optional[discord.Member] = None):
         if target is None:
-            await ctx.reply("Usage: `!thanks @user` (or `!thx @user`)")
+            p = ctx.clean_prefix
+            await ctx.reply(f"Usage: `{p}thanks @user` (or `{p}thx @user`)")
             return
 
         author: discord.Member = ctx.author  # type: ignore

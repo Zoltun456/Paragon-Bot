@@ -156,7 +156,7 @@ class AdminCog(commands.Cog):
             if isinstance(ctx.author, discord.Member):
                 members.add(ctx.author)
             else:
-                await ctx.reply("No valid targets. Mention users or roles, e.g. `!setxp @everyone 3000`.")
+                await ctx.reply(f"No valid targets. Mention users or roles, e.g. `{ctx.clean_prefix}setxp @everyone 3000`.")
                 return
 
         updated = 0

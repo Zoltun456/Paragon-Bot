@@ -28,10 +28,13 @@ It provides:
 - `!re`
 - `!rank [@member]` (aliases: `!xp`, `!level`)
 - `!leaderboard [limit]` (aliases: `!lb`, `!xps`)
-- `!boosts [@member]` (aliases: `!rate`, `!mult`)
+- `!boosts [@member]` (aliases: `!rate`, `!mult`) to view a user's active boosts/debuffs
 
 ### Admin
 - `!adminhelp`
+- `!boosts add {+/-}{rate} {time} {@user|@role|@everyone}`
+- `!boosts remove {+/-}{rate} {time} {@user|@role|@everyone}`
+- `!boosts clear {@user|@role|@everyone}`
 
 ## WordleCog
 
@@ -130,12 +133,14 @@ It provides:
 - Entry is **free** (no XP cost).
 - Daily eligibility is reset on a configurable ET schedule (default midnight ET).
 - Win: grants a scaled XP-rate buff and you can keep playing.
-- Loss: applies a scaled XP-rate debuff and locks you out until reset.
+- Loss: applies a scaled XP-rate debuff (current blackjack win buff remains active).
+- Daily lockout is enabled by default, but can be toggled by admin.
 - Push: no buff/debuff.
 
 ### Admin
 - `!bjreset`
 - `!bjtime [time]` (view/set daily reset time, ET; e.g. `!bjtime 12:00am`)
+- `!bjcooldown [on|off|toggle]`
 - `!bjdebug`
 - `!bjstate`
 - `!bjintents`
@@ -166,7 +171,6 @@ It provides:
 ### Admin
 - `!role @user @role` (toggle role)
 - `!xprate [@user ...]`
-- `!boostall <percent> <minutes>` (grant all non-bot members a temporary XP-rate boost)
 - `!setxp <targets...> <xp>`
 - `!adjust @user <+amount|-amount>`
 

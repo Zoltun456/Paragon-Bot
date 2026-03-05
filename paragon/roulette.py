@@ -106,7 +106,7 @@ class RouletteCog(commands.Cog):
         author: discord.Member = ctx.author  # type: ignore
 
         if target is None:
-            await ctx.reply("Usage: `!roulette @user`")
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}roulette @user`")
             return
         if target.id == author.id:
             await ctx.reply("You cannot roulette yourself.")

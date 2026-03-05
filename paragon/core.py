@@ -17,7 +17,7 @@ HELP_DESCRIPTIONS = {
     "re": "Quick bot responsiveness check.",
     "rank": "Show total XP, current gain rate, and active boosts.",
     "leaderboard": "Show top users by total XP.",
-    "boosts": "Show boosts for a user, or admin-manage boosts: add/remove use signed rate+time, clear uses targets only.",
+    "boosts": "Show boosts for a user, or manage boosts (admin): add/remove with signed rate+time; clear by target only.",
     "wordle": "Play Wordle (daily progression/guess command).",
     "resetwordle": "Admin: reset the current Wordle session.",
     "cf": "Start, accept, or cancel coinflip wagers.",
@@ -143,9 +143,17 @@ class CoreCog(commands.Cog):
         return "No description set."
 
     def _format_help_entry(self, ctx: commands.Context, cmd: commands.Command) -> str:
-        usage = f"{ctx.clean_prefix}{cmd.name}"
-        if cmd.signature:
-            usage = f"{usage} {cmd.signature}"
+        if cmd.name == "boosts":
+            usage = (
+                f"{ctx.clean_prefix}boosts [@user] | "
+                f"{ctx.clean_prefix}boosts add {{+/-}}{{rate}} {{time}} {{@user|@role|@everyone}} | "
+                f"{ctx.clean_prefix}boosts remove {{+/-}}{{rate}} {{time}} {{@user|@role|@everyone}} | "
+                f"{ctx.clean_prefix}boosts clear {{@user|@role|@everyone}}"
+            )
+        else:
+            usage = f"{ctx.clean_prefix}{cmd.name}"
+            if cmd.signature:
+                usage = f"{usage} {cmd.signature}"
 
         summary = self._command_description(cmd)
         if cmd.aliases:
@@ -189,7 +197,7 @@ class CoreCog(commands.Cog):
 
         lines = [
             "**Paragon Command Help**",
-            "Admin tools are listed separately with `!adminhelp`.",
+            f"Admin tools are listed separately with `{ctx.clean_prefix}adminhelp`.",
             "",
             "**Commands**",
         ]
@@ -339,8 +347,10 @@ class CoreCog(commands.Cog):
             try:
                 member = await commands.MemberConverter().convert(ctx, args[0])
             except commands.BadArgument:
+                p = ctx.clean_prefix
                 await ctx.reply(
-                    "Usage: `!boosts @user` | `!boosts add {+/-}{rate} {time} {target}` | `!boosts remove {+/-}{rate} {time} {target}` | `!boosts clear {target}`"
+                    f"Usage: `{p}boosts @user` | `{p}boosts add {{+/-}}{{rate}} {{time}} {{target}}` | "
+                    f"`{p}boosts remove {{+/-}}{{rate}} {{time}} {{target}}` | `{p}boosts clear {{target}}`"
                 )
                 return
             await self._send_boost_view(ctx, member)
@@ -353,7 +363,7 @@ class CoreCog(commands.Cog):
         if action == "clear":
             targets = self._resolve_boost_targets(ctx)
             if not targets:
-                await ctx.reply("Usage: `!boosts clear {@user|@role|@everyone}`")
+                await ctx.reply(f"Usage: `{ctx.clean_prefix}boosts clear {{@user|@role|@everyone}}`")
                 return
 
             touched = 0
@@ -378,7 +388,11 @@ class CoreCog(commands.Cog):
             return
 
         if len(args) < 3:
-            await ctx.reply("Usage: `!boosts add {+/-}{rate} {time} {target}` or `!boosts remove {+/-}{rate} {time} {target}`")
+            p = ctx.clean_prefix
+            await ctx.reply(
+                f"Usage: `{p}boosts add {{+/-}}{{rate}} {{time}} {{target}}` or "
+                f"`{p}boosts remove {{+/-}}{{rate}} {{time}} {{target}}`"
+            )
             return
 
         try:
@@ -475,13 +489,13 @@ class CoreCog(commands.Cog):
         orig = getattr(error, "original", error)
         try:
             if isinstance(orig, CommandNotFound):
-                await ctx.reply("Unknown command. Try `!help`."); return
+                await ctx.reply(f"Unknown command. Try `{ctx.clean_prefix}help`."); return
             if isinstance(orig, CheckFailure):
                 await ctx.reply("You don't have permission to use that command."); return
             if isinstance(orig, MissingPermissions):
                 await ctx.reply("You're missing required Discord permissions."); return
             if isinstance(orig, MissingRequiredArgument):
-                await ctx.reply("Missing argument(s). Try `!help` or check the usage."); return
+                await ctx.reply(f"Missing argument(s). Try `{ctx.clean_prefix}help` or check the usage."); return
             if isinstance(orig, BadArgument):
                 await ctx.reply("Bad argument. Please check your input."); return
             if isinstance(orig, DisabledCommand):

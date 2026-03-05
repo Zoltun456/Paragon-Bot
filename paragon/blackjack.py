@@ -812,9 +812,10 @@ class BlackjackCog(commands.Cog):
 
         parsed = _parse_reset_time(when)
         if not parsed:
+            p = ctx.clean_prefix
             await ctx.reply(
-                "Usage: `!bjtime <time>` where time is `HH:MM` (24h) or `h[:mm]am/pm`.\n"
-                "Examples: `!bjtime 00:00`, `!bjtime 6pm`, `!bjtime 6:30pm`."
+                f"Usage: `{p}bjtime <time>` where time is `HH:MM` (24h) or `h[:mm]am/pm`.\n"
+                f"Examples: `{p}bjtime 00:00`, `{p}bjtime 6pm`, `{p}bjtime 6:30pm`."
             )
             return
 
@@ -846,7 +847,7 @@ class BlackjackCog(commands.Cog):
         elif raw in ("toggle", "flip"):
             new_val = not current
         else:
-            await ctx.reply("Usage: `!bjcooldown [on|off|toggle]`")
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}bjcooldown [on|off|toggle]`")
             return
 
         st["cooldown_enabled"] = bool(new_val)

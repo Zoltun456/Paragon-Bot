@@ -320,7 +320,8 @@ class LottoCog(commands.Cog):
         try:
             count = int(arg)
         except ValueError:
-            await ctx.reply("Usage: `!l <tickets>` (number of tickets) or `!l @user` to check.")
+            p = ctx.clean_prefix
+            await ctx.reply(f"Usage: `{p}l <tickets>` (number of tickets) or `{p}l @user` to check.")
             return
         if count <= 0:
             await ctx.reply("Ticket count must be positive.")
@@ -400,9 +401,10 @@ class LottoCog(commands.Cog):
 
         parsed = _parse_draw_time(when)
         if not parsed:
+            p = ctx.clean_prefix
             await ctx.reply(
-                "Usage: `!lottotime <time>` where time is `HH:MM` (24h) or `h[:mm]am/pm`.\n"
-                "Examples: `!lottotime 18:00`, `!lottotime 6pm`, `!lottotime 6:30pm`."
+                f"Usage: `{p}lottotime <time>` where time is `HH:MM` (24h) or `h[:mm]am/pm`.\n"
+                f"Examples: `{p}lottotime 18:00`, `{p}lottotime 6pm`, `{p}lottotime 6:30pm`."
             )
             return
 

@@ -70,7 +70,7 @@ class PrestigeCog(commands.Cog):
             return
 
         if target.id != author.id:
-            await ctx.reply("You can only prestige **yourself**. Usage: `!prestige @self`.")
+            await ctx.reply(f"You can only prestige **yourself**. Usage: `{ctx.clean_prefix}prestige @self`.")
             return
 
         u = _udict(guild.id, author.id)
