@@ -15,6 +15,7 @@ from paragon.storage import load_data
 from paragon.surprise import SurpriseCog
 from paragon.thanks import ThanksCog
 from paragon.voice import VoiceCog
+from paragon.wakeup import WakeupCog
 from paragon.wordle import WordleCog
 
 
@@ -50,6 +51,7 @@ def setup_cogs_sync() -> None:
     bot.add_cog(PrestigeCog(bot))
     bot.add_cog(BlackjackCog(bot))
     bot.add_cog(VoiceCog(bot))
+    bot.add_cog(WakeupCog(bot))
     bot.add_cog(StatsCog(bot))
     bot.add_cog(AdminCog(bot))
 

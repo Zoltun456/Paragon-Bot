@@ -4,7 +4,7 @@ from typing import Optional
 import discord
 from discord.ext import commands, tasks
 
-from .config import AFK_CHANNEL_ID
+from .config import resolve_afk_channel_id
 from .guild_setup import ensure_guild_setup
 from .storage import load_data, _gdict, _udict, save_data
 from .xp import apply_delta, get_gain_state, grant_fixed_boost, grant_fixed_debuff
@@ -42,6 +42,7 @@ HELP_DESCRIPTIONS = {
     "join": "Join your current voice channel.",
     "leave": "Disconnect the bot from voice.",
     "voicehealth": "Admin: run voice system health checks.",
+    "wakeup": "Move an AFK user through random voice channels and into yours, then return them to AFK if silent.",
     "gamestats": "Show per-user game stats and XP ledger.",
     "guildgamestats": "Admin: show aggregated server game stats.",
     "role": "Admin: toggle a Discord role on a member.",
@@ -64,7 +65,8 @@ def _settings(gid: int) -> dict:
 def is_in_countable_vc(channel: Optional[discord.VoiceChannel]) -> bool:
     if channel is None: 
         return False
-    if AFK_CHANNEL_ID and channel.id == AFK_CHANNEL_ID:
+    afk_id = resolve_afk_channel_id(getattr(channel, "guild", None))
+    if afk_id and channel.id == afk_id:
         return False
     return True
 
@@ -78,7 +80,8 @@ def should_apply_inactive_loss(member: discord.Member) -> bool:
     v = member.voice
     if not v or not v.channel:
         return True  # not in any call
-    if AFK_CHANNEL_ID and v.channel.id == AFK_CHANNEL_ID:
+    afk_id = resolve_afk_channel_id(member.guild)
+    if afk_id and v.channel.id == afk_id:
         return True
     if v.mute or v.deaf or v.self_mute or v.self_deaf:
         return True

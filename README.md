@@ -156,6 +156,19 @@ It provides:
 ### Admin
 - `!voicehealth`
 
+## WakeupCog
+
+### Non-Admin
+- `!wakeup @user` (alias: `!wakeywakey @user`)
+- Caller must be in a voice channel.
+- Target must currently be in AFK.
+- Runs 10 random eligible voice-channel hops, then moves target to caller's channel.
+- If target sends no message within 60 seconds, they are moved back to AFK.
+- Wakeup lock is per-target and only clears once target returns to AFK.
+
+### Admin
+- None
+
 ## StatsCog
 
 ### Non-Admin
@@ -190,6 +203,7 @@ Current entrypoint (`Paragon.py`) loads:
 - `PrestigeCog`
 - `BlackjackCog`
 - `VoiceCog`
+- `WakeupCog`
 - `StatsCog`
 - `AdminCog`
 

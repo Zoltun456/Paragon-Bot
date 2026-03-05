@@ -60,6 +60,7 @@ GUILD_DB_DIR = os.getenv("PARAGON_DB_DIR", "paragon_data")
 # IDs / settings
 AUTHOR_USER_ID = _as_int("AUTHOR_USER_ID", _as_int("OWNER_USER_ID", 0))
 AFK_CHANNEL_ID = _as_int("AFK_CHANNEL_ID", 0)
+_AFK_CHANNEL_CACHE: dict[int, int] = {}
 
 # Timezone
 TZ = os.getenv("PARAGON_TZ", "America/New_York")
@@ -135,3 +136,71 @@ WORD_REGEX = re.compile(rf"^[A-Za-z]{{{WORDLE_WORD_LENGTH}}}$")
 # Coin flip
 CF_MAX_BET = _as_int("CF_MAX_BET", -1)
 CF_TTL_SECONDS = _as_int("CF_TTL_SECONDS", 120)
+
+
+def _looks_like_afk_name(name: str) -> bool:
+    n = str(name or "").strip().lower()
+    if not n:
+        return False
+    if n in {"afk", "afk-channel", "away", "away-from-keyboard", "idle"}:
+        return True
+    tokens = ("afk", "away", "idle", "inactive")
+    return any(t in n for t in tokens)
+
+
+def resolve_afk_channel_id(guild=None) -> int:
+    """
+    Resolve AFK channel id with fallback order:
+    1) Guild AFK channel configured in Discord
+    2) Voice channel with AFK-like name
+    3) AFK_CHANNEL_ID from env
+    4) 0
+    Resolved ids are cached per guild for reuse.
+    """
+    env_afk = int(AFK_CHANNEL_ID or 0)
+    if guild is None:
+        return env_afk if env_afk > 0 else 0
+
+    try:
+        gid = int(getattr(guild, "id", 0) or 0)
+    except Exception:
+        gid = 0
+
+    if gid > 0:
+        cached = int(_AFK_CHANNEL_CACHE.get(gid, 0) or 0)
+        if cached > 0:
+            return cached
+
+    try:
+        afk_ch = getattr(guild, "afk_channel", None)
+        afk_id = int(getattr(afk_ch, "id", 0) or 0)
+    except Exception:
+        afk_id = 0
+    if afk_id > 0:
+        if gid > 0:
+            _AFK_CHANNEL_CACHE[gid] = afk_id
+        return afk_id
+
+    best_match_id = 0
+    try:
+        voice_channels = list(getattr(guild, "voice_channels", []) or [])
+    except Exception:
+        voice_channels = []
+
+    for ch in voice_channels:
+        name = str(getattr(ch, "name", "") or "")
+        if name.strip().lower() == "afk":
+            best_match_id = int(getattr(ch, "id", 0) or 0)
+            break
+        if best_match_id <= 0 and _looks_like_afk_name(name):
+            best_match_id = int(getattr(ch, "id", 0) or 0)
+
+    if best_match_id > 0:
+        if gid > 0:
+            _AFK_CHANNEL_CACHE[gid] = best_match_id
+        return best_match_id
+
+    resolved = env_afk if env_afk > 0 else 0
+    if gid > 0:
+        _AFK_CHANNEL_CACHE[gid] = resolved
+    return resolved
