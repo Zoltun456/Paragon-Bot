@@ -1,5 +1,8 @@
 import discord
 from discord.ext import commands
+import inspect
+
+#import logging
 
 from paragon.admin import AdminCog
 from paragon.anagram import AnagramCog
@@ -14,7 +17,7 @@ from paragon.roulette import RouletteCog
 from paragon.storage import load_data
 from paragon.surprise import SurpriseCog
 from paragon.thanks import ThanksCog
-# from paragon.tts import TTSCog  # Disabled temporarily (voice transport issue under investigation)
+from paragon.tts import TTSCog
 from paragon.voice import VoiceCog
 from paragon.wakeup import WakeupCog
 from paragon.wordle import WordleCog
@@ -40,28 +43,65 @@ async def _global_check(_ctx):
     return True
 
 
-def setup_cogs_sync() -> None:
-    bot.add_cog(CoreCog(bot))
-    bot.add_cog(WordleCog(bot))
-    bot.add_cog(CoinFlipCog(bot))
-    bot.add_cog(RouletteCog(bot))
-    bot.add_cog(SurpriseCog(bot))
-    bot.add_cog(AnagramCog(bot))
-    bot.add_cog(ThanksCog(bot))
-    bot.add_cog(LottoCog(bot))
-    bot.add_cog(PrestigeCog(bot))
-    bot.add_cog(BlackjackCog(bot))
-    bot.add_cog(VoiceCog(bot))
-    bot.add_cog(WakeupCog(bot))
-    # bot.add_cog(TTSCog(bot))  # Disabled temporarily (voice transport issue under investigation)
-    bot.add_cog(StatsCog(bot))
-    bot.add_cog(AdminCog(bot))
+def _build_cogs() -> list[commands.Cog]:
+    return [
+        CoreCog(bot),
+        WordleCog(bot),
+        CoinFlipCog(bot),
+        RouletteCog(bot),
+        SurpriseCog(bot),
+        AnagramCog(bot),
+        ThanksCog(bot),
+        LottoCog(bot),
+        PrestigeCog(bot),
+        BlackjackCog(bot),
+        VoiceCog(bot),
+        WakeupCog(bot),
+        TTSCog(bot),
+        StatsCog(bot),
+        AdminCog(bot),
+    ]
+
+
+async def _add_cog(cog: commands.Cog) -> None:
+    name = cog.__class__.__name__
+    if bot.get_cog(name) is not None:
+        return
+
+    maybe = bot.add_cog(cog)
+    if inspect.isawaitable(maybe):
+        await maybe
+
+
+async def setup_cogs() -> None:
+    for cog in _build_cogs():
+        await _add_cog(cog)
+
+
+def preload_cogs_if_sync_add_cog() -> None:
+    """
+    Compatibility path: some discord forks expose sync add_cog and may not call setup_hook.
+    """
+    if inspect.iscoroutinefunction(bot.add_cog):
+        return
+    for cog in _build_cogs():
+        name = cog.__class__.__name__
+        if bot.get_cog(name) is not None:
+            continue
+        bot.add_cog(cog)
 
 
 @bot.event
 async def on_ready():
+    await setup_cogs()
     author_info = f"{AUTHOR_USER_ID}" if AUTHOR_USER_ID else "unset"
     print(f"Bot online as {bot.user} | author={author_info}")
+    print(f"Cogs loaded: {len(bot.cogs)} | commands: {len(bot.commands)}")
+
+
+@bot.event
+async def setup_hook():
+    await setup_cogs()
 
 
 def _bootstrap_storage() -> None:
@@ -70,5 +110,5 @@ def _bootstrap_storage() -> None:
 
 if __name__ == "__main__":
     _bootstrap_storage()
-    setup_cogs_sync()
+    preload_cogs_if_sync_add_cog()
     bot.run(TOKEN)
