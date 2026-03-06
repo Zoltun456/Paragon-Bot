@@ -16,7 +16,15 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
-from .config import ELEVEN_API, ELEVEN_MODEL_ID, ELEVEN_OUTPUT_FORMAT, ELEVEN_VOICE_ID
+from .config import (
+    ELEVEN_API,
+    ELEVEN_FREE_CATEGORY,
+    ELEVEN_FREE_ONLY,
+    ELEVEN_FREE_VOICE_LIMIT,
+    ELEVEN_MODEL_ID,
+    ELEVEN_OUTPUT_FORMAT,
+    ELEVEN_VOICE_ID,
+)
 from .ownership import is_control_user_id
 from .voice_support import dave_4017_message, dave_support_status, is_dave_close_4017
 
@@ -40,7 +48,7 @@ class _SayRequest:
     enqueued_at: float
 
 
-def _fetch_eleven_voice_ids() -> list[str]:
+def _fetch_eleven_voice_ids(*, free_only: bool, free_category: str, free_limit: int) -> list[str]:
     if not ELEVEN_API:
         return []
     req = urllib.request.Request(
@@ -67,9 +75,16 @@ def _fetch_eleven_voice_ids() -> list[str]:
     for v in voices:
         if not isinstance(v, dict):
             continue
+        if free_only:
+            category = str(v.get("category", "")).strip().lower()
+            if category != free_category:
+                continue
         vid = str(v.get("voice_id", "")).strip()
         if vid:
             out.append(vid)
+
+    if free_only and free_limit > 0:
+        return out[:free_limit]
     return out
 
 
@@ -322,7 +337,12 @@ class TTSCog(commands.Cog):
         now = time.monotonic()
         if self._voice_ids_cache and (now - self._voice_cache_ts) < VOICE_CACHE_TTL_SECONDS:
             return list(self._voice_ids_cache)
-        ids = await asyncio.to_thread(_fetch_eleven_voice_ids)
+        ids = await asyncio.to_thread(
+            _fetch_eleven_voice_ids,
+            free_only=bool(ELEVEN_FREE_ONLY),
+            free_category=str(ELEVEN_FREE_CATEGORY or "premade").strip().lower(),
+            free_limit=max(0, int(ELEVEN_FREE_VOICE_LIMIT)),
+        )
         if not ids:
             fallback = (ELEVEN_VOICE_ID or "21m00Tcm4TlvDq8ikWAM").strip()
             ids = [fallback] if fallback else []

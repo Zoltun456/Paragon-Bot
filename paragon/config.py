@@ -137,18 +137,14 @@ WORD_REGEX = re.compile(rf"^[A-Za-z]{{{WORDLE_WORD_LENGTH}}}$")
 CF_MAX_BET = _as_int("CF_MAX_BET", -1)
 CF_TTL_SECONDS = _as_int("CF_TTL_SECONDS", 120)
 
-# TTS (OpenAI)
-OPENAI_API = os.getenv("OPENAI_API", "").strip()
-OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts").strip()
-OPENAI_TTS_RESPONSE_FORMAT = os.getenv("OPENAI_TTS_RESPONSE_FORMAT", "mp3").strip().lower()
-_OPENAI_TTS_DEFAULT_VOICES = "alloy,ash,ballad,coral,echo,fable,onyx,nova,sage,shimmer,verse,marin,cedar"
-OPENAI_TTS_VOICES = [
-    v.strip()
-    for v in os.getenv("OPENAI_TTS_VOICES", _OPENAI_TTS_DEFAULT_VOICES).split(",")
-    if v.strip()
-]
-OPENAI_TTS_SPEED_BASE = _as_float("OPENAI_TTS_SPEED_BASE", 1.0)
-OPENAI_TTS_SPEED_VARIANCE = _as_float("OPENAI_TTS_SPEED_VARIANCE", 0.08)
+# TTS (ElevenLabs)
+ELEVEN_API = os.getenv("ELEVEN_API", "").strip()
+ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "21m00Tcm4TlvDq8ikWAM").strip()
+ELEVEN_MODEL_ID = os.getenv("ELEVEN_MODEL_ID", "eleven_flash_v2_5").strip()
+ELEVEN_OUTPUT_FORMAT = os.getenv("ELEVEN_OUTPUT_FORMAT", "mp3_44100_128").strip()
+ELEVEN_FREE_ONLY = _as_bool("ELEVEN_FREE_ONLY", True)
+ELEVEN_FREE_CATEGORY = os.getenv("ELEVEN_FREE_CATEGORY", "premade").strip().lower()
+ELEVEN_FREE_VOICE_LIMIT = _as_int("ELEVEN_FREE_VOICE_LIMIT", 21)
 
 # Daily Spin Wheel
 SPIN_RESET_HOUR = _as_int("SPIN_RESET_HOUR", 0)
