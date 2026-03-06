@@ -232,7 +232,7 @@ class TTSCog(commands.Cog):
         return queue
 
     def _cooldown_is_enabled(self, guild_id: int) -> bool:
-        return self._cooldown_enabled.get(guild_id, True)
+        return self._cooldown_enabled.get(guild_id, False)
 
     def _skip_event_for(self, guild_id: int) -> asyncio.Event:
         ev = self._guild_skip_events.get(guild_id)
