@@ -9,14 +9,20 @@ import subprocess
 import tempfile
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from typing import Optional
 
 import discord
 from discord.ext import commands
 
-from .config import ELEVEN_API, ELEVEN_MODEL_ID, ELEVEN_OUTPUT_FORMAT, ELEVEN_VOICE_ID
+from .config import (
+    OPENAI_API,
+    OPENAI_TTS_MODEL,
+    OPENAI_TTS_RESPONSE_FORMAT,
+    OPENAI_TTS_SPEED_BASE,
+    OPENAI_TTS_SPEED_VARIANCE,
+    OPENAI_TTS_VOICES,
+)
 from .ownership import is_control_user_id
 from .voice_support import dave_4017_message, dave_support_status, is_dave_close_4017
 
@@ -40,70 +46,81 @@ class _SayRequest:
     enqueued_at: float
 
 
-def _fetch_eleven_voice_ids() -> list[str]:
-    if not ELEVEN_API:
-        return []
-    req = urllib.request.Request(
-        "https://api.elevenlabs.io/v1/voices",
-        method="GET",
-        headers={
-            "xi-api-key": ELEVEN_API,
-            "Accept": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            raw = resp.read()
-    except Exception:
-        return []
-    try:
-        payload = json.loads(raw.decode("utf-8", errors="ignore"))
-    except Exception:
-        return []
-    voices = payload.get("voices")
-    if not isinstance(voices, list):
-        return []
-    out: list[str] = []
-    for v in voices:
-        if not isinstance(v, dict):
-            continue
-        vid = str(v.get("voice_id", "")).strip()
-        if vid:
-            out.append(vid)
-    return out
+_DEFAULT_OPENAI_VOICES = [
+    "alloy",
+    "ash",
+    "ballad",
+    "coral",
+    "echo",
+    "fable",
+    "onyx",
+    "nova",
+    "sage",
+    "shimmer",
+    "verse",
+    "marin",
+    "cedar",
+]
+_OPENAI_STYLE_HINTS = [
+    "Use a calm conversational tone.",
+    "Use a bright energetic tone.",
+    "Use a warm friendly tone.",
+    "Use a clean neutral tone.",
+    "Use a slightly dramatic tone.",
+    "Use a concise confident tone.",
+]
 
 
-def _synthesize_eleven_bytes(text: str, *, voice_id: str, voice_settings: dict, seed: int, speed: float) -> bytes:
-    if not ELEVEN_API:
-        raise RuntimeError("ELEVEN_API is not configured.")
+def _fetch_openai_voice_ids(configured_voice_ids: list[str]) -> list[str]:
+    out = [str(v).strip() for v in configured_voice_ids if str(v).strip()]
+    if not out:
+        out = list(_DEFAULT_OPENAI_VOICES)
+    return list(dict.fromkeys(out))
 
-    voice_id = (voice_id or ELEVEN_VOICE_ID or "21m00Tcm4TlvDq8ikWAM").strip()
-    model_id = ELEVEN_MODEL_ID or "eleven_flash_v2_5"
-    output_format = ELEVEN_OUTPUT_FORMAT or "mp3_44100_128"
-    output_q = urllib.parse.quote(output_format, safe="_")
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream?output_format={output_q}"
 
-    payload_obj = {
-        "text": text,
-        "model_id": model_id,
-        "voice_settings": dict(voice_settings),
-        "seed": int(seed),
+def _openai_audio_format() -> str:
+    fmt = str(OPENAI_TTS_RESPONSE_FORMAT or "mp3").strip().lower()
+    if fmt in {"mp3", "opus", "aac", "flac", "wav"}:
+        return fmt
+    return "mp3"
+
+
+def _openai_audio_suffix() -> str:
+    return f".{_openai_audio_format()}"
+
+
+def _supports_instructions(model_id: str) -> bool:
+    mid = str(model_id or "").strip().lower()
+    return mid not in {"tts-1", "tts-1-hd"}
+
+
+def _synthesize_openai_bytes(text: str, *, voice_id: str, speed: float, instructions: str) -> bytes:
+    if not OPENAI_API:
+        raise RuntimeError("OPENAI_API is not configured.")
+
+    model = (OPENAI_TTS_MODEL or "gpt-4o-mini-tts").strip()
+    payload_obj: dict[str, object] = {
+        "model": model,
+        "input": text,
+        "voice": (voice_id or "alloy").strip(),
+        "response_format": _openai_audio_format(),
         "speed": float(speed),
     }
+    if instructions and _supports_instructions(model):
+        payload_obj["instructions"] = instructions
 
-    def _do_post(payload_in: dict) -> bytes:
+    def _do_post(payload_in: dict[str, object]) -> bytes:
         payload = json.dumps(payload_in).encode("utf-8")
         req = urllib.request.Request(
-            url,
+            "https://api.openai.com/v1/audio/speech",
             data=payload,
             method="POST",
             headers={
-                "xi-api-key": ELEVEN_API,
+                "Authorization": f"Bearer {OPENAI_API}",
                 "Content-Type": "application/json",
-                "Accept": "audio/mpeg",
             },
         )
-        with urllib.request.urlopen(req, timeout=45) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             return resp.read()
 
     first_body = ""
@@ -114,9 +131,11 @@ def _synthesize_eleven_bytes(text: str, *, voice_id: str, voice_settings: dict, 
             first_body = e.read().decode("utf-8", errors="ignore")
         except Exception:
             first_body = ""
-        # Some models/accounts may reject speed; retry once without it.
-        if e.code == 400 and "speed" in payload_obj:
+
+        # Some models may not support these controls. Retry with reduced payload.
+        if e.code == 400 and ("instructions" in payload_obj or "speed" in payload_obj):
             fallback = dict(payload_obj)
+            fallback.pop("instructions", None)
             fallback.pop("speed", None)
             try:
                 return _do_post(fallback)
@@ -126,8 +145,10 @@ def _synthesize_eleven_bytes(text: str, *, voice_id: str, voice_settings: dict, 
                     body2 = e2.read().decode("utf-8", errors="ignore")
                 except Exception:
                     body2 = ""
-                raise RuntimeError(f"ElevenLabs error {e2.code}: {body2[:200]}") from e2
-        raise RuntimeError(f"ElevenLabs error {e.code}: {first_body[:200]}") from e
+                raise RuntimeError(f"OpenAI TTS error {e2.code}: {body2[:200]}") from e2
+        raise RuntimeError(f"OpenAI TTS error {e.code}: {first_body[:200]}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"OpenAI TTS request failed: {e}") from e
 
 
 def _probe_audio_seconds(path: str) -> float:
@@ -322,29 +343,24 @@ class TTSCog(commands.Cog):
         now = time.monotonic()
         if self._voice_ids_cache and (now - self._voice_cache_ts) < VOICE_CACHE_TTL_SECONDS:
             return list(self._voice_ids_cache)
-        ids = await asyncio.to_thread(_fetch_eleven_voice_ids)
-        if not ids:
-            fallback = (ELEVEN_VOICE_ID or "21m00Tcm4TlvDq8ikWAM").strip()
-            ids = [fallback] if fallback else []
+        ids = await asyncio.to_thread(_fetch_openai_voice_ids, OPENAI_TTS_VOICES)
         self._voice_ids_cache = list(ids)
         self._voice_cache_ts = now
         return list(self._voice_ids_cache)
 
-    def _voice_profile_for_user(self, user_id: int) -> tuple[dict, int, float]:
+    def _voice_profile_for_user(self, user_id: int) -> tuple[float, str]:
         r = random.Random(int(user_id))
-        settings = {
-            "stability": round(0.25 + (r.random() * 0.55), 3),
-            "similarity_boost": round(0.25 + (r.random() * 0.65), 3),
-            "style": round(r.random() * 0.45, 3),
-            "use_speaker_boost": bool(r.random() >= 0.5),
-        }
-        seed = int(user_id % 2_147_483_647)
-        speed = round(0.9 + (r.random() * 0.25), 3)
-        return settings, seed, speed
+        base = max(0.5, min(2.0, float(OPENAI_TTS_SPEED_BASE)))
+        variance = max(0.0, min(0.4, float(OPENAI_TTS_SPEED_VARIANCE)))
+        speed = round(base + ((r.random() * 2.0) - 1.0) * variance, 3)
+        speed = max(0.75, min(1.25, speed))
+        hint = _OPENAI_STYLE_HINTS[r.randrange(len(_OPENAI_STYLE_HINTS))]
+        instructions = f"{hint} Keep pacing natural and pronunciation clear."
+        return speed, instructions
 
     def _voice_id_for_user(self, user_id: int, voice_ids: list[str]) -> str:
         if not voice_ids:
-            return (ELEVEN_VOICE_ID or "21m00Tcm4TlvDq8ikWAM").strip()
+            return "alloy"
         idx = int(user_id) % len(voice_ids)
         return str(voice_ids[idx]).strip()
 
@@ -581,18 +597,17 @@ class TTSCog(commands.Cog):
                 self._debug(ctx, "starting synthesis")
                 voice_ids = await self._get_voice_ids()
                 voice_id = self._voice_id_for_user(ctx.author.id, voice_ids)
-                voice_settings, seed, speed = self._voice_profile_for_user(ctx.author.id)
+                speed, instructions = self._voice_profile_for_user(ctx.author.id)
                 self._debug(
                     ctx,
-                    f"voice_id={voice_id} seed={seed} speed={speed} settings={voice_settings}",
+                    f"voice_id={voice_id} speed={speed} instructions={instructions}",
                 )
                 audio_bytes = await asyncio.to_thread(
-                    _synthesize_eleven_bytes,
+                    _synthesize_openai_bytes,
                     message,
                     voice_id=voice_id,
-                    voice_settings=voice_settings,
-                    seed=seed,
                     speed=speed,
+                    instructions=instructions,
                 )
                 if skip_event.is_set():
                     await ctx.reply("Current TTS request was skipped.")
@@ -601,7 +616,7 @@ class TTSCog(commands.Cog):
                     await ctx.reply("TTS generation returned empty audio.")
                     return
 
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=_openai_audio_suffix()) as f:
                     temp_path = f.name
                     f.write(audio_bytes)
                 audio_seconds = await asyncio.to_thread(_probe_audio_seconds, temp_path)

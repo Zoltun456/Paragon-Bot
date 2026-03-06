@@ -15,7 +15,7 @@ It provides:
 - Default command prefix: `!` (set via `COMMAND_PREFIX` in `.env`)
 - Data is stored per guild in `paragon_data/<guild_id>.db`
 - If cloning, bot requires `DISCORD_TOKEN` in an `.env` that has proper permissions set in Discord's dev portal
-- `!say` requires `ELEVEN_API` in `.env` and FFmpeg available on the host
+- `!say` uses OpenAI TTS (`OPENAI_API`) and requires FFmpeg available on the host
 
 ## Command Reference (By Cog)
 
@@ -162,8 +162,8 @@ It provides:
 ### Non-Admin
 - `!say {message} {@user}`
 - Bot joins the mentioned user's voice channel, plays TTS, then leaves.
-- Voice/profile is deterministic per caller (same user keeps the same voice style across servers).
-- If available voices are limited, per-user voice settings (stability/similarity/style/speed/seed) still vary output.
+- Voice/profile is deterministic per caller (same user keeps the same voice selection/speed/style across servers).
+- Voice assignment is based on caller Discord user ID modulo configured OpenAI voices.
 
 ### Admin
 - None
