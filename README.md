@@ -173,6 +173,7 @@ It provides:
 ## TTSCog
 
 ### Non-Admin
+- `!tts` (aliases: `!ttstags`, `!ttshelp`) to view style/emotion/non-verbal tag examples
 - `!say {message} {@user}`
 - `!rerollvoice` (aliases: `!ttsreroll`, `!voicereroll`)
 - `!setvoice <voice_id> [stability] [similarity_boost] [style] [use_speaker_boost] [speed] [seed]`
@@ -183,6 +184,7 @@ It provides:
 
 ### Admin
 - `!rerollvoice @user` (force reroll for another member)
+- `!ttsmodel [model_id]` (when empty, lists current available models for your account)
 
 ## WakeupCog
 

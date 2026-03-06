@@ -23,12 +23,14 @@ from .config import (
     ELEVEN_VOICE_ID,
 )
 from .ownership import is_control_user_id
+from .storage import _gdict, save_data
 from .user_settings import get_user_tts_profile, set_user_tts_profile
 from .voice_support import dave_4017_message, dave_support_status, is_dave_close_4017
 
 
 MAX_SAY_CHARS = 350
 VOICE_CACHE_TTL_SECONDS = 30 * 60
+MODEL_CACHE_TTL_SECONDS = 30 * 60
 POST_PLAY_IDLE_SECONDS = 1.0
 TTS_COOLDOWN_SECONDS = 300.0
 TTS_DEBUG = os.getenv("TTS_DEBUG", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -37,6 +39,66 @@ DEFAULT_MANUAL_SIMILARITY_BOOST = 0.5
 DEFAULT_MANUAL_STYLE = 0.1
 DEFAULT_MANUAL_USE_SPEAKER_BOOST = True
 DEFAULT_MANUAL_SPEED = 1.0
+TTS_TAG_GROUPS: list[tuple[str, list[str]]] = [
+    (
+        "Emotion Tags",
+        [
+            "[happy]",
+            "[sad]",
+            "[angry]",
+            "[excited]",
+            "[curious]",
+            "[sarcastic]",
+            "[mischievously]",
+            "[crying]",
+            "[tired]",
+            "[awe]",
+        ],
+    ),
+    (
+        "Style/Delivery Tags",
+        [
+            "[whispers]",
+            "[shouting]",
+            "[calmly]",
+            "[dramatic tone]",
+            "[slowly]",
+            "[rushed]",
+            "[drawn out]",
+            "[interrupting]",
+            "[overlapping]",
+            "[narrating]",
+        ],
+    ),
+    (
+        "Non-Verbal/SFX Tags",
+        [
+            "[laughs]",
+            "[laughs harder]",
+            "[starts laughing]",
+            "[chuckles]",
+            "[wheezing]",
+            "[sighs]",
+            "[exhales]",
+            "[snorts]",
+            "[swallows]",
+            "[gulps]",
+            "[coughs]",
+            "[applause]",
+            "[clapping]",
+            "[gunshot]",
+            "[explosion]",
+        ],
+    ),
+    (
+        "Pacing Tags",
+        [
+            "[pause]",
+            "[short pause]",
+            "[long pause]",
+        ],
+    ),
+]
 
 
 @dataclass(slots=True)
@@ -86,12 +148,59 @@ def _fetch_eleven_voice_catalog() -> list[tuple[str, str]]:
     return out
 
 
-def _synthesize_eleven_bytes(text: str, *, voice_id: str, voice_settings: dict, seed: int, speed: float) -> bytes:
+def _fetch_eleven_models() -> list[tuple[str, str]]:
+    if not ELEVEN_API:
+        return []
+    req = urllib.request.Request(
+        "https://api.elevenlabs.io/v1/models",
+        method="GET",
+        headers={
+            "xi-api-key": ELEVEN_API,
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read()
+    except Exception:
+        return []
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="ignore"))
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        if not bool(item.get("can_do_text_to_speech", False)):
+            continue
+        model_id = str(item.get("model_id", "")).strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        name = str(item.get("name", "")).strip() or model_id
+        out.append((model_id, name))
+    return out
+
+
+def _synthesize_eleven_bytes(
+    text: str,
+    *,
+    voice_id: str,
+    model_id: str,
+    voice_settings: dict,
+    seed: int,
+    speed: float,
+) -> bytes:
     if not ELEVEN_API:
         raise RuntimeError("ELEVEN_API is not configured.")
 
     voice_id = (voice_id or ELEVEN_VOICE_ID or "21m00Tcm4TlvDq8ikWAM").strip()
-    model_id = ELEVEN_MODEL_ID or "eleven_flash_v2_5"
+    model_id = (model_id or ELEVEN_MODEL_ID or "eleven_flash_v2_5").strip()
     output_format = ELEVEN_OUTPUT_FORMAT or "mp3_44100_128"
     output_q = urllib.parse.quote(output_format, safe="_")
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream?output_format={output_q}"
@@ -190,6 +299,9 @@ class TTSCog(commands.Cog):
         self._voice_name_cache: dict[str, str] = {}
         self._voice_cache_ts: float = 0.0
         self._voice_profile_locks: dict[int, asyncio.Lock] = {}
+        self._model_catalog_cache: list[tuple[str, str]] = []
+        self._model_name_cache: dict[str, str] = {}
+        self._model_cache_ts: float = 0.0
 
     def cog_unload(self):
         for task in self._guild_workers.values():
@@ -200,6 +312,8 @@ class TTSCog(commands.Cog):
         self._guild_skip_events.clear()
         self._guild_processing.clear()
         self._voice_profile_locks.clear()
+        self._model_catalog_cache.clear()
+        self._model_name_cache.clear()
 
     def _queue_for(self, guild_id: int) -> asyncio.Queue[_SayRequest]:
         queue = self._guild_queues.get(guild_id)
@@ -261,6 +375,29 @@ class TTSCog(commands.Cog):
         if not vid:
             return "Unknown Voice"
         return self._voice_name_cache.get(vid, vid)
+
+    def _model_name_for(self, model_id: str) -> str:
+        mid = str(model_id or "").strip()
+        if not mid:
+            return "Unknown Model"
+        return self._model_name_cache.get(mid, mid)
+
+    def _guild_settings(self, guild_id: int) -> dict:
+        g = _gdict(guild_id)
+        st = g.get("settings")
+        if not isinstance(st, dict):
+            st = {}
+            g["settings"] = st
+        if "inactive_loss_enabled" not in st:
+            st["inactive_loss_enabled"] = True
+        return st
+
+    def _tts_model_for_guild(self, guild_id: int) -> str:
+        st = self._guild_settings(guild_id)
+        selected = str(st.get("tts_model_id", "")).strip()
+        if selected:
+            return selected
+        return (ELEVEN_MODEL_ID or "eleven_flash_v2_5").strip()
 
     async def _ensure_voice_client(
         self,
@@ -375,6 +512,30 @@ class TTSCog(commands.Cog):
     async def _get_voice_ids(self) -> list[str]:
         catalog = await self._get_voice_catalog()
         return [voice_id for voice_id, _ in catalog]
+
+    async def _get_model_catalog(self) -> list[tuple[str, str]]:
+        now = time.monotonic()
+        if self._model_catalog_cache and (now - self._model_cache_ts) < MODEL_CACHE_TTL_SECONDS:
+            return list(self._model_catalog_cache)
+
+        catalog = await asyncio.to_thread(_fetch_eleven_models)
+        deduped: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for model_id, model_name in catalog:
+            mid = str(model_id or "").strip()
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            deduped.append((mid, str(model_name or mid)))
+
+        fallback = (ELEVEN_MODEL_ID or "eleven_flash_v2_5").strip()
+        if fallback and fallback not in seen:
+            deduped.append((fallback, fallback))
+
+        self._model_catalog_cache = list(deduped)
+        self._model_name_cache = {model_id: model_name for model_id, model_name in deduped}
+        self._model_cache_ts = now
+        return list(self._model_catalog_cache)
 
     def _build_random_voice_profile(self, voice_ids: list[str], *, exclude_voice_id: str = "") -> dict:
         rng = random.SystemRandom()
@@ -579,6 +740,44 @@ class TTSCog(commands.Cog):
             f"(when ON: per-user, per-server, {int(TTS_COOLDOWN_SECONDS)}s)."
         )
 
+    @commands.command(name="ttsmodel", aliases=["saymodel"])
+    async def tts_model(self, ctx: commands.Context, model_id: Optional[str] = None):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+        if not self._is_tts_admin(ctx):
+            await ctx.reply("You don't have permission to manage the TTS model.")
+            return
+
+        catalog = await self._get_model_catalog()
+        available_ids = {mid for mid, _ in catalog}
+        current = self._tts_model_for_guild(int(ctx.guild.id))
+
+        if model_id is None or not str(model_id).strip():
+            lines = [
+                f"Current TTS model: **{self._model_name_for(current)}** (`{current}`)",
+                f"Usage: `{ctx.clean_prefix}ttsmodel <model_id>`",
+                "Available models:",
+            ]
+            for mid, name in catalog:
+                marker = " (current)" if mid == current else ""
+                lines.append(f"- `{mid}` - {name}{marker}")
+            await ctx.reply("\n".join(lines))
+            return
+
+        target = str(model_id).strip()
+        if target not in available_ids:
+            await ctx.reply(
+                f"Unknown TTS model `{target}`. "
+                f"Run `{ctx.clean_prefix}ttsmodel` to list currently available models."
+            )
+            return
+
+        st = self._guild_settings(int(ctx.guild.id))
+        st["tts_model_id"] = target
+        await save_data()
+        await ctx.reply(f"TTS model set to **{self._model_name_for(target)}** (`{target}`) for this server.")
+
     @commands.command(name="ttsqueue", aliases=["sayqueue"])
     async def tts_queue(self, ctx: commands.Context, action: Optional[str] = None, count: Optional[int] = None):
         if ctx.guild is None:
@@ -706,6 +905,29 @@ class TTSCog(commands.Cog):
             await ctx.reply("Queued TTS request. Starting shortly.")
         else:
             await ctx.reply(f"Queued TTS request at position **{position}**.")
+
+    @commands.command(name="tts", aliases=["ttstags", "ttshelp"])
+    async def tts_tags(self, ctx: commands.Context):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+
+        model_id = self._tts_model_for_guild(int(ctx.guild.id))
+        lines = [
+            "**ElevenLabs TTS Tag Guide**",
+            f"Current server model: `{model_id}`",
+            "Use tags directly in your `say` message, e.g. `[laughs] that was wild!`",
+            "Tags work best on expressive models (especially `eleven_v3`).",
+            "These are common tags; expressive prompting supports natural variation.",
+            "",
+        ]
+
+        for title, tags in TTS_TAG_GROUPS:
+            lines.append(f"**{title}:**")
+            lines.append(", ".join(tags))
+            lines.append("")
+
+        await ctx.reply("\n".join(lines).strip())
 
     @commands.command(name="rerollvoice", aliases=["ttsreroll", "voicereroll"])
     async def reroll_voice(self, ctx: commands.Context, target: Optional[discord.Member] = None):
@@ -851,14 +1073,16 @@ class TTSCog(commands.Cog):
                 voice_settings = dict(voice_profile.get("settings", {}))
                 seed = int(voice_profile.get("seed", 1))
                 speed = float(voice_profile.get("speed", 1.0))
+                model_id = self._tts_model_for_guild(int(ctx.guild.id))
                 self._debug(
                     ctx,
-                    f"voice_id={voice_id} seed={seed} speed={speed} settings={voice_settings}",
+                    f"voice_id={voice_id} model_id={model_id} seed={seed} speed={speed} settings={voice_settings}",
                 )
                 audio_bytes = await asyncio.to_thread(
                     _synthesize_eleven_bytes,
                     message,
                     voice_id=voice_id,
+                    model_id=model_id,
                     voice_settings=voice_settings,
                     seed=seed,
                     speed=speed,

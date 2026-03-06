@@ -47,7 +47,9 @@ HELP_DESCRIPTIONS = {
     "join": "Join your current voice channel.",
     "leave": "Disconnect the bot from voice.",
     "voicehealth": "Admin: run voice system health checks.",
+    "tts": "Show TTS style/emotion/non-verbal tag examples.",
     "ttscooldown": "Admin: toggle or view !say cooldown (per-user per-server).",
+    "ttsmodel": "Admin: view or set the Eleven TTS model for this server.",
     "ttsqueue": "Admin: show, skip current, or clear the per-server TTS queue.",
     "wakeup": "Move an AFK user through random voice channels and into yours, then return them to AFK if silent.",
     "say": "Join a mentioned user's voice channel, speak a TTS message, then leave.",
@@ -138,7 +140,7 @@ class CoreCog(commands.Cog):
         return sign, amount
 
     def _is_admin_command(self, cmd: commands.Command) -> bool:
-        if cmd.name in {"ttscooldown", "ttsqueue"}:
+        if cmd.name in {"ttscooldown", "ttsmodel", "ttsqueue"}:
             return True
         if cmd.cog_name == "AdminCog":
             return True
