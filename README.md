@@ -178,7 +178,7 @@ It provides:
 - `!setvoice <voice_id> [stability] [similarity_boost] [style] [use_speaker_boost] [speed] [seed]`
 - Bot joins the mentioned user's voice channel, plays TTS, then leaves.
 - Voice/profile is persisted globally per caller (same user keeps the same voice selection/settings across servers).
-- Voice options are pulled from available English voices in your ElevenLabs account.
+- Voice options are pulled from available voices in your ElevenLabs account.
 - For `!setvoice`, any omitted optional settings use default profile values.
 
 ### Admin

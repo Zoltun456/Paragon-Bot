@@ -51,28 +51,6 @@ class _SayRequest:
     enqueued_at: float
 
 
-def _voice_is_english(entry: dict) -> bool:
-    labels = entry.get("labels")
-    if isinstance(labels, dict):
-        if str(labels.get("language", "")).strip().lower().startswith("en"):
-            return True
-
-    fine_tuning = entry.get("fine_tuning")
-    if isinstance(fine_tuning, dict):
-        if str(fine_tuning.get("language", "")).strip().lower().startswith("en"):
-            return True
-
-    verified_languages = entry.get("verified_languages")
-    if isinstance(verified_languages, list):
-        for item in verified_languages:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("language", "")).strip().lower().startswith("en"):
-                return True
-
-    return False
-
-
 def _fetch_eleven_voice_catalog() -> list[tuple[str, str]]:
     if not ELEVEN_API:
         return []
@@ -96,8 +74,7 @@ def _fetch_eleven_voice_catalog() -> list[tuple[str, str]]:
     voices = payload.get("voices")
     if not isinstance(voices, list):
         return []
-    english: list[tuple[str, str]] = []
-    fallback_all: list[tuple[str, str]] = []
+    out: list[tuple[str, str]] = []
     for v in voices:
         if not isinstance(v, dict):
             continue
@@ -105,13 +82,8 @@ def _fetch_eleven_voice_catalog() -> list[tuple[str, str]]:
         if not vid:
             continue
         name = str(v.get("name", "")).strip() or vid
-        pair = (vid, name)
-        fallback_all.append(pair)
-        if _voice_is_english(v):
-            english.append(pair)
-
-    # Prefer explicitly English voices; fall back to all if no language metadata is present.
-    return english if english else fallback_all
+        out.append((vid, name))
+    return out
 
 
 def _synthesize_eleven_bytes(text: str, *, voice_id: str, voice_settings: dict, seed: int, speed: float) -> bytes:
@@ -472,11 +444,11 @@ class TTSCog(commands.Cog):
             return False
         return None
 
-    def _normalize_voice_profile(self, raw: dict, *, valid_voice_ids: set[str]) -> Optional[dict]:
+    def _normalize_voice_profile(self, raw: dict) -> Optional[dict]:
         if not isinstance(raw, dict):
             return None
         voice_id = str(raw.get("voice_id", "")).strip()
-        if not voice_id or voice_id not in valid_voice_ids:
+        if not voice_id:
             return None
 
         settings_in = raw.get("settings")
@@ -522,7 +494,7 @@ class TTSCog(commands.Cog):
         lock = self._voice_profile_lock_for(user_id)
         async with lock:
             raw = await asyncio.to_thread(get_user_tts_profile, int(user_id))
-            profile = self._normalize_voice_profile(raw, valid_voice_ids=set(voice_ids))
+            profile = self._normalize_voice_profile(raw)
             if profile is not None:
                 return profile
 
@@ -778,14 +750,10 @@ class TTSCog(commands.Cog):
             await ctx.reply("This command can only be used in a server.")
             return
 
-        catalog = await self._get_voice_catalog()
-        valid_voice_ids = {vid for vid, _ in catalog}
+        await self._get_voice_catalog()
         voice_id = str(voice_id or "").strip()
-        if voice_id not in valid_voice_ids:
-            await ctx.reply(
-                "Unknown voice ID for your available English Eleven voices. "
-                f"Use an ID from your account voice list; e.g. `{ctx.clean_prefix}setvoice <voice_id>`."
-            )
+        if not voice_id:
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}setvoice <voice_id> [stability] [similarity_boost] [style] [use_speaker_boost] [speed] [seed]`")
             return
 
         if stability is not None and not (0.0 <= float(stability) <= 1.0):
@@ -820,7 +788,7 @@ class TTSCog(commands.Cog):
             speed=speed,
             seed=seed,
         )
-        normalized = self._normalize_voice_profile(profile, valid_voice_ids=valid_voice_ids)
+        normalized = self._normalize_voice_profile(profile)
         if normalized is None:
             await ctx.reply("Unable to apply that voice profile. Please verify values and try again.")
             return
