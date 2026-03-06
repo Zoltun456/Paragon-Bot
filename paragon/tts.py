@@ -18,14 +18,12 @@ from discord.ext import commands
 
 from .config import (
     ELEVEN_API,
-    ELEVEN_FREE_CATEGORY,
-    ELEVEN_FREE_ONLY,
-    ELEVEN_FREE_VOICE_LIMIT,
     ELEVEN_MODEL_ID,
     ELEVEN_OUTPUT_FORMAT,
     ELEVEN_VOICE_ID,
 )
 from .ownership import is_control_user_id
+from .user_settings import get_user_tts_profile, set_user_tts_profile
 from .voice_support import dave_4017_message, dave_support_status, is_dave_close_4017
 
 
@@ -48,7 +46,29 @@ class _SayRequest:
     enqueued_at: float
 
 
-def _fetch_eleven_voice_ids(*, free_only: bool, free_category: str, free_limit: int) -> list[str]:
+def _voice_is_english(entry: dict) -> bool:
+    labels = entry.get("labels")
+    if isinstance(labels, dict):
+        if str(labels.get("language", "")).strip().lower().startswith("en"):
+            return True
+
+    fine_tuning = entry.get("fine_tuning")
+    if isinstance(fine_tuning, dict):
+        if str(fine_tuning.get("language", "")).strip().lower().startswith("en"):
+            return True
+
+    verified_languages = entry.get("verified_languages")
+    if isinstance(verified_languages, list):
+        for item in verified_languages:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("language", "")).strip().lower().startswith("en"):
+                return True
+
+    return False
+
+
+def _fetch_eleven_voice_catalog() -> list[tuple[str, str]]:
     if not ELEVEN_API:
         return []
     req = urllib.request.Request(
@@ -71,21 +91,22 @@ def _fetch_eleven_voice_ids(*, free_only: bool, free_category: str, free_limit: 
     voices = payload.get("voices")
     if not isinstance(voices, list):
         return []
-    out: list[str] = []
+    english: list[tuple[str, str]] = []
+    fallback_all: list[tuple[str, str]] = []
     for v in voices:
         if not isinstance(v, dict):
             continue
-        if free_only:
-            category = str(v.get("category", "")).strip().lower()
-            if category != free_category:
-                continue
         vid = str(v.get("voice_id", "")).strip()
-        if vid:
-            out.append(vid)
+        if not vid:
+            continue
+        name = str(v.get("name", "")).strip() or vid
+        pair = (vid, name)
+        fallback_all.append(pair)
+        if _voice_is_english(v):
+            english.append(pair)
 
-    if free_only and free_limit > 0:
-        return out[:free_limit]
-    return out
+    # Prefer explicitly English voices; fall back to all if no language metadata is present.
+    return english if english else fallback_all
 
 
 def _synthesize_eleven_bytes(text: str, *, voice_id: str, voice_settings: dict, seed: int, speed: float) -> bytes:
@@ -188,8 +209,10 @@ class TTSCog(commands.Cog):
             TTS_COOLDOWN_SECONDS,
             commands.BucketType.member,
         )
-        self._voice_ids_cache: list[str] = []
+        self._voice_catalog_cache: list[tuple[str, str]] = []
+        self._voice_name_cache: dict[str, str] = {}
         self._voice_cache_ts: float = 0.0
+        self._voice_profile_locks: dict[int, asyncio.Lock] = {}
 
     def cog_unload(self):
         for task in self._guild_workers.values():
@@ -199,6 +222,7 @@ class TTSCog(commands.Cog):
         self._guild_active_vc.clear()
         self._guild_skip_events.clear()
         self._guild_processing.clear()
+        self._voice_profile_locks.clear()
 
     def _queue_for(self, guild_id: int) -> asyncio.Queue[_SayRequest]:
         queue = self._guild_queues.get(guild_id)
@@ -247,6 +271,19 @@ class TTSCog(commands.Cog):
         gid = int(getattr(ctx.guild, "id", 0) or 0)
         uid = int(getattr(ctx.author, "id", 0) or 0)
         print(f"[TTS][g={gid}][u={uid}] {msg}")
+
+    def _voice_profile_lock_for(self, user_id: int) -> asyncio.Lock:
+        lock = self._voice_profile_locks.get(int(user_id))
+        if lock is None:
+            lock = asyncio.Lock()
+            self._voice_profile_locks[int(user_id)] = lock
+        return lock
+
+    def _voice_name_for(self, voice_id: str) -> str:
+        vid = str(voice_id or "").strip()
+        if not vid:
+            return "Unknown Voice"
+        return self._voice_name_cache.get(vid, vid)
 
     async def _ensure_voice_client(
         self,
@@ -333,40 +370,130 @@ class TTSCog(commands.Cog):
         await _hard_cleanup(vc)
         raise RuntimeError("Voice client failed to connect after retry.")
 
-    async def _get_voice_ids(self) -> list[str]:
+    async def _get_voice_catalog(self) -> list[tuple[str, str]]:
         now = time.monotonic()
-        if self._voice_ids_cache and (now - self._voice_cache_ts) < VOICE_CACHE_TTL_SECONDS:
-            return list(self._voice_ids_cache)
-        ids = await asyncio.to_thread(
-            _fetch_eleven_voice_ids,
-            free_only=bool(ELEVEN_FREE_ONLY),
-            free_category=str(ELEVEN_FREE_CATEGORY or "premade").strip().lower(),
-            free_limit=max(0, int(ELEVEN_FREE_VOICE_LIMIT)),
-        )
-        if not ids:
+        if self._voice_catalog_cache and (now - self._voice_cache_ts) < VOICE_CACHE_TTL_SECONDS:
+            return list(self._voice_catalog_cache)
+
+        catalog = await asyncio.to_thread(_fetch_eleven_voice_catalog)
+        deduped: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for voice_id, voice_name in catalog:
+            vid = str(voice_id or "").strip()
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            deduped.append((vid, str(voice_name or vid)))
+
+        if not deduped:
             fallback = (ELEVEN_VOICE_ID or "21m00Tcm4TlvDq8ikWAM").strip()
-            ids = [fallback] if fallback else []
-        self._voice_ids_cache = list(ids)
+            if fallback:
+                deduped = [(fallback, fallback)]
+
+        self._voice_catalog_cache = list(deduped)
+        self._voice_name_cache = {voice_id: voice_name for voice_id, voice_name in deduped}
         self._voice_cache_ts = now
-        return list(self._voice_ids_cache)
+        return list(self._voice_catalog_cache)
 
-    def _voice_profile_for_user(self, user_id: int) -> tuple[dict, int, float]:
-        r = random.Random(int(user_id))
+    async def _get_voice_ids(self) -> list[str]:
+        catalog = await self._get_voice_catalog()
+        return [voice_id for voice_id, _ in catalog]
+
+    def _build_random_voice_profile(self, voice_ids: list[str], *, exclude_voice_id: str = "") -> dict:
+        rng = random.SystemRandom()
+        choices = [str(v).strip() for v in voice_ids if str(v).strip()]
+        if exclude_voice_id and len(choices) > 1:
+            filtered = [v for v in choices if v != exclude_voice_id]
+            if filtered:
+                choices = filtered
+
+        fallback = (ELEVEN_VOICE_ID or "21m00Tcm4TlvDq8ikWAM").strip()
+        voice_id = rng.choice(choices) if choices else fallback
         settings = {
-            "stability": round(0.25 + (r.random() * 0.55), 3),
-            "similarity_boost": round(0.25 + (r.random() * 0.65), 3),
-            "style": round(r.random() * 0.45, 3),
-            "use_speaker_boost": bool(r.random() >= 0.5),
+            "stability": round(0.25 + (rng.random() * 0.55), 3),
+            "similarity_boost": round(0.25 + (rng.random() * 0.65), 3),
+            "style": round(rng.random() * 0.45, 3),
+            "use_speaker_boost": bool(rng.random() >= 0.5),
         }
-        seed = int(user_id % 2_147_483_647)
-        speed = round(0.9 + (r.random() * 0.25), 3)
-        return settings, seed, speed
+        seed = int(rng.randint(1, 2_147_483_646))
+        speed = round(0.9 + (rng.random() * 0.25), 3)
+        return {
+            "voice_id": str(voice_id or fallback).strip(),
+            "settings": settings,
+            "seed": seed,
+            "speed": speed,
+            "assigned_at_unix": int(time.time()),
+        }
 
-    def _voice_id_for_user(self, user_id: int, voice_ids: list[str]) -> str:
-        if not voice_ids:
-            return (ELEVEN_VOICE_ID or "21m00Tcm4TlvDq8ikWAM").strip()
-        idx = int(user_id) % len(voice_ids)
-        return str(voice_ids[idx]).strip()
+    def _normalize_voice_profile(self, raw: dict, *, valid_voice_ids: set[str]) -> Optional[dict]:
+        if not isinstance(raw, dict):
+            return None
+        voice_id = str(raw.get("voice_id", "")).strip()
+        if not voice_id or voice_id not in valid_voice_ids:
+            return None
+
+        settings_in = raw.get("settings")
+        if not isinstance(settings_in, dict):
+            return None
+        try:
+            settings = {
+                "stability": float(settings_in.get("stability", 0.5)),
+                "similarity_boost": float(settings_in.get("similarity_boost", 0.5)),
+                "style": float(settings_in.get("style", 0.1)),
+                "use_speaker_boost": bool(settings_in.get("use_speaker_boost", True)),
+            }
+        except Exception:
+            return None
+        settings["stability"] = max(0.0, min(1.0, settings["stability"]))
+        settings["similarity_boost"] = max(0.0, min(1.0, settings["similarity_boost"]))
+        settings["style"] = max(0.0, min(1.0, settings["style"]))
+
+        try:
+            seed = int(raw.get("seed", 1))
+        except Exception:
+            return None
+        if seed <= 0:
+            return None
+
+        try:
+            speed = float(raw.get("speed", 1.0))
+        except Exception:
+            return None
+        if speed <= 0:
+            return None
+
+        assigned_at = int(raw.get("assigned_at_unix", int(time.time())))
+        return {
+            "voice_id": voice_id,
+            "settings": settings,
+            "seed": seed,
+            "speed": speed,
+            "assigned_at_unix": assigned_at,
+        }
+
+    async def _get_or_create_voice_profile(self, user_id: int, voice_ids: list[str]) -> dict:
+        lock = self._voice_profile_lock_for(user_id)
+        async with lock:
+            raw = await asyncio.to_thread(get_user_tts_profile, int(user_id))
+            profile = self._normalize_voice_profile(raw, valid_voice_ids=set(voice_ids))
+            if profile is not None:
+                return profile
+
+            profile = self._build_random_voice_profile(voice_ids)
+            await asyncio.to_thread(set_user_tts_profile, int(user_id), profile)
+            return profile
+
+    async def _reroll_voice_profile(self, user_id: int, voice_ids: list[str]) -> dict:
+        lock = self._voice_profile_lock_for(user_id)
+        async with lock:
+            raw = await asyncio.to_thread(get_user_tts_profile, int(user_id))
+            current_voice_id = ""
+            if isinstance(raw, dict):
+                current_voice_id = str(raw.get("voice_id", "")).strip()
+
+            profile = self._build_random_voice_profile(voice_ids, exclude_voice_id=current_voice_id)
+            await asyncio.to_thread(set_user_tts_profile, int(user_id), profile)
+            return profile
 
     def _is_tts_admin(self, ctx: commands.Context) -> bool:
         perms = getattr(ctx.author, "guild_permissions", None)
@@ -561,6 +688,33 @@ class TTSCog(commands.Cog):
         else:
             await ctx.reply(f"Queued TTS request at position **{position}**.")
 
+    @commands.command(name="rerollvoice", aliases=["ttsreroll", "voicereroll"])
+    async def reroll_voice(self, ctx: commands.Context, target: Optional[discord.Member] = None):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+
+        if target is None:
+            target = ctx.author
+
+        if target.bot:
+            await ctx.reply("Target must be a non-bot user.")
+            return
+
+        if target.id != ctx.author.id and not self._is_tts_admin(ctx):
+            await ctx.reply("You don't have permission to reroll another user's TTS voice.")
+            return
+
+        voice_ids = await self._get_voice_ids()
+        profile = await self._reroll_voice_profile(int(target.id), voice_ids)
+        voice_id = str(profile.get("voice_id", "")).strip()
+        voice_name = self._voice_name_for(voice_id)
+
+        if target.id == ctx.author.id:
+            await ctx.reply(f"Your TTS voice was rerolled to **{voice_name}**.")
+        else:
+            await ctx.reply(f"Rerolled TTS voice for **{target.display_name}** to **{voice_name}**.")
+
     async def _process_say(self, req: _SayRequest):
         ctx = req.ctx
         payload = req.payload
@@ -600,8 +754,11 @@ class TTSCog(commands.Cog):
                 await ctx.send(f"{req.requester_name} says: {message} to {target.display_name}.")
                 self._debug(ctx, "starting synthesis")
                 voice_ids = await self._get_voice_ids()
-                voice_id = self._voice_id_for_user(ctx.author.id, voice_ids)
-                voice_settings, seed, speed = self._voice_profile_for_user(ctx.author.id)
+                voice_profile = await self._get_or_create_voice_profile(int(ctx.author.id), voice_ids)
+                voice_id = str(voice_profile.get("voice_id", "")).strip()
+                voice_settings = dict(voice_profile.get("settings", {}))
+                seed = int(voice_profile.get("seed", 1))
+                speed = float(voice_profile.get("speed", 1.0))
                 self._debug(
                     ctx,
                     f"voice_id={voice_id} seed={seed} speed={speed} settings={voice_settings}",

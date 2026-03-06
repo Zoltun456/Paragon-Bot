@@ -51,6 +51,7 @@ HELP_DESCRIPTIONS = {
     "ttsqueue": "Admin: show, skip current, or clear the per-server TTS queue.",
     "wakeup": "Move an AFK user through random voice channels and into yours, then return them to AFK if silent.",
     "say": "Join a mentioned user's voice channel, speak a TTS message, then leave.",
+    "rerollvoice": "Reroll your TTS voice profile. Admins can pass @user to reroll someone else.",
     "gamestats": "Show per-user game stats and XP ledger.",
     "guildgamestats": "Admin: show aggregated server game stats.",
     "role": "Admin: toggle a Discord role on a member.",

@@ -14,8 +14,9 @@ It provides:
 
 - Default command prefix: `!` (set via `COMMAND_PREFIX` in `.env`)
 - Data is stored per guild in `paragon_data/<guild_id>.db`
+- Global per-user settings are stored in `paragon_data/_user_settings.db`
 - If cloning, bot requires `DISCORD_TOKEN` in an `.env` that has proper permissions set in Discord's dev portal
-- `!say` uses OpenAI TTS (`OPENAI_API`) and requires FFmpeg available on the host
+- `!say` uses ElevenLabs TTS (`ELEVEN_API`) and requires FFmpeg available on the host
 
 ## Command Reference (By Cog)
 
@@ -173,12 +174,13 @@ It provides:
 
 ### Non-Admin
 - `!say {message} {@user}`
+- `!rerollvoice` (aliases: `!ttsreroll`, `!voicereroll`)
 - Bot joins the mentioned user's voice channel, plays TTS, then leaves.
-- Voice/profile is deterministic per caller (same user keeps the same voice selection/speed/style across servers).
-- Voice assignment is based on caller Discord user ID modulo configured OpenAI voices.
+- Voice/profile is persisted globally per caller (same user keeps the same voice selection/settings across servers).
+- Voice options are pulled from available English voices in your ElevenLabs account.
 
 ### Admin
-- None
+- `!rerollvoice @user` (force reroll for another member)
 
 ## WakeupCog
 

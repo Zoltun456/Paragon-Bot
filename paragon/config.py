@@ -142,9 +142,6 @@ ELEVEN_API = os.getenv("ELEVEN_API", "").strip()
 ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "21m00Tcm4TlvDq8ikWAM").strip()
 ELEVEN_MODEL_ID = os.getenv("ELEVEN_MODEL_ID", "eleven_flash_v2_5").strip()
 ELEVEN_OUTPUT_FORMAT = os.getenv("ELEVEN_OUTPUT_FORMAT", "mp3_44100_128").strip()
-ELEVEN_FREE_ONLY = _as_bool("ELEVEN_FREE_ONLY", True)
-ELEVEN_FREE_CATEGORY = os.getenv("ELEVEN_FREE_CATEGORY", "premade").strip().lower()
-ELEVEN_FREE_VOICE_LIMIT = _as_int("ELEVEN_FREE_VOICE_LIMIT", 21)
 
 # Daily Spin Wheel
 SPIN_RESET_HOUR = _as_int("SPIN_RESET_HOUR", 0)
