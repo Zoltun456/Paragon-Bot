@@ -17,6 +17,7 @@ from .config import (
     LOTTO_MAX_PER_USER,
 )
 from .guild_setup import get_log_channel
+from .spin_support import consume_lotto_bonus_tickets_pct, consume_lotto_jackpot_boost_multiplier
 from .storage import _gdict, _udict, save_data
 from .stats_store import record_game_fields
 from .time_windows import LOCAL_TZ
@@ -252,6 +253,10 @@ class LottoCog(commands.Cog):
             wu = _udict(guild.id, winner.id)
             prestige = int(wu.get("prestige", 0))
             profile = _lotto_boost_profile(total_tickets, winner_tickets, prestige)
+            jackpot_amp = float(consume_lotto_jackpot_boost_multiplier(guild.id, winner.id))
+            if jackpot_amp > 1.0:
+                profile["pct"] = max(0.0, min(4.0, float(profile["pct"]) * jackpot_amp))
+                profile["minutes"] = max(1, min(720, int(round(float(profile["minutes"]) * jackpot_amp))))
             boost = await grant_fixed_boost(
                 winner,
                 pct=profile["pct"],
@@ -274,16 +279,19 @@ class LottoCog(commands.Cog):
         else:
             profile = None
             boost = None
+            jackpot_amp = 1.0
 
         msg = (
             f"🎉 **Lottery Draw!** Pool: **{pot} XP** from **{total_tickets} ticket(s)**.\n"
             "Jackpot reward is a temporary XP-rate boost (no direct XP payout)."
         )
         if winner and boost is not None and profile is not None:
+            amp_line = f"\nWheel jackpot amp: **x{jackpot_amp:.2f}**." if jackpot_amp > 1.0 else ""
             msg += (
                 f"\nWinner: {winner.mention} 🎊 "
                 f"({winner_tickets} ticket(s), Prestige {profile['prestige']})"
                 f"\nBoost: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**."
+                f"{amp_line}"
             )
         else:
             msg += f"\nWinning ticket belonged to user `{winner_id}` who is no longer in this server."
@@ -351,22 +359,31 @@ class LottoCog(commands.Cog):
             await ctx.reply(f"You only have **{cur_xp} XP** but need **{cost} XP** for {count} ticket(s).")
             return
         await apply_xp_change(ctx.author, -cost, source="lotto ticket")
+        bonus_pct = float(consume_lotto_bonus_tickets_pct(ctx.guild.id, ctx.author.id))
+        bonus_tickets = int(round(count * bonus_pct)) if bonus_pct > 0.0 else 0
+        if bonus_pct > 0.0 and bonus_tickets <= 0:
+            bonus_tickets = 1
         record_game_fields(
             ctx.guild.id,
             ctx.author.id,
             "lotto",
             tickets_bought=count,
             xp_spent_total=cost,
+            bonus_tickets_total=max(0, bonus_tickets),
         )
         await enforce_level6_exclusive(ctx.guild)
 
         # Update pot + tickets
         st["pot"] = int(st.get("pot", 0)) + cost
-        st["tickets"][uid_s] = int(st["tickets"].get(uid_s, 0)) + count
+        awarded_tickets = int(count + max(0, bonus_tickets))
+        st["tickets"][uid_s] = int(st["tickets"].get(uid_s, 0)) + awarded_tickets
         total_tickets, _ = _ticket_totals(st)
         await save_data()
+        bonus_line = ""
+        if bonus_tickets > 0:
+            bonus_line = f" (wheel bonus +{bonus_tickets} ticket(s))"
         await ctx.reply(
-            f"🎟️ Bought {count} ticket(s)! Pot is now **{st['pot']} XP** "
+            f"🎟️ Bought {count} ticket(s){bonus_line}! Pot is now **{st['pot']} XP** "
             f"from **{total_tickets} ticket(s)**."
         )
 

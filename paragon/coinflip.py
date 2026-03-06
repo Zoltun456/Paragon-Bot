@@ -6,6 +6,7 @@ from discord.ext import commands
 
 from .config import CF_MAX_BET, CF_TTL_SECONDS
 from .ownership import is_control_user_id
+from .spin_support import consume_coinflip_win_edge
 from .storage import _udict
 from .stats_store import record_game_fields
 from .xp import apply_xp_change, grant_reward_boost
@@ -110,7 +111,15 @@ class CoinFlipCog(commands.Cog):
             await apply_xp_change(challenger, -amount, source="coinflip ante")
             await apply_xp_change(acceptor, -amount, source="coinflip ante")
 
-            winner = random.choice([challenger, acceptor])
+            chal_edge = float(consume_coinflip_win_edge(ctx.guild.id, challenger.id))
+            acc_edge = float(consume_coinflip_win_edge(ctx.guild.id, acceptor.id))
+            challenger_weight = max(0.01, 1.0 + chal_edge)
+            acceptor_weight = max(0.01, 1.0 + acc_edge)
+            winner = random.choices(
+                [challenger, acceptor],
+                weights=[challenger_weight, acceptor_weight],
+                k=1,
+            )[0]
             loser = acceptor if winner is challenger else challenger
             boost = await grant_reward_boost(winner, pot, source="coinflip win")
 
@@ -140,10 +149,17 @@ class CoinFlipCog(commands.Cog):
             record_game_fields(ctx.guild.id, loser.id, "coinflip", losses=1)
 
             await enforce_level6_exclusive(ctx.guild)
+            edge_note = ""
+            if chal_edge > 0.0 or acc_edge > 0.0:
+                edge_note = (
+                    f"\nWheel edges: {challenger.display_name} +{chal_edge * 100.0:.1f}% | "
+                    f"{acceptor.display_name} +{acc_edge * 100.0:.1f}%"
+                )
             await ctx.reply(
                 f"Coin Flip! {challenger.mention} vs {acceptor.mention} - Bet **{amount} XP** each (pot seed **{pot}**)\n"
                 f"**Winner:** {winner.mention} earned **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**\n"
                 f"**Loser:** {loser.mention} lost **{amount} XP**"
+                f"{edge_note}"
             )
             return
 

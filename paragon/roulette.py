@@ -9,6 +9,7 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+from .spin_support import consume_roulette_accuracy_bonus, consume_roulette_backfire_shield
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
 
@@ -16,8 +17,8 @@ ROULETTE_COOLDOWN_SECONDS = 30 * 60
 
 # Success chance is driven by the shooter's prestige and soft-capped at 50%.
 # Higher-target prestige reduces that chance further.
-ROULETTE_MIN_SUCCESS_CHANCE = 0.01
-ROULETTE_MAX_SUCCESS_CHANCE = 0.50
+ROULETTE_MIN_SUCCESS_CHANCE = 0.10
+ROULETTE_MAX_SUCCESS_CHANCE = 0.75
 ROULETTE_PRESTIGE_CURVE = 45.0
 ROULETTE_TARGET_DEFENSE_GAP_SCALE = 40.0
 
@@ -138,6 +139,9 @@ class RouletteCog(commands.Cog):
         author_p = _get_user_prestige(author)
         target_p = _get_user_prestige(target)
         chance = _roulette_success_chance(author_p, target_p)
+        wheel_aim_bonus = float(consume_roulette_accuracy_bonus(ctx.guild.id, author.id))
+        if wheel_aim_bonus > 0.0:
+            chance = max(ROULETTE_MIN_SUCCESS_CHANCE, min(0.90, chance + wheel_aim_bonus))
         chance_pct = chance * 100.0
 
         # Consume cooldown on use, regardless of outcome.
@@ -163,19 +167,48 @@ class RouletteCog(commands.Cog):
             record_game_fields(ctx.guild.id, author.id, "roulette", successes=1)
             if applied:
                 record_game_fields(ctx.guild.id, target.id, "roulette", got_timed_out=1)
+                wheel_line = (
+                    f"Wheel aim bonus applied: **+{wheel_aim_bonus * 100.0:.1f}%**.\n"
+                    if wheel_aim_bonus > 0.0
+                    else ""
+                )
                 await ctx.reply(
                     f"Roulette: {author.mention} landed the shot.\n"
                     f"{target.mention} timed out for **{_fmt_remaining(timeout_seconds)}**.\n"
+                    f"{wheel_line}"
                     f"Odds this shot: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
                     f"Cooldown: **{_fmt_remaining(ROULETTE_COOLDOWN_SECONDS)}**."
                 )
             else:
+                wheel_line = (
+                    f"Wheel aim bonus applied: **+{wheel_aim_bonus * 100.0:.1f}%**.\n"
+                    if wheel_aim_bonus > 0.0
+                    else ""
+                )
                 await ctx.reply(
                     f"Roulette: {author.mention} rolled success, but I could not time out "
                     f"{target.mention} (permission/hierarchy).\n"
+                    f"{wheel_line}"
                     f"Odds this shot: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
                     f"Cooldown still applied: **{_fmt_remaining(ROULETTE_COOLDOWN_SECONDS)}**."
                 )
+            return
+
+        shielded = consume_roulette_backfire_shield(ctx.guild.id, author.id)
+        if shielded:
+            record_game_fields(ctx.guild.id, author.id, "roulette", backfires=1, shield_saves=1)
+            await save_data()
+            wheel_line = (
+                f"Wheel aim bonus applied: **+{wheel_aim_bonus * 100.0:.1f}%**.\n"
+                if wheel_aim_bonus > 0.0
+                else ""
+            )
+            await ctx.reply(
+                f"Roulette: {author.mention} backfired, but your wheel shield blocked the timeout.\n"
+                f"{wheel_line}"
+                f"Odds this shot: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
+                f"Cooldown: **{_fmt_remaining(ROULETTE_COOLDOWN_SECONDS)}**."
+            )
             return
 
         timeout_seconds = _timeout_seconds_for_loser(author_p, target_p)
@@ -187,16 +220,28 @@ class RouletteCog(commands.Cog):
         record_game_fields(ctx.guild.id, author.id, "roulette", backfires=1)
         if applied:
             record_game_fields(ctx.guild.id, author.id, "roulette", got_timed_out=1)
+            wheel_line = (
+                f"Wheel aim bonus applied: **+{wheel_aim_bonus * 100.0:.1f}%**.\n"
+                if wheel_aim_bonus > 0.0
+                else ""
+            )
             await ctx.reply(
                 f"Roulette: {author.mention} backfired.\n"
                 f"{author.mention} timed out for **{_fmt_remaining(timeout_seconds)}**.\n"
+                f"{wheel_line}"
                 f"Odds this shot: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
                 f"Cooldown: **{_fmt_remaining(ROULETTE_COOLDOWN_SECONDS)}**."
             )
         else:
+            wheel_line = (
+                f"Wheel aim bonus applied: **+{wheel_aim_bonus * 100.0:.1f}%**.\n"
+                if wheel_aim_bonus > 0.0
+                else ""
+            )
             await ctx.reply(
                 f"Roulette: {author.mention} backfired, but I could not apply timeout "
                 f"(permission/hierarchy).\n"
+                f"{wheel_line}"
                 f"Odds this shot: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
                 f"Cooldown still applied: **{_fmt_remaining(ROULETTE_COOLDOWN_SECONDS)}**."
             )

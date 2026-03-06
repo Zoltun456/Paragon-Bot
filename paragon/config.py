@@ -150,6 +150,15 @@ OPENAI_TTS_VOICES = [
 OPENAI_TTS_SPEED_BASE = _as_float("OPENAI_TTS_SPEED_BASE", 1.0)
 OPENAI_TTS_SPEED_VARIANCE = _as_float("OPENAI_TTS_SPEED_VARIANCE", 0.08)
 
+# Daily Spin Wheel
+SPIN_RESET_HOUR = _as_int("SPIN_RESET_HOUR", 0)
+SPIN_RESET_MINUTE = _as_int("SPIN_RESET_MINUTE", 0)
+SPIN_DISABLED_REWARDS = {
+    token.strip().lower()
+    for token in os.getenv("SPIN_DISABLED_REWARDS", "").split(",")
+    if token.strip()
+}
+
 
 def _looks_like_afk_name(name: str) -> bool:
     n = str(name or "").strip().lower()

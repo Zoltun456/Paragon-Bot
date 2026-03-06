@@ -18,6 +18,7 @@ from paragon.storage import load_data
 from paragon.surprise import SurpriseCog
 from paragon.thanks import ThanksCog
 from paragon.tts import TTSCog
+from paragon.spin import SpinCog
 from paragon.voice import VoiceCog
 from paragon.wakeup import WakeupCog
 from paragon.wordle import WordleCog
@@ -53,6 +54,7 @@ def _build_cogs() -> list[commands.Cog]:
         AnagramCog(bot),
         ThanksCog(bot),
         LottoCog(bot),
+        SpinCog(bot),
         PrestigeCog(bot),
         BlackjackCog(bot),
         VoiceCog(bot),

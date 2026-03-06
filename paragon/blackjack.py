@@ -22,6 +22,7 @@ from .config import (
 from .guild_setup import get_blackjack_channel_id
 from .storage import _gdict, _udict, save_data
 from .stats_store import record_game_fields, record_xp_change
+from .spin_support import consume_blackjack_natural_charge
 from .xp import apply_xp_change, grant_fixed_boost, grant_fixed_debuff, prestige_reward_scale
 from .roles import announce_level_up, sync_level_roles, enforce_level6_exclusive
 from .ownership import owner_only
@@ -116,6 +117,28 @@ def now_ts() -> int:
 def rank_of(card: str) -> str:
     r = card[:-1] if card[:-1] else card[0]
     return r
+
+
+def _pop_card_with_rank(st: dict, ranks: set[str]) -> Optional[str]:
+    shoe = st.get("shoe")
+    if not isinstance(shoe, list):
+        shoe = []
+        st["shoe"] = shoe
+    for i, c in enumerate(list(shoe)):
+        if rank_of(str(c)) in ranks:
+            try:
+                return str(shoe.pop(i))
+            except Exception:
+                return str(c)
+    return None
+
+
+def _natural_hand_from_shoe(st: dict) -> list[str]:
+    ace = _pop_card_with_rank(st, {"A"}) or f"A{random.choice(SUITS)}"
+    ten = _pop_card_with_rank(st, {"10", "J", "Q", "K"}) or f"K{random.choice(SUITS)}"
+    if random.random() < 0.5:
+        return [ace, ten]
+    return [ten, ace]
 
 
 def _sanitize_reset_time(hour: int, minute: int) -> tuple[int, int]:
@@ -1077,11 +1100,27 @@ class BlackjackCog(commands.Cog):
                     st["players"][str(uid)]["hand"].append(self._deal_card(st))
                 st["dealer"].append(self._deal_card(st))
 
+            forced_natural_users: list[str] = []
+            for uid in ready:
+                if not consume_blackjack_natural_charge(guild.id, uid):
+                    continue
+                p = st["players"][str(uid)]
+                p["hand"] = _natural_hand_from_shoe(st)
+                mbr = guild.get_member(uid)
+                forced_natural_users.append(mbr.display_name if mbr else str(uid))
+
             for uid in ready:
                 st["players"][str(uid)]["status"] = "acting"
                 self._touch_player(st["players"][str(uid)])
 
             self._touch(st); await save_data()
+
+            if forced_natural_users:
+                await channel.send(
+                    "Wheel buff triggered: guaranteed naturals for "
+                    + ", ".join(f"**{name}**" for name in forced_natural_users)
+                    + "."
+                )
 
             up = st["dealer"][0]
             lines = [f"Dealing... Dealer shows: `{up}`"]

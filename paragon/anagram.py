@@ -14,6 +14,7 @@ from .config import (
     ANAGRAM_PHRASES_PATH, ANAGRAM_DAILY_LIMIT,
     ANAGRAM_WIN_XP, ANAGRAM_LOSS_XP,
 )
+from .spin_support import consume_anagram_reward_multiplier
 from .storage import _udict, save_data
 from .stats_store import record_game_fields
 from .xp import apply_xp_change, grant_prestige_scaled_reward_boost
@@ -184,9 +185,11 @@ class AnagramCog(commands.Cog):
 
         # Check correctness (single attempt per puzzle)
         if norm_guess == norm_answer:
+            wheel_mult = float(consume_anagram_reward_multiplier(ctx.guild.id, ctx.author.id))
+            reward_seed = int(max(1, round(float(ANAGRAM_WIN_XP) * wheel_mult)))
             boost = await grant_prestige_scaled_reward_boost(
                 ctx.author,
-                ANAGRAM_WIN_XP,
+                reward_seed,
                 source="anagram solve",
             )
             record_game_fields(
@@ -194,14 +197,18 @@ class AnagramCog(commands.Cog):
                 ctx.author.id,
                 "anagram",
                 solves=1,
-                boost_seed_xp_total=ANAGRAM_WIN_XP,
+                boost_seed_xp_total=reward_seed,
                 boost_percent_total=boost["percent"],
                 boost_minutes_total=boost["minutes"],
             )
             await enforce_level6_exclusive(ctx.guild)
+            wheel_line = ""
+            if wheel_mult > 1.0:
+                wheel_line = f" Wheel buff: x{wheel_mult:.2f} reward strength."
             await ctx.reply(
                 f"✅ Correct! Boost gained: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**. "
                 f"Progress: **{st['used']}/{ANAGRAM_DAILY_LIMIT}**."
+                f"{wheel_line}"
             )
             return
 

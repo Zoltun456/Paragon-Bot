@@ -11,6 +11,7 @@ from .config import (
 )
 from .guild_setup import get_log_channel
 from .time_windows import _today_local, _date_key, is_active_hours
+from .spin_support import consume_wordle_reward_multiplier
 from .storage import _udict, save_data
 from .stats_store import record_game_fields
 from .xp import apply_xp_change, grant_prestige_scaled_reward_boost
@@ -204,9 +205,11 @@ class WordleCog(commands.Cog):
 
         if guess == target:
             st["done"] = True; st["win"] = True
+            wheel_mult = float(consume_wordle_reward_multiplier(ctx.guild.id, ctx.author.id))
+            reward_seed = int(max(1, round(float(WORDLE_WIN_XP) * wheel_mult)))
             boost = await grant_prestige_scaled_reward_boost(
                 ctx.author,
-                WORDLE_WIN_XP,
+                reward_seed,
                 source="wordle clear",
             )
             record_game_fields(
@@ -214,14 +217,18 @@ class WordleCog(commands.Cog):
                 ctx.author.id,
                 "wordle",
                 wins=1,
-                boost_seed_xp_total=WORDLE_WIN_XP,
+                boost_seed_xp_total=reward_seed,
                 boost_percent_total=boost["percent"],
                 boost_minutes_total=boost["minutes"],
             )
             await enforce_level6_exclusive(ctx.guild)
+            wheel_line = ""
+            if wheel_mult > 1.0:
+                wheel_line = f"\nWheel buff applied: **x{wheel_mult:.2f}** reward strength."
             await ctx.reply(
                 f"{row}  `{guess}`\n**Correct!** Boost gained: "
                 f"**+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**."
+                f"{wheel_line}"
             )
             return
 

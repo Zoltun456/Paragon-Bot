@@ -116,6 +116,18 @@ It provides:
 ### Admin
 - `!setp <amount> @user`
 
+## SpinCog
+
+### Non-Admin
+- `!spin` (alias: `!wheel`) once per reset cycle
+- `!spinstatus` (alias: `!wheelstatus`) to view spin lock + active wheel buffs
+- Wheel rewards now include game-specific buffs (blackjack, wordle, anagram, roulette, coinflip, lotto) plus XP/prestige rewards.
+
+### Admin
+- `!spintime [time]` (view/set daily wheel reset time, ET; e.g. `!spintime 5:00am`)
+- `!spinrewards [reward_key] [on|off|toggle|default]` (list/toggle reward pool)
+- `!spinreset @user` (reset that user's spin lock for the current cycle)
+
 ## BlackjackCog
 
 ### Non-Admin
@@ -212,6 +224,7 @@ Current entrypoint (`Paragon.py`) loads:
 - `AnagramCog`
 - `ThanksCog`
 - `LottoCog`
+- `SpinCog`
 - `PrestigeCog`
 - `BlackjackCog`
 - `VoiceCog`
