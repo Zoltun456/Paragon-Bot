@@ -32,6 +32,11 @@ VOICE_CACHE_TTL_SECONDS = 30 * 60
 POST_PLAY_IDLE_SECONDS = 1.0
 TTS_COOLDOWN_SECONDS = 300.0
 TTS_DEBUG = os.getenv("TTS_DEBUG", "true").strip().lower() in {"1", "true", "yes", "on"}
+DEFAULT_MANUAL_STABILITY = 0.5
+DEFAULT_MANUAL_SIMILARITY_BOOST = 0.5
+DEFAULT_MANUAL_STYLE = 0.1
+DEFAULT_MANUAL_USE_SPEAKER_BOOST = True
+DEFAULT_MANUAL_SPEED = 1.0
 
 
 @dataclass(slots=True)
@@ -425,6 +430,48 @@ class TTSCog(commands.Cog):
             "assigned_at_unix": int(time.time()),
         }
 
+    def _build_manual_voice_profile(
+        self,
+        *,
+        voice_id: str,
+        stability: Optional[float] = None,
+        similarity_boost: Optional[float] = None,
+        style: Optional[float] = None,
+        use_speaker_boost: Optional[bool] = None,
+        speed: Optional[float] = None,
+        seed: Optional[int] = None,
+    ) -> dict:
+        rng = random.SystemRandom()
+        out_stability = DEFAULT_MANUAL_STABILITY if stability is None else float(stability)
+        out_similarity = DEFAULT_MANUAL_SIMILARITY_BOOST if similarity_boost is None else float(similarity_boost)
+        out_style = DEFAULT_MANUAL_STYLE if style is None else float(style)
+        out_speaker_boost = (
+            DEFAULT_MANUAL_USE_SPEAKER_BOOST if use_speaker_boost is None else bool(use_speaker_boost)
+        )
+        out_speed = DEFAULT_MANUAL_SPEED if speed is None else float(speed)
+        out_seed = int(rng.randint(1, 2_147_483_646) if seed is None else int(seed))
+
+        return {
+            "voice_id": str(voice_id or "").strip(),
+            "settings": {
+                "stability": max(0.0, min(1.0, out_stability)),
+                "similarity_boost": max(0.0, min(1.0, out_similarity)),
+                "style": max(0.0, min(1.0, out_style)),
+                "use_speaker_boost": out_speaker_boost,
+            },
+            "seed": out_seed,
+            "speed": out_speed,
+            "assigned_at_unix": int(time.time()),
+        }
+
+    def _parse_bool_token(self, token: str) -> Optional[bool]:
+        t = str(token or "").strip().lower()
+        if t in {"1", "true", "yes", "y", "on"}:
+            return True
+        if t in {"0", "false", "no", "n", "off"}:
+            return False
+        return None
+
     def _normalize_voice_profile(self, raw: dict, *, valid_voice_ids: set[str]) -> Optional[dict]:
         if not isinstance(raw, dict):
             return None
@@ -714,6 +761,83 @@ class TTSCog(commands.Cog):
             await ctx.reply(f"Your TTS voice was rerolled to **{voice_name}**.")
         else:
             await ctx.reply(f"Rerolled TTS voice for **{target.display_name}** to **{voice_name}**.")
+
+    @commands.command(name="setvoice", aliases=["ttsvoice", "voiceid"])
+    async def set_voice(
+        self,
+        ctx: commands.Context,
+        voice_id: str,
+        stability: Optional[float] = None,
+        similarity_boost: Optional[float] = None,
+        style: Optional[float] = None,
+        use_speaker_boost: Optional[str] = None,
+        speed: Optional[float] = None,
+        seed: Optional[int] = None,
+    ):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+
+        catalog = await self._get_voice_catalog()
+        valid_voice_ids = {vid for vid, _ in catalog}
+        voice_id = str(voice_id or "").strip()
+        if voice_id not in valid_voice_ids:
+            await ctx.reply(
+                "Unknown voice ID for your available English Eleven voices. "
+                f"Use an ID from your account voice list; e.g. `{ctx.clean_prefix}setvoice <voice_id>`."
+            )
+            return
+
+        if stability is not None and not (0.0 <= float(stability) <= 1.0):
+            await ctx.reply("`stability` must be between 0.0 and 1.0.")
+            return
+        if similarity_boost is not None and not (0.0 <= float(similarity_boost) <= 1.0):
+            await ctx.reply("`similarity_boost` must be between 0.0 and 1.0.")
+            return
+        if style is not None and not (0.0 <= float(style) <= 1.0):
+            await ctx.reply("`style` must be between 0.0 and 1.0.")
+            return
+        if speed is not None and float(speed) <= 0.0:
+            await ctx.reply("`speed` must be > 0.")
+            return
+        if seed is not None and int(seed) <= 0:
+            await ctx.reply("`seed` must be a positive integer.")
+            return
+
+        parsed_speaker_boost: Optional[bool] = None
+        if use_speaker_boost is not None:
+            parsed_speaker_boost = self._parse_bool_token(use_speaker_boost)
+            if parsed_speaker_boost is None:
+                await ctx.reply("`use_speaker_boost` must be one of: true/false, yes/no, on/off, 1/0.")
+                return
+
+        profile = self._build_manual_voice_profile(
+            voice_id=voice_id,
+            stability=stability,
+            similarity_boost=similarity_boost,
+            style=style,
+            use_speaker_boost=parsed_speaker_boost,
+            speed=speed,
+            seed=seed,
+        )
+        normalized = self._normalize_voice_profile(profile, valid_voice_ids=valid_voice_ids)
+        if normalized is None:
+            await ctx.reply("Unable to apply that voice profile. Please verify values and try again.")
+            return
+
+        await asyncio.to_thread(set_user_tts_profile, int(ctx.author.id), normalized)
+        voice_name = self._voice_name_for(voice_id)
+        s = normalized["settings"]
+        await ctx.reply(
+            "Saved your TTS voice profile: "
+            f"**{voice_name}** (`{voice_id}`) | "
+            f"stability={s['stability']:.3f}, "
+            f"similarity_boost={s['similarity_boost']:.3f}, "
+            f"style={s['style']:.3f}, "
+            f"use_speaker_boost={str(bool(s['use_speaker_boost'])).lower()}, "
+            f"speed={float(normalized['speed']):.3f}, "
+            f"seed={int(normalized['seed'])}."
+        )
 
     async def _process_say(self, req: _SayRequest):
         ctx = req.ctx
