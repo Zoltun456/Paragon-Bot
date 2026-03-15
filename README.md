@@ -17,6 +17,7 @@ It provides:
 - Global per-user settings are stored in `paragon_data/_user_settings.db`
 - If cloning, bot requires `DISCORD_TOKEN` in an `.env` that has proper permissions set in Discord's dev portal
 - `!say` uses ElevenLabs TTS (`ELEVEN_API`) and requires FFmpeg available on the host
+- `!play` uses `yt-dlp` when available, with a direct-download fallback for simple file links
 
 ## Command Reference (By Cog)
 
@@ -170,6 +171,19 @@ It provides:
 ### Admin
 - `!voicehealth`
 
+## PlaybackCog
+
+### Non-Admin
+- `!play <link>`
+- Queues guild-local audio requests for the caller's current voice channel.
+- Tries `yt-dlp` first, then falls back to direct file download for simpler audio URLs.
+- Rejects tracks over 20 minutes and cleans up downloaded temp files after playback.
+- Posts a skip-vote message with `⏩`; 50% of non-bot users in the current call must react to skip.
+
+### Admin
+- `!playskip`
+- `!playclear`
+
 ## TTSCog
 
 ### Non-Admin
@@ -177,7 +191,9 @@ It provides:
 - `!say {message} {@user}`
 - `!rerollvoice` (aliases: `!ttsreroll`, `!voicereroll`)
 - `!setvoice <voice_id> [stability] [similarity_boost] [style] [use_speaker_boost] [speed] [seed]`
-- Bot joins the mentioned user's voice channel, plays TTS, then leaves.
+- TTS stays connected across queued `!say` requests instead of leaving/rejoining between each one.
+- If queued audio from `!play` is active in the same voice channel, TTS interrupts it and playback resumes afterward.
+- TTS only auto-leaves when it created the voice session itself.
 - Voice/profile is persisted globally per caller (same user keeps the same voice selection/settings across servers).
 - Voice options are pulled from available voices in your ElevenLabs account.
 - For `!setvoice`, any omitted optional settings use default profile values.

@@ -12,6 +12,7 @@ from paragon.config import AUTHOR_USER_ID, COMMAND_PREFIX, TOKEN
 from paragon.core import CoreCog
 from paragon.game_stats import StatsCog
 from paragon.lotto import LottoCog
+from paragon.playback import PlaybackCog
 from paragon.prestige import PrestigeCog
 from paragon.roulette import RouletteCog
 from paragon.storage import load_data
@@ -57,6 +58,7 @@ def _build_cogs() -> list[commands.Cog]:
         SpinCog(bot),
         PrestigeCog(bot),
         BlackjackCog(bot),
+        PlaybackCog(bot),
         VoiceCog(bot),
         WakeupCog(bot),
         TTSCog(bot),

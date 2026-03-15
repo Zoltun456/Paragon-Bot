@@ -25,6 +25,7 @@ from .config import (
 from .ownership import is_control_user_id
 from .storage import _gdict, save_data
 from .user_settings import get_user_tts_profile, set_user_tts_profile
+from .voice_runtime import cleanup_voice_client, ensure_voice_client
 from .voice_support import dave_4017_message, dave_support_status, is_dave_close_4017
 
 
@@ -288,6 +289,7 @@ class TTSCog(commands.Cog):
         self._guild_current: dict[int, _SayRequest] = {}
         self._guild_active_vc: dict[int, discord.VoiceClient] = {}
         self._guild_skip_events: dict[int, asyncio.Event] = {}
+        self._guild_disconnect_on_idle: dict[int, bool] = {}
         self._guild_processing: set[int] = set()
         self._cooldown_enabled: dict[int, bool] = {}
         self._cooldown = commands.CooldownMapping.from_cooldown(
@@ -310,6 +312,7 @@ class TTSCog(commands.Cog):
         self._guild_current.clear()
         self._guild_active_vc.clear()
         self._guild_skip_events.clear()
+        self._guild_disconnect_on_idle.clear()
         self._guild_processing.clear()
         self._voice_profile_locks.clear()
         self._model_catalog_cache.clear()
@@ -332,6 +335,46 @@ class TTSCog(commands.Cog):
             self._guild_skip_events[guild_id] = ev
         return ev
 
+    def should_keep_voice_connected(self, guild_id: int) -> bool:
+        queue = self._guild_queues.get(guild_id)
+        pending = queue.qsize() if queue is not None else 0
+        if guild_id in self._guild_processing or pending > 0:
+            return True
+        return not self._guild_disconnect_on_idle.get(guild_id, True)
+
+    def _clear_pending_queue(self, guild_id: int) -> int:
+        queue = self._queue_for(guild_id)
+        cleared = 0
+        while True:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                queue.task_done()
+                cleared += 1
+        return cleared
+
+    async def shutdown_guild(self, guild_id: int, *, clear_queue: bool = True, disconnect: bool = False) -> None:
+        if clear_queue:
+            self._clear_pending_queue(guild_id)
+        self._skip_event_for(guild_id).set()
+
+        vc = self._guild_active_vc.get(guild_id)
+        if vc is None:
+            guild = self.bot.get_guild(guild_id)
+            vc = getattr(guild, "voice_client", None) if guild is not None else None
+        if vc is not None:
+            try:
+                if vc.is_playing() or vc.is_paused():
+                    vc.stop()
+            except Exception:
+                pass
+            if disconnect:
+                await cleanup_voice_client(vc)
+        if disconnect:
+            self._guild_disconnect_on_idle.pop(guild_id, None)
+
     def _ensure_worker(self, guild_id: int):
         task = self._guild_workers.get(guild_id)
         if task and not task.done():
@@ -351,10 +394,44 @@ class TTSCog(commands.Cog):
                 self._debug(req.ctx, f"worker unhandled exception={type(e).__name__}: {e}")
             finally:
                 self._guild_current.pop(guild_id, None)
-                self._guild_active_vc.pop(guild_id, None)
                 self._skip_event_for(guild_id).clear()
                 self._guild_processing.discard(guild_id)
                 queue.task_done()
+                if queue.empty():
+                    await self._maybe_disconnect_when_idle(guild_id)
+
+    async def _maybe_disconnect_when_idle(self, guild_id: int) -> None:
+        if not self._guild_disconnect_on_idle.get(guild_id, False):
+            return
+        if guild_id in self._guild_processing:
+            return
+        queue = self._guild_queues.get(guild_id)
+        if queue is not None and queue.qsize() > 0:
+            return
+
+        playback_cog = self.bot.get_cog("PlaybackCog")
+        if playback_cog is not None and hasattr(playback_cog, "should_keep_voice_connected"):
+            try:
+                if bool(playback_cog.should_keep_voice_connected(guild_id)):
+                    return
+            except Exception:
+                pass
+
+        guild = self.bot.get_guild(guild_id)
+        vc = self._guild_active_vc.get(guild_id)
+        if vc is None and guild is not None:
+            vc = guild.voice_client
+        if vc is None:
+            self._guild_disconnect_on_idle.pop(guild_id, None)
+            return
+        try:
+            if vc.is_playing() or vc.is_paused():
+                return
+        except Exception:
+            pass
+        await cleanup_voice_client(vc)
+        self._guild_active_vc.pop(guild_id, None)
+        self._guild_disconnect_on_idle.pop(guild_id, None)
 
     def _debug(self, ctx: commands.Context, msg: str):
         if not TTS_DEBUG:
@@ -404,85 +481,7 @@ class TTSCog(commands.Cog):
         ctx: commands.Context,
         target_channel: discord.VoiceChannel,
     ) -> discord.VoiceClient:
-        async def _wait_connected(client: discord.VoiceClient, timeout_s: float) -> bool:
-            deadline = time.monotonic() + timeout_s
-            while time.monotonic() < deadline:
-                if client.is_connected() and client.channel and client.channel.id == target_channel.id:
-                    return True
-                await asyncio.sleep(0.1)
-            return False
-
-        async def _hard_cleanup(client: Optional[discord.VoiceClient]):
-            if client is None:
-                return
-            try:
-                if client.is_playing():
-                    client.stop()
-            except Exception:
-                pass
-            try:
-                await client.disconnect(force=True)
-            except Exception:
-                pass
-            try:
-                client.cleanup()
-            except Exception:
-                pass
-
-        vc = ctx.voice_client
-        if vc is not None and not vc.is_connected():
-            self._debug(ctx, "stale voice client detected; forcing disconnect")
-            await _hard_cleanup(vc)
-            vc = None
-
-        if vc is None:
-            self._debug(ctx, f"connecting to channel {target_channel.id}")
-            try:
-                vc = await target_channel.connect(
-                    timeout=30.0,
-                    reconnect=True,
-                    self_deaf=True,
-                    self_mute=False,
-                )
-            except discord.ConnectionClosed as e:
-                if is_dave_close_4017(e):
-                    raise RuntimeError(dave_4017_message()) from e
-                raise
-        elif vc.channel is None or vc.channel.id != target_channel.id:
-            self._debug(ctx, f"moving from {getattr(vc.channel, 'id', None)} to {target_channel.id}")
-            try:
-                await vc.move_to(target_channel)
-            except discord.ConnectionClosed as e:
-                if is_dave_close_4017(e):
-                    raise RuntimeError(dave_4017_message()) from e
-                raise
-
-        ok = await _wait_connected(vc, timeout_s=15.0)
-        if ok:
-            self._debug(ctx, "voice client connected")
-            return vc
-
-        # One reconnect retry before failing.
-        self._debug(ctx, "voice client not connected after wait; retrying reconnect")
-        await _hard_cleanup(vc)
-        try:
-            vc = await target_channel.connect(
-                timeout=30.0,
-                reconnect=True,
-                self_deaf=True,
-                self_mute=False,
-            )
-        except discord.ConnectionClosed as e:
-            if is_dave_close_4017(e):
-                raise RuntimeError(dave_4017_message()) from e
-            raise
-        ok = await _wait_connected(vc, timeout_s=15.0)
-        if ok:
-            self._debug(ctx, "voice client connected after retry")
-            return vc
-
-        await _hard_cleanup(vc)
-        raise RuntimeError("Voice client failed to connect after retry.")
+        return await ensure_voice_client(ctx, target_channel, debug=lambda msg: self._debug(ctx, msg))
 
     async def _get_voice_catalog(self) -> list[tuple[str, str]]:
         now = time.monotonic()
@@ -843,16 +842,19 @@ class TTSCog(commands.Cog):
             if count is not None and count < 1:
                 await ctx.reply("Count must be >= 1 when provided.")
                 return
-            target_count = queue.qsize() if count is None else min(queue.qsize(), int(count))
-            cleared = 0
-            for _ in range(target_count):
-                try:
-                    queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                else:
-                    queue.task_done()
-                    cleared += 1
+            if count is None:
+                cleared = self._clear_pending_queue(ctx.guild.id)
+            else:
+                target_count = min(queue.qsize(), int(count))
+                cleared = 0
+                for _ in range(target_count):
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    else:
+                        queue.task_done()
+                        cleared += 1
             processing = ctx.guild.id in self._guild_processing
             suffix = " One request is currently processing." if processing else " No request is currently processing."
             await ctx.reply(f"Cleared **{cleared}** queued TTS request(s).{suffix}")
@@ -1037,6 +1039,7 @@ class TTSCog(commands.Cog):
                 return
             guild_id = int(ctx.guild.id)
             skip_event = self._skip_event_for(guild_id)
+            playback_cog = self.bot.get_cog("PlaybackCog")
 
             dave_ok, dave_reason = dave_support_status()
             if not dave_ok:
@@ -1064,7 +1067,12 @@ class TTSCog(commands.Cog):
 
             vc: Optional[discord.VoiceClient] = None
             temp_path = ""
+            playback_suspended = False
             try:
+                existing_vc = ctx.voice_client if ctx.voice_client and ctx.voice_client.is_connected() else None
+                if guild_id not in self._guild_disconnect_on_idle:
+                    self._guild_disconnect_on_idle[guild_id] = existing_vc is None
+
                 await ctx.send(f"{req.requester_name} says: {message} to {target.display_name}.")
                 self._debug(ctx, "starting synthesis")
                 voice_ids = await self._get_voice_ids()
@@ -1100,7 +1108,9 @@ class TTSCog(commands.Cog):
                 audio_seconds = await asyncio.to_thread(_probe_audio_seconds, temp_path)
                 self._debug(ctx, f"audio ready path={temp_path} bytes={len(audio_bytes)} duration={audio_seconds:.2f}s")
 
-                # Join/move only after audio file is fully ready.
+                if playback_cog is not None and hasattr(playback_cog, "suspend_for_tts"):
+                    playback_suspended = bool(await playback_cog.suspend_for_tts(ctx, target_channel))
+
                 vc = await self._ensure_voice_client(ctx, target_channel)
                 self._guild_active_vc[guild_id] = vc
                 if not vc.is_connected():
@@ -1108,8 +1118,15 @@ class TTSCog(commands.Cog):
                 if skip_event.is_set():
                     await ctx.reply("Current TTS request was skipped.")
                     return
-                if vc.is_playing():
-                    vc.stop()
+
+                busy_deadline = time.monotonic() + 10.0
+                while (vc.is_playing() or vc.is_paused()) and time.monotonic() < busy_deadline:
+                    if skip_event.is_set():
+                        await ctx.reply("Current TTS request was skipped.")
+                        return
+                    await asyncio.sleep(0.1)
+                if vc.is_playing() or vc.is_paused():
+                    raise RuntimeError("Voice client stayed busy too long. Please try again in a moment.")
 
                 play_err: list[str] = []
 
@@ -1185,19 +1202,11 @@ class TTSCog(commands.Cog):
                 await ctx.reply(f"TTS failed: {type(e).__name__}: {e}")
                 self._debug(ctx, f"Unhandled exception={type(e).__name__}: {e}")
             finally:
-                if vc:
+                if playback_suspended and playback_cog is not None and hasattr(playback_cog, "restore_after_tts"):
                     try:
-                        if vc.is_playing():
-                            vc.stop()
-                        await vc.disconnect(force=True)
-                        try:
-                            vc.cleanup()  # CRITICAL
-                        except Exception:
-                            pass
-                        self._debug(ctx, "voice client disconnected")
-                    except Exception:
-                        self._debug(ctx, "voice disconnect cleanup failed")
-                        pass
+                        await playback_cog.restore_after_tts(guild_id)
+                    except Exception as e:
+                        self._debug(ctx, f"restore_after_tts failed={type(e).__name__}: {e}")
                 self._guild_active_vc.pop(guild_id, None)
                 if temp_path:
                     try:
