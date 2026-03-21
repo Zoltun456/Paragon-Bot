@@ -289,7 +289,6 @@ class TTSCog(commands.Cog):
         self._guild_current: dict[int, _SayRequest] = {}
         self._guild_active_vc: dict[int, discord.VoiceClient] = {}
         self._guild_skip_events: dict[int, asyncio.Event] = {}
-        self._guild_disconnect_on_idle: dict[int, bool] = {}
         self._guild_processing: set[int] = set()
         self._cooldown_enabled: dict[int, bool] = {}
         self._cooldown = commands.CooldownMapping.from_cooldown(
@@ -312,7 +311,6 @@ class TTSCog(commands.Cog):
         self._guild_current.clear()
         self._guild_active_vc.clear()
         self._guild_skip_events.clear()
-        self._guild_disconnect_on_idle.clear()
         self._guild_processing.clear()
         self._voice_profile_locks.clear()
         self._model_catalog_cache.clear()
@@ -338,9 +336,10 @@ class TTSCog(commands.Cog):
     def should_keep_voice_connected(self, guild_id: int) -> bool:
         queue = self._guild_queues.get(guild_id)
         pending = queue.qsize() if queue is not None else 0
-        if guild_id in self._guild_processing or pending > 0:
-            return True
-        return not self._guild_disconnect_on_idle.get(guild_id, True)
+        return bool(guild_id in self._guild_processing or pending > 0)
+
+    def note_voice_disconnected(self, guild_id: int) -> None:
+        self._guild_active_vc.pop(guild_id, None)
 
     def _clear_pending_queue(self, guild_id: int) -> int:
         queue = self._queue_for(guild_id)
@@ -372,9 +371,6 @@ class TTSCog(commands.Cog):
                 pass
             if disconnect:
                 await cleanup_voice_client(vc)
-        if disconnect:
-            self._guild_disconnect_on_idle.pop(guild_id, None)
-
     def _ensure_worker(self, guild_id: int):
         task = self._guild_workers.get(guild_id)
         if task and not task.done():
@@ -397,41 +393,6 @@ class TTSCog(commands.Cog):
                 self._skip_event_for(guild_id).clear()
                 self._guild_processing.discard(guild_id)
                 queue.task_done()
-                if queue.empty():
-                    await self._maybe_disconnect_when_idle(guild_id)
-
-    async def _maybe_disconnect_when_idle(self, guild_id: int) -> None:
-        if not self._guild_disconnect_on_idle.get(guild_id, False):
-            return
-        if guild_id in self._guild_processing:
-            return
-        queue = self._guild_queues.get(guild_id)
-        if queue is not None and queue.qsize() > 0:
-            return
-
-        playback_cog = self.bot.get_cog("PlaybackCog")
-        if playback_cog is not None and hasattr(playback_cog, "should_keep_voice_connected"):
-            try:
-                if bool(playback_cog.should_keep_voice_connected(guild_id)):
-                    return
-            except Exception:
-                pass
-
-        guild = self.bot.get_guild(guild_id)
-        vc = self._guild_active_vc.get(guild_id)
-        if vc is None and guild is not None:
-            vc = guild.voice_client
-        if vc is None:
-            self._guild_disconnect_on_idle.pop(guild_id, None)
-            return
-        try:
-            if vc.is_playing() or vc.is_paused():
-                return
-        except Exception:
-            pass
-        await cleanup_voice_client(vc)
-        self._guild_active_vc.pop(guild_id, None)
-        self._guild_disconnect_on_idle.pop(guild_id, None)
 
     def _debug(self, ctx: commands.Context, msg: str):
         if not TTS_DEBUG:
@@ -1069,11 +1030,7 @@ class TTSCog(commands.Cog):
             temp_path = ""
             playback_suspended = False
             try:
-                existing_vc = ctx.voice_client if ctx.voice_client and ctx.voice_client.is_connected() else None
-                if guild_id not in self._guild_disconnect_on_idle:
-                    self._guild_disconnect_on_idle[guild_id] = existing_vc is None
-
-                await ctx.send(f"{req.requester_name} says: {message} to {target.display_name}.")
+                # await ctx.send(f"{req.requester_name} says: {message} to {target.display_name}.")
                 self._debug(ctx, "starting synthesis")
                 voice_ids = await self._get_voice_ids()
                 voice_profile = await self._get_or_create_voice_profile(int(ctx.author.id), voice_ids)

@@ -178,6 +178,7 @@ It provides:
 - Queues guild-local audio requests for the caller's current voice channel.
 - Tries `yt-dlp` first, then falls back to direct file download for simpler audio URLs.
 - Rejects tracks over 20 minutes and cleans up downloaded temp files after playback.
+- Leaves voice after 30 seconds of true idleness.
 - Posts a skip-vote message with `⏩`; 50% of non-bot users in the current call must react to skip.
 
 ### Admin
@@ -193,7 +194,7 @@ It provides:
 - `!setvoice <voice_id> [stability] [similarity_boost] [style] [use_speaker_boost] [speed] [seed]`
 - TTS stays connected across queued `!say` requests instead of leaving/rejoining between each one.
 - If queued audio from `!play` is active in the same voice channel, TTS interrupts it and playback resumes afterward.
-- TTS only auto-leaves when it created the voice session itself.
+- Voice auto-leaves after 30 seconds of true idleness.
 - Voice/profile is persisted globally per caller (same user keeps the same voice selection/settings across servers).
 - Voice options are pulled from available voices in your ElevenLabs account.
 - For `!setvoice`, any omitted optional settings use default profile values.

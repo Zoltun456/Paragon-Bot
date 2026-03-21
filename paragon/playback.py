@@ -152,7 +152,6 @@ class PlaybackCog(commands.Cog):
         self._guild_active_vc: dict[int, discord.VoiceClient] = {}
         self._guild_skip_events: dict[int, asyncio.Event] = {}
         self._guild_play_allowed: dict[int, asyncio.Event] = {}
-        self._guild_disconnect_on_idle: dict[int, bool] = {}
         self._guild_processing: set[int] = set()
         self._guild_locks: dict[int, asyncio.Lock] = {}
 
@@ -164,7 +163,6 @@ class PlaybackCog(commands.Cog):
         self._guild_active_vc.clear()
         self._guild_skip_events.clear()
         self._guild_play_allowed.clear()
-        self._guild_disconnect_on_idle.clear()
         self._guild_processing.clear()
         self._guild_locks.clear()
 
@@ -247,9 +245,10 @@ class PlaybackCog(commands.Cog):
         return bool(self._guild_current.get(guild_id) is not None or guild_id in self._guild_processing or pending > 0)
 
     def should_keep_voice_connected(self, guild_id: int) -> bool:
-        if self.has_pending_audio(guild_id):
-            return True
-        return not self._guild_disconnect_on_idle.get(guild_id, True)
+        return self.has_pending_audio(guild_id)
+
+    def note_voice_disconnected(self, guild_id: int) -> None:
+        self._guild_active_vc.pop(guild_id, None)
 
     async def suspend_for_tts(self, ctx: commands.Context, target_channel: discord.VoiceChannel) -> bool:
         if ctx.guild is None:
@@ -301,9 +300,6 @@ class PlaybackCog(commands.Cog):
             if disconnect:
                 await cleanup_voice_client(vc)
 
-        if disconnect:
-            self._guild_disconnect_on_idle.pop(guild_id, None)
-
     def _clear_pending_queue(self, guild_id: int) -> int:
         queue = self._queue_for(guild_id)
         cleared = 0
@@ -329,37 +325,6 @@ class PlaybackCog(commands.Cog):
             finally:
                 self._guild_processing.discard(guild_id)
                 queue.task_done()
-                if queue.empty():
-                    await self._maybe_disconnect_when_idle(guild_id)
-
-    async def _maybe_disconnect_when_idle(self, guild_id: int) -> None:
-        if not self._guild_disconnect_on_idle.get(guild_id, False):
-            return
-        if self.has_pending_audio(guild_id):
-            return
-        tts_cog = self.bot.get_cog("TTSCog")
-        if tts_cog is not None and hasattr(tts_cog, "should_keep_voice_connected"):
-            try:
-                if bool(tts_cog.should_keep_voice_connected(guild_id)):
-                    return
-            except Exception:
-                pass
-
-        guild = self.bot.get_guild(guild_id)
-        vc = self._guild_active_vc.get(guild_id)
-        if vc is None and guild is not None:
-            vc = guild.voice_client
-        if vc is None:
-            self._guild_disconnect_on_idle.pop(guild_id, None)
-            return
-        try:
-            if vc.is_playing() or vc.is_paused():
-                return
-        except Exception:
-            pass
-        await cleanup_voice_client(vc)
-        self._guild_active_vc.pop(guild_id, None)
-        self._guild_disconnect_on_idle.pop(guild_id, None)
 
     def _extract_track_request(self, url: str) -> tuple[str, float, bool, str, str, str]:
         src = str(url or "").strip()
@@ -663,10 +628,6 @@ class PlaybackCog(commands.Cog):
         if not self._channel_has_humans(target_channel):
             await ctx.reply(f"Skipping **{req.title}** because no one is in **{target_channel.name}** anymore.")
             return
-
-        existing_vc = ctx.voice_client if ctx.voice_client and ctx.voice_client.is_connected() else None
-        if guild_id not in self._guild_disconnect_on_idle:
-            self._guild_disconnect_on_idle[guild_id] = existing_vc is None
 
         prepared: Optional[_PreparedTrack] = None
         try:
