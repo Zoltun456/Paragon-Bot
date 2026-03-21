@@ -174,10 +174,10 @@ It provides:
 ## PlaybackCog
 
 ### Non-Admin
-- `!play <link or search terms> [speed 0.5-2.0]`
+- `!play <link or search terms> [speed 0.1-5.0]`
 - Queues guild-local audio requests for the caller's current voice channel.
 - Plain-text input performs a YouTube top-result search via `yt-dlp` and queues the first match.
-- Optional trailing speed clamps to `0.5x`-`2.0x`.
+- Optional trailing speed clamps to `0.1x`-`5.0x`.
 - Tries `yt-dlp` first, then falls back to direct file download for simpler audio URLs.
 - Rejects tracks over 20 minutes and cleans up downloaded temp files after playback.
 - Leaves voice after 30 seconds of true idleness.
