@@ -29,6 +29,8 @@ except Exception:
 FAST_FORWARD_EMOJI = "\N{BLACK RIGHT-POINTING DOUBLE TRIANGLE}"
 MAX_PLAY_DURATION_SECONDS = 20 * 60
 MAX_PLAY_FILE_BYTES = 128 * 1024 * 1024
+MIN_PLAYBACK_SPEED = 0.5
+MAX_PLAYBACK_SPEED = 2.0
 PLAY_DEBUG = os.getenv("PLAY_DEBUG", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -39,6 +41,7 @@ class _PlayRequest:
     title: str
     duration_seconds: float
     duration_known: bool
+    playback_speed: float
     webpage_url: str
     uploader: str
     mode: str
@@ -107,6 +110,45 @@ def _clean_title(title: str, fallback: str) -> str:
 def _looks_like_url(value: str) -> bool:
     parsed = urllib.parse.urlparse(str(value or "").strip())
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _clamp_playback_speed(value: float) -> float:
+    return max(MIN_PLAYBACK_SPEED, min(MAX_PLAYBACK_SPEED, float(value)))
+
+
+def _speed_tag(speed: float) -> str:
+    return "" if abs(float(speed) - 1.0) < 1e-6 else f" at **{float(speed):.2f}x**"
+
+
+def _effective_playback_duration(duration_seconds: float, speed: float) -> float:
+    duration = max(0.0, float(duration_seconds))
+    return duration / _clamp_playback_speed(speed) if duration > 0.0 else 0.0
+
+
+def _split_play_input(raw_input: str) -> tuple[str, float]:
+    text = str(raw_input or "").strip()
+    if not text:
+        raise RuntimeError("Usage: `!play <link or search terms> [speed 0.5-2.0]`")
+
+    parts = text.rsplit(maxsplit=1)
+    if len(parts) < 2:
+        return text, 1.0
+
+    query = parts[0].strip()
+    token = parts[1].strip().lower()
+    if not query:
+        raise RuntimeError("Usage: `!play <link or search terms> [speed 0.5-2.0]`")
+
+    if token.endswith("x"):
+        token = token[:-1].strip()
+    try:
+        parsed_speed = float(token)
+    except ValueError:
+        return text, 1.0
+
+    if _looks_like_url(query) or (MIN_PLAYBACK_SPEED <= parsed_speed <= MAX_PLAYBACK_SPEED):
+        return query, _clamp_playback_speed(parsed_speed)
+    return text, 1.0
 
 
 def _coerce_single_entry(info: dict) -> dict:
@@ -333,9 +375,7 @@ class PlaybackCog(commands.Cog):
                 queue.task_done()
 
     def _extract_track_request(self, raw_input: str) -> tuple[str, str, float, bool, str, str, str]:
-        src = str(raw_input or "").strip()
-        if not src:
-            raise RuntimeError("Usage: `!play <link or search terms>`")
+        src, _ = _split_play_input(raw_input)
 
         is_url = _looks_like_url(src)
         if (not is_url) and YoutubeDL is None:
@@ -531,7 +571,8 @@ class PlaybackCog(commands.Cog):
         elapsed = max(0.0, time.monotonic() - float(track.started_at or 0.0))
         if track.started_at <= 0.0:
             return max(0.0, float(track.started_offset or 0.0))
-        return min(float(track.duration_seconds or 0.0), max(0.0, float(track.started_offset or 0.0) + elapsed))
+        consumed = elapsed * _clamp_playback_speed(track.request.playback_speed)
+        return min(float(track.duration_seconds or 0.0), max(0.0, float(track.started_offset or 0.0) + consumed))
 
     async def _cleanup_track(self, track: _PreparedTrack) -> None:
         try:
@@ -546,9 +587,10 @@ class PlaybackCog(commands.Cog):
 
     async def _post_now_playing(self, track: _PreparedTrack) -> None:
         ctx = track.request.ctx
-        duration_text = _format_duration(track.duration_seconds) if track.duration_seconds > 0 else "unknown length"
+        effective_duration = _effective_playback_duration(track.duration_seconds, track.request.playback_speed)
+        duration_text = _format_duration(effective_duration) if effective_duration > 0 else "unknown length"
         line = (
-            f"Now playing **{track.request.title}** ({duration_text})"
+            f"Now playing **{track.request.title}** ({duration_text}){_speed_tag(track.request.playback_speed)}"
             f" requested by **{track.request.requester_name}**."
         )
         if track.request.uploader:
@@ -571,7 +613,8 @@ class PlaybackCog(commands.Cog):
         guild_id = int(track.request.ctx.guild.id)
         skip_event = self._skip_event_for(guild_id)
         play_allowed = self._play_allowed_for(guild_id)
-        max_wait = max(8.0, min(60.0 * 60.0, float(track.duration_seconds or 0.0) + 20.0))
+        effective_duration = _effective_playback_duration(track.duration_seconds, track.request.playback_speed)
+        max_wait = max(8.0, min(60.0 * 60.0, effective_duration + 20.0))
         play_started = time.monotonic()
         while True:
             if play_err:
@@ -602,11 +645,15 @@ class PlaybackCog(commands.Cog):
         before_options = None
         if float(track.started_offset or 0.0) > 0.0:
             before_options = f"-ss {track.started_offset:.3f}"
+        ffmpeg_options = "-vn"
+        speed = _clamp_playback_speed(track.request.playback_speed)
+        if abs(speed - 1.0) >= 1e-6:
+            ffmpeg_options = f"-vn -filter:a atempo={speed:.3f}"
 
         base_src = discord.FFmpegPCMAudio(
             track.temp_path,
             before_options=before_options,
-            options="-vn",
+            options=ffmpeg_options,
         )
         src = discord.PCMVolumeTransformer(base_src, volume=max(0.0, float(PLAYBACK_VOLUME)))
         track.started_at = time.monotonic()
@@ -723,7 +770,13 @@ class PlaybackCog(commands.Cog):
             await ctx.reply("Join a standard voice channel first.")
             return
         if not link or not str(link).strip():
-            await ctx.reply(f"Usage: `{ctx.clean_prefix}play <link or search terms>`")
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}play <link or search terms> [speed 0.5-2.0]`")
+            return
+
+        try:
+            play_target, playback_speed = _split_play_input(str(link))
+        except RuntimeError as e:
+            await ctx.reply(str(e))
             return
 
         bound_channel_id = self._active_play_channel_id(ctx.guild.id)
@@ -745,7 +798,7 @@ class PlaybackCog(commands.Cog):
         try:
             source_url, title, duration, duration_known, webpage_url, uploader, mode = await asyncio.to_thread(
                 self._extract_track_request,
-                str(link),
+                play_target,
             )
         except RuntimeError as e:
             await ctx.reply(str(e))
@@ -760,6 +813,7 @@ class PlaybackCog(commands.Cog):
             title=title,
             duration_seconds=duration,
             duration_known=duration_known,
+            playback_speed=playback_speed,
             webpage_url=webpage_url,
             uploader=uploader,
             mode=mode,
@@ -775,11 +829,12 @@ class PlaybackCog(commands.Cog):
         await queue.put(req)
         self._ensure_worker(ctx.guild.id)
         position = queue.qsize() + (1 if ctx.guild.id in self._guild_processing else 0)
-        duration_text = _format_duration(duration) if duration_known and duration > 0 else "duration pending validation"
+        effective_duration = _effective_playback_duration(duration, playback_speed)
+        duration_text = _format_duration(effective_duration) if duration_known and effective_duration > 0 else "duration pending validation"
         if position <= 1:
-            await ctx.reply(f"Queued **{title}** ({duration_text}). Starting shortly.")
+            await ctx.reply(f"Queued **{title}** ({duration_text}){_speed_tag(playback_speed)}. Starting shortly.")
         else:
-            await ctx.reply(f"Queued **{title}** ({duration_text}) at position **{position}**.")
+            await ctx.reply(f"Queued **{title}** ({duration_text}){_speed_tag(playback_speed)} at position **{position}**.")
 
     @commands.command(name="playskip")
     async def play_skip(self, ctx: commands.Context):
