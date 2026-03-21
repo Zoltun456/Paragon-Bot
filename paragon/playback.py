@@ -103,6 +103,11 @@ def _clean_title(title: str, fallback: str) -> str:
     return urllib.parse.unquote(name) or fallback
 
 
+def _looks_like_url(value: str) -> bool:
+    parsed = urllib.parse.urlparse(str(value or "").strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 def _coerce_single_entry(info: dict) -> dict:
     if not isinstance(info, dict):
         raise RuntimeError("That link did not return playable metadata.")
@@ -326,13 +331,16 @@ class PlaybackCog(commands.Cog):
                 self._guild_processing.discard(guild_id)
                 queue.task_done()
 
-    def _extract_track_request(self, url: str) -> tuple[str, float, bool, str, str, str]:
-        src = str(url or "").strip()
+    def _extract_track_request(self, raw_input: str) -> tuple[str, str, float, bool, str, str, str]:
+        src = str(raw_input or "").strip()
         if not src:
-            raise RuntimeError("Usage: `!play <link>`")
-        parsed = urllib.parse.urlparse(src)
-        if parsed.scheme not in {"http", "https"}:
-            raise RuntimeError("Play links must start with http:// or https://.")
+            raise RuntimeError("Usage: `!play <link or search terms>`")
+
+        is_url = _looks_like_url(src)
+        if (not is_url) and YoutubeDL is None:
+            raise RuntimeError("Search playback requires `yt-dlp`. Add it with `pip install -r requirements.txt`.")
+
+        lookup_value = src if is_url else f"ytsearch1:{src}"
 
         if YoutubeDL is not None:
             opts = {
@@ -345,7 +353,7 @@ class PlaybackCog(commands.Cog):
             }
             try:
                 with YoutubeDL(opts) as ydl:
-                    info = _coerce_single_entry(ydl.extract_info(src, download=False))
+                    info = _coerce_single_entry(ydl.extract_info(lookup_value, download=False))
                 duration = float(info.get("duration") or 0.0)
                 filesize = int(info.get("filesize") or info.get("filesize_approx") or 0)
                 if duration > MAX_PLAY_DURATION_SECONDS:
@@ -359,15 +367,20 @@ class PlaybackCog(commands.Cog):
 
                 title = _clean_title(str(info.get("title") or info.get("fulltitle") or ""), src)
                 webpage_url = str(info.get("webpage_url") or info.get("original_url") or src).strip() or src
+                source_url = str(info.get("original_url") or info.get("webpage_url") or webpage_url).strip() or webpage_url
                 uploader = str(info.get("uploader") or info.get("channel") or "").strip()
-                return title, duration, duration > 0.0, webpage_url, uploader, "ytdlp"
+                return source_url, title, duration, duration > 0.0, webpage_url, uploader, "ytdlp"
             except RuntimeError:
                 raise
             except Exception:
+                if not is_url:
+                    raise RuntimeError(f'No YouTube results found for "{src}".')
                 pass
 
+        if not is_url:
+            raise RuntimeError("Search playback requires `yt-dlp`. Add it with `pip install -r requirements.txt`.")
         title, duration, duration_known, webpage_url, uploader = _build_direct_request_info(src)
-        return title, duration, duration_known, webpage_url, uploader, "direct"
+        return src, title, duration, duration_known, webpage_url, uploader, "direct"
 
     def _download_via_ytdlp(self, req: _PlayRequest) -> _PreparedTrack:
         if YoutubeDL is None:
@@ -708,7 +721,7 @@ class PlaybackCog(commands.Cog):
             await ctx.reply("Join a standard voice channel first.")
             return
         if not link or not str(link).strip():
-            await ctx.reply(f"Usage: `{ctx.clean_prefix}play <link>`")
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}play <link or search terms>`")
             return
 
         bound_channel_id = self._active_play_channel_id(ctx.guild.id)
@@ -728,7 +741,7 @@ class PlaybackCog(commands.Cog):
             return
 
         try:
-            title, duration, duration_known, webpage_url, uploader, mode = await asyncio.to_thread(
+            source_url, title, duration, duration_known, webpage_url, uploader, mode = await asyncio.to_thread(
                 self._extract_track_request,
                 str(link),
             )
@@ -741,7 +754,7 @@ class PlaybackCog(commands.Cog):
 
         req = _PlayRequest(
             ctx=ctx,
-            source_url=str(link).strip(),
+            source_url=source_url,
             title=title,
             duration_seconds=duration,
             duration_known=duration_known,

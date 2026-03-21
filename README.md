@@ -174,8 +174,9 @@ It provides:
 ## PlaybackCog
 
 ### Non-Admin
-- `!play <link>`
+- `!play <link or search terms>`
 - Queues guild-local audio requests for the caller's current voice channel.
+- Plain-text input performs a YouTube top-result search via `yt-dlp` and queues the first match.
 - Tries `yt-dlp` first, then falls back to direct file download for simpler audio URLs.
 - Rejects tracks over 20 minutes and cleans up downloaded temp files after playback.
 - Leaves voice after 30 seconds of true idleness.
