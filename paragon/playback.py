@@ -15,6 +15,7 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+from .config import PLAYBACK_VOLUME
 from .ownership import is_control_user_id
 from .voice_runtime import cleanup_voice_client, ensure_voice_client
 from .voice_support import dave_support_status
@@ -602,11 +603,12 @@ class PlaybackCog(commands.Cog):
         if float(track.started_offset or 0.0) > 0.0:
             before_options = f"-ss {track.started_offset:.3f}"
 
-        src = discord.FFmpegPCMAudio(
+        base_src = discord.FFmpegPCMAudio(
             track.temp_path,
             before_options=before_options,
             options="-vn",
         )
+        src = discord.PCMVolumeTransformer(base_src, volume=max(0.0, float(PLAYBACK_VOLUME)))
         track.started_at = time.monotonic()
         try:
             vc.play(src, after=_after)
