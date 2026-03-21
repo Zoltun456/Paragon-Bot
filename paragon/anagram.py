@@ -17,7 +17,7 @@ from .config import (
 from .spin_support import consume_anagram_reward_multiplier
 from .storage import _udict, save_data
 from .stats_store import record_game_fields
-from .xp import apply_xp_change, grant_prestige_scaled_reward_boost
+from .xp import apply_xp_change, grant_prestige_scaled_fixed_boost
 from .roles import enforce_level6_exclusive
 from .time_windows import _today_local, _date_key          # local day keys:contentReference[oaicite:8]{index=8}
 
@@ -28,6 +28,9 @@ _builtin_phrases = [
 _phrases: List[str] = []
 
 _word_re = re.compile(r"[A-Za-z]+")
+ANAGRAM_FIRST_SOLVE_BOOST_PCT = 1.00
+ANAGRAM_FIRST_SOLVE_BOOST_MINUTES = 180
+ANAGRAM_SOLVE_DECAY = 0.5
 
 
 def _normalize_phrase(raw: str) -> str:
@@ -116,14 +119,22 @@ def _state(gid: int, uid: int) -> dict:
     u = _udict(gid, uid)  # ensures user record exists:contentReference[oaicite:9]{index=9}
     st = u.get("anagram")
     if st is None:
-        st = {"date": "", "used": 0, "idx": 0, "awaiting": False, "scrambled": "", "answer": ""}
+        st = {"date": "", "used": 0, "solved": 0, "idx": 0, "awaiting": False, "scrambled": "", "answer": ""}
         u["anagram"] = st
-    for k, v in [("used", 0), ("idx", 0), ("awaiting", False), ("scrambled", ""), ("answer", "")]:
+    for k, v in [("used", 0), ("solved", 0), ("idx", 0), ("awaiting", False), ("scrambled", ""), ("answer", "")]:
         if k not in st:
             st[k] = v
     if "date" not in st:
         st["date"] = ""
     return st
+
+
+def _anagram_boost_profile(solve_number: int) -> tuple[float, int]:
+    n = max(1, int(solve_number))
+    decay = float(ANAGRAM_SOLVE_DECAY) ** float(n - 1)
+    pct = max(0.0, float(ANAGRAM_FIRST_SOLVE_BOOST_PCT) * decay)
+    minutes = max(1, int(round(float(ANAGRAM_FIRST_SOLVE_BOOST_MINUTES) * decay)))
+    return pct, minutes
 
 class AnagramCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -138,6 +149,7 @@ class AnagramCog(commands.Cog):
         if st.get("date") != today:
             st["date"] = today
             st["used"] = 0
+            st["solved"] = 0
             st["idx"] = 0
             st["awaiting"] = False
             st["scrambled"] = ""
@@ -185,12 +197,18 @@ class AnagramCog(commands.Cog):
 
         # Check correctness (single attempt per puzzle)
         if norm_guess == norm_answer:
+            solve_number = int(st.get("solved", 0)) + 1
+            st["solved"] = solve_number
             wheel_mult = float(consume_anagram_reward_multiplier(ctx.guild.id, ctx.author.id))
-            reward_seed = int(max(1, round(float(ANAGRAM_WIN_XP) * wheel_mult)))
-            boost = await grant_prestige_scaled_reward_boost(
+            profile_pct, profile_minutes = _anagram_boost_profile(solve_number)
+            reward_seed = int(max(1, round(float(ANAGRAM_WIN_XP) * float(profile_pct) * float(profile_minutes))))
+            boost = await grant_prestige_scaled_fixed_boost(
                 ctx.author,
-                reward_seed,
+                pct=profile_pct,
+                minutes=profile_minutes,
                 source="anagram solve",
+                reward_seed_xp=reward_seed,
+                flat_multiplier=wheel_mult,
             )
             record_game_fields(
                 ctx.guild.id,
@@ -204,9 +222,15 @@ class AnagramCog(commands.Cog):
             await enforce_level6_exclusive(ctx.guild)
             wheel_line = ""
             if wheel_mult > 1.0:
-                wheel_line = f" Wheel buff: x{wheel_mult:.2f} reward strength."
+                wheel_line = (
+                    f" Wheel buff: x{wheel_mult:.2f} final buff scaling "
+                    f"(+{boost['prestige_scaled_percent']:.1f}%/{boost['prestige_scaled_minutes']}m "
+                    f"-> +{boost['percent']:.1f}%/{boost['minutes']}m)."
+                )
             await ctx.reply(
                 f"✅ Correct! Boost gained: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**. "
+                f"Solve **#{solve_number}** profile."
+                f" "
                 f"Progress: **{st['used']}/{ANAGRAM_DAILY_LIMIT}**."
                 f"{wheel_line}"
             )

@@ -211,31 +211,88 @@ def prestige_reward_scale(
     return floor + ((1.0 - floor) * decay)
 
 
+def _build_prestige_scaled_boost_profile(
+    *,
+    prestige: int,
+    pct: int | float,
+    minutes: int,
+    flat_multiplier: int | float = 1.0,
+) -> dict:
+    base_pct = max(0.0, float(pct))
+    base_minutes = max(1, int(minutes))
+    scale = prestige_reward_scale(prestige)
+    prestige_scaled_pct = max(0.0, base_pct * scale)
+    prestige_scaled_minutes = max(1, int(round(base_minutes * scale)))
+    wheel_mult = max(1.0, float(flat_multiplier))
+    final_pct = max(0.0, prestige_scaled_pct * wheel_mult)
+    final_minutes = max(1, int(round(prestige_scaled_minutes * wheel_mult)))
+    return {
+        "prestige": int(prestige),
+        "scale": float(scale),
+        "flat_multiplier": float(wheel_mult),
+        "base_pct": float(base_pct),
+        "base_minutes": int(base_minutes),
+        "prestige_scaled_pct": float(prestige_scaled_pct),
+        "prestige_scaled_minutes": int(prestige_scaled_minutes),
+        "final_pct": float(final_pct),
+        "final_minutes": int(final_minutes),
+    }
+
+
+async def grant_prestige_scaled_fixed_boost(
+    member,
+    *,
+    pct: int | float,
+    minutes: int,
+    source: str = "activity",
+    reward_seed_xp: int | float = 0,
+    flat_multiplier: int | float = 1.0,
+) -> dict:
+    u = _udict(member.guild.id, member.id)
+    prestige = int(u.get("prestige", 0))
+    profile = _build_prestige_scaled_boost_profile(
+        prestige=prestige,
+        pct=pct,
+        minutes=minutes,
+        flat_multiplier=flat_multiplier,
+    )
+    result = await grant_fixed_boost(
+        member,
+        pct=profile["final_pct"],
+        minutes=profile["final_minutes"],
+        source=source,
+        reward_seed_xp=reward_seed_xp,
+    )
+    result["prestige"] = int(prestige)
+    result["scale"] = float(profile["scale"])
+    result["flat_multiplier"] = float(profile["flat_multiplier"])
+    result["base_percent"] = float(profile["base_pct"] * 100.0)
+    result["base_minutes"] = int(profile["base_minutes"])
+    result["prestige_scaled_percent"] = float(profile["prestige_scaled_pct"] * 100.0)
+    result["prestige_scaled_minutes"] = int(profile["prestige_scaled_minutes"])
+    return result
+
+
 async def grant_prestige_scaled_reward_boost(
     member,
     reward_xp: int | float,
     *,
     source: str = "activity",
+    flat_multiplier: int | float = 1.0,
 ) -> dict:
     """
     Convert a reward into a temporary XP/min boost, dampened by prestige.
     This is intended for game rewards where high prestige should get smaller boosts.
     """
-    u = _udict(member.guild.id, member.id)
-    prestige = int(u.get("prestige", 0))
     base_pct, base_minutes = _reward_to_boost(reward_xp)
-    scale = prestige_reward_scale(prestige)
-    pct = max(0.0, base_pct * scale)
-    minutes = max(1, int(round(base_minutes * scale)))
-    result = await grant_fixed_boost(
+    result = await grant_prestige_scaled_fixed_boost(
         member,
-        pct=pct,
-        minutes=minutes,
+        pct=base_pct,
+        minutes=base_minutes,
         source=source,
         reward_seed_xp=reward_xp,
+        flat_multiplier=flat_multiplier,
     )
-    result["prestige"] = int(prestige)
-    result["scale"] = float(scale)
     result["base_percent"] = float(base_pct * 100.0)
     result["base_minutes"] = int(base_minutes)
     return result

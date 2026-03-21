@@ -271,11 +271,11 @@ def wheel_buff_lines(gid: int, uid: int) -> list[str]:
     w_charges = max(0, int(b.get("wordle_reward_charges", 0)))
     if w_charges > 0:
         w_mult = max(1.0, float(b.get("wordle_reward_multiplier", 1.0)))
-        lines.append(f"Wordle reward multiplier: **x{w_mult:.2f}** ({w_charges} use(s) left)")
+        lines.append(f"Wordle buff multiplier: **x{w_mult:.2f}** ({w_charges} use(s) left)")
     a_charges = max(0, int(b.get("anagram_reward_charges", 0)))
     if a_charges > 0:
         a_mult = max(1.0, float(b.get("anagram_reward_multiplier", 1.0)))
-        lines.append(f"Anagram reward multiplier: **x{a_mult:.2f}** ({a_charges} use(s) left)")
+        lines.append(f"Anagram buff multiplier: **x{a_mult:.2f}** ({a_charges} use(s) left)")
     rr_charges = max(0, int(b.get("roulette_accuracy_charges", 0)))
     if rr_charges > 0:
         bonus = max(0.0, float(b.get("roulette_accuracy_bonus", 0.0))) * 100.0

@@ -43,11 +43,11 @@ WHEEL_REWARDS: dict[str, dict] = {
         "weight": 8.0,
     },
     "wordle_x4_next": {
-        "label": "Next Wordle clear is 4x reward strength.",
+        "label": "Next Wordle clear is 4x final buff strength.",
         "weight": 8.0,
     },
     "anagram_x3_next": {
-        "label": "Next anagram solve is 3x reward strength.",
+        "label": "Next anagram solve is 3x final buff strength.",
         "weight": 7.0,
     },
     "roulette_aim_next": {
@@ -331,14 +331,14 @@ class SpinCog(commands.Cog):
         if key == "wordle_x4_next":
             state = set_wordle_reward_multiplier(gid, uid, multiplier=4.0, charges=1)
             return (
-                f"Next Wordle clear multiplier set to **x{state['multiplier']:.2f}** "
+                f"Next Wordle clear buff multiplier set to **x{state['multiplier']:.2f}** "
                 f"for **{state['charges']}** clear(s)."
             )
 
         if key == "anagram_x3_next":
             state = set_anagram_reward_multiplier(gid, uid, multiplier=3.0, charges=1)
             return (
-                f"Next anagram solve multiplier set to **x{state['multiplier']:.2f}** "
+                f"Next anagram solve buff multiplier set to **x{state['multiplier']:.2f}** "
                 f"for **{state['charges']}** solve(s)."
             )
 
