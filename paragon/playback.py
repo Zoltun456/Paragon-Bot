@@ -15,7 +15,7 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
-from .config import PLAYBACK_VOLUME
+from .config import PLAYBACK_VOLUME, YTDLP_COOKIE_FILE, YTDLP_COOKIES_FROM_BROWSER
 from .ownership import is_control_user_id
 from .voice_runtime import cleanup_voice_client, ensure_voice_client
 from .voice_support import dave_support_status
@@ -29,8 +29,8 @@ except Exception:
 FAST_FORWARD_EMOJI = "\N{BLACK RIGHT-POINTING DOUBLE TRIANGLE}"
 MAX_PLAY_DURATION_SECONDS = 20 * 60
 MAX_PLAY_FILE_BYTES = 128 * 1024 * 1024
-MIN_PLAYBACK_SPEED = 0.1
-MAX_PLAYBACK_SPEED = 5.0
+MIN_PLAYBACK_SPEED = 0.5
+MAX_PLAYBACK_SPEED = 2.0
 PLAY_DEBUG = os.getenv("PLAY_DEBUG", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -151,6 +151,31 @@ def _split_play_input(raw_input: str) -> tuple[str, float]:
     return text, 1.0
 
 
+def _is_youtube_source(value: str) -> bool:
+    src = str(value or "").strip()
+    if not src:
+        return False
+    if src.startswith("ytsearch"):
+        return True
+    parsed = urllib.parse.urlparse(src)
+    host = (parsed.netloc or "").strip().lower()
+    return host.endswith("youtube.com") or host.endswith("youtu.be") or host.endswith("music.youtube.com")
+
+
+def _cookies_from_browser_opt() -> Optional[tuple[str, ...]]:
+    raw = str(YTDLP_COOKIES_FROM_BROWSER or "").strip()
+    if not raw:
+        return None
+    browser, sep, profile = raw.partition(":")
+    browser = browser.strip().lower()
+    if not browser:
+        return None
+    if not sep:
+        return (browser,)
+    profile = profile.strip()
+    return (browser, profile) if profile else (browser,)
+
+
 def _coerce_single_entry(info: dict) -> dict:
     if not isinstance(info, dict):
         raise RuntimeError("That link did not return playable metadata.")
@@ -220,6 +245,74 @@ class PlaybackCog(commands.Cog):
         gid = int(getattr(ctx.guild, "id", 0) or 0)
         uid = int(getattr(ctx.author, "id", 0) or 0)
         print(f"[PLAY][g={gid}][u={uid}] {msg}")
+
+    def _yt_dlp_auth_available(self) -> bool:
+        return bool(str(YTDLP_COOKIE_FILE or "").strip() or _cookies_from_browser_opt())
+
+    def _apply_yt_dlp_auth(self, opts: dict) -> dict:
+        out = dict(opts)
+        cookie_file = str(YTDLP_COOKIE_FILE or "").strip()
+        if cookie_file:
+            out["cookiefile"] = cookie_file
+            return out
+        cookies_from_browser = _cookies_from_browser_opt()
+        if cookies_from_browser:
+            out["cookiesfrombrowser"] = cookies_from_browser
+        return out
+
+    def _should_retry_with_auth(self, source: str) -> bool:
+        return _is_youtube_source(source) and self._yt_dlp_auth_available()
+
+    def _auth_failure_hint(self, source: str) -> str:
+        if self._should_retry_with_auth(source):
+            return ""
+        if not _is_youtube_source(source):
+            return ""
+        return (
+            " This may be age-restricted or gated. Configure `YTDLP_COOKIES_FROM_BROWSER` "
+            "or `YTDLP_COOKIE_FILE` to let yt-dlp retry with an authenticated YouTube session."
+        )
+
+    def _extract_info_with_ytdlp(self, source: str, *, opts: dict) -> dict:
+        with YoutubeDL(opts) as ydl:
+            return _coerce_single_entry(ydl.extract_info(source, download=False))
+
+    def _download_with_ytdlp(
+        self,
+        source: str,
+        *,
+        opts: dict,
+        temp_dir: str,
+    ) -> tuple[dict, str]:
+        with YoutubeDL(opts) as ydl:
+            info = _coerce_single_entry(ydl.extract_info(source, download=True))
+            path = ""
+            requested = info.get("requested_downloads")
+            if isinstance(requested, list) and requested:
+                maybe_path = requested[0].get("filepath")
+                if maybe_path:
+                    path = str(maybe_path)
+            if not path:
+                path = str(ydl.prepare_filename(info))
+        if not os.path.exists(path):
+            files = [
+                os.path.join(temp_dir, name)
+                for name in os.listdir(temp_dir)
+                if os.path.isfile(os.path.join(temp_dir, name))
+            ]
+            if not files:
+                raise RuntimeError("yt-dlp did not produce a playable audio file.")
+            path = max(files, key=os.path.getsize)
+        return info, path
+
+    def _clear_temp_dir_files(self, temp_dir: str) -> None:
+        try:
+            for name in os.listdir(temp_dir):
+                maybe = os.path.join(temp_dir, name)
+                if os.path.isfile(maybe):
+                    os.remove(maybe)
+        except OSError:
+            pass
 
     def _queue_for(self, guild_id: int) -> asyncio.Queue[_PlayRequest]:
         queue = self._guild_queues.get(guild_id)
@@ -393,8 +486,25 @@ class PlaybackCog(commands.Cog):
                 "socket_timeout": 20,
             }
             try:
-                with YoutubeDL(opts) as ydl:
-                    info = _coerce_single_entry(ydl.extract_info(lookup_value, download=False))
+                info = self._extract_info_with_ytdlp(lookup_value, opts=opts)
+            except Exception as e:
+                if self._should_retry_with_auth(lookup_value):
+                    try:
+                        info = self._extract_info_with_ytdlp(
+                            lookup_value,
+                            opts=self._apply_yt_dlp_auth(opts),
+                        )
+                    except Exception:
+                        if not is_url:
+                            raise RuntimeError(f'No YouTube results found for "{src}".')
+                        raise
+                else:
+                    if not is_url:
+                        raise RuntimeError(f'No YouTube results found for "{src}".')
+                    raise RuntimeError(
+                        f"yt-dlp could not inspect that link: {e}{self._auth_failure_hint(lookup_value)}"
+                    ) from e
+            try:
                 duration = float(info.get("duration") or 0.0)
                 filesize = int(info.get("filesize") or info.get("filesize_approx") or 0)
                 if duration > MAX_PLAY_DURATION_SECONDS:
@@ -414,8 +524,6 @@ class PlaybackCog(commands.Cog):
             except RuntimeError:
                 raise
             except Exception:
-                if not is_url:
-                    raise RuntimeError(f'No YouTube results found for "{src}".')
                 pass
 
         if not is_url:
@@ -440,36 +548,26 @@ class PlaybackCog(commands.Cog):
             "socket_timeout": 30,
         }
         try:
-            with YoutubeDL(opts) as ydl:
-                info = _coerce_single_entry(ydl.extract_info(req.source_url, download=True))
-                path = ""
-                requested = info.get("requested_downloads")
-                if isinstance(requested, list) and requested:
-                    maybe_path = requested[0].get("filepath")
-                    if maybe_path:
-                        path = str(maybe_path)
-                if not path:
-                    path = str(ydl.prepare_filename(info))
+            info = None
+            path = ""
+            try:
+                info, path = self._download_with_ytdlp(req.source_url, opts=opts, temp_dir=temp_dir)
+            except Exception:
+                if not self._should_retry_with_auth(req.source_url):
+                    raise
+                self._clear_temp_dir_files(temp_dir)
+                info, path = self._download_with_ytdlp(
+                    req.source_url,
+                    opts=self._apply_yt_dlp_auth(opts),
+                    temp_dir=temp_dir,
+                )
         except Exception as e:
             try:
-                for name in os.listdir(temp_dir):
-                    maybe = os.path.join(temp_dir, name)
-                    if os.path.isfile(maybe):
-                        os.remove(maybe)
+                self._clear_temp_dir_files(temp_dir)
                 os.rmdir(temp_dir)
             except OSError:
                 pass
-            raise RuntimeError(f"yt-dlp could not fetch audio from that link: {e}") from e
-
-        if not os.path.exists(path):
-            files = [
-                os.path.join(temp_dir, name)
-                for name in os.listdir(temp_dir)
-                if os.path.isfile(os.path.join(temp_dir, name))
-            ]
-            if not files:
-                raise RuntimeError("yt-dlp did not produce a playable audio file.")
-            path = max(files, key=os.path.getsize)
+            raise RuntimeError(f"yt-dlp could not fetch audio from that link: {e}{self._auth_failure_hint(req.source_url)}") from e
 
         duration = float(req.duration_seconds or 0.0)
         if duration <= 0.0:

@@ -50,6 +50,16 @@ def _resolve_data_path(env_name: str, *candidates: str) -> str:
     return str(fallback)
 
 
+def _optional_resolve_path(env_name: str) -> str:
+    raw = os.getenv(env_name)
+    if raw is None or raw.strip() == "":
+        return ""
+    p = Path(raw.strip())
+    if not p.is_absolute():
+        p = _PROJECT_ROOT / p
+    return str(p)
+
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN environment variable.")
@@ -76,6 +86,8 @@ XP_REWARD_BOOST_MAX_MINUTES = _as_int("XP_REWARD_BOOST_MAX_MINUTES", 720)
 
 # Playback
 PLAYBACK_VOLUME = _as_float("PLAYBACK_VOLUME", 0.25)
+YTDLP_COOKIES_FROM_BROWSER = os.getenv("YTDLP_COOKIES_FROM_BROWSER", "").strip()
+YTDLP_COOKIE_FILE = _optional_resolve_path("YTDLP_COOKIE_FILE")
 
 # Blackjack
 BJ_MAX_PLAYERS = _as_int("BJ_MAX_PLAYERS", 20)

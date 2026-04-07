@@ -18,6 +18,7 @@ It provides:
 - If cloning, bot requires `DISCORD_TOKEN` in an `.env` that has proper permissions set in Discord's dev portal
 - `!say` uses ElevenLabs TTS (`ELEVEN_API`) and requires FFmpeg available on the host
 - `!play` uses `yt-dlp` when available, with a direct-download fallback for simple file links
+- Age-restricted YouTube playback can use `YTDLP_COOKIES_FROM_BROWSER` or `YTDLP_COOKIE_FILE` in `.env` for authenticated `yt-dlp` retries
 
 ## Command Reference (By Cog)
 
@@ -179,6 +180,7 @@ It provides:
 - Plain-text input performs a YouTube top-result search via `yt-dlp` and queues the first match.
 - Optional trailing speed clamps to `0.5x`-`2.0x`.
 - Tries `yt-dlp` first, then falls back to direct file download for simpler audio URLs.
+- For age-restricted/gated YouTube videos, `yt-dlp` can retry with cookies if `YTDLP_COOKIES_FROM_BROWSER` or `YTDLP_COOKIE_FILE` is configured.
 - Rejects tracks over 20 minutes and cleans up downloaded temp files after playback.
 - Leaves voice after 30 seconds of true idleness.
 - Posts a skip-vote message with `⏩`; 50% of non-bot users in the current call must react to skip.
