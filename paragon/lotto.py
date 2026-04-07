@@ -13,7 +13,15 @@ from .config import (
     LOTTO_TICKET_COST,
     LOTTO_DRAW_HOUR,
     LOTTO_DRAW_MINUTE,
+    LOTTO_JACKPOT_POT_BOOST_MULTIPLIER,
     LOTTO_MAX_PER_USER,
+)
+from .emojis import (
+    EMOJI_ADMISSION_TICKETS,
+    EMOJI_CLOCK_FACE_SIX_OCLOCK,
+    EMOJI_CONFETTI_BALL,
+    EMOJI_PARTY_POPPER,
+    EMOJI_REPEAT_ARROWS,
 )
 from .guild_setup import get_log_channel
 from .spin_support import consume_lotto_bonus_tickets_pct, consume_lotto_jackpot_boost_multiplier
@@ -191,13 +199,13 @@ class LottoCog(commands.Cog):
                     xp_refunded_total=refund,
                 )
                 msg = (
-                    "🎟️ **Lottery Draw Cancelled**\n"
+                    f"{EMOJI_ADMISSION_TICKETS} **Lottery Draw Cancelled**\n"
                     "Only one participant entered, so no boost was awarded.\n"
                     f"Refunded **{refund} XP** to {solo_member.mention}."
                 )
             else:
                 msg = (
-                    "🎟️ **Lottery Draw Cancelled**\n"
+                    f"{EMOJI_ADMISSION_TICKETS} **Lottery Draw Cancelled**\n"
                     "Only one participant entered, so no boost was awarded.\n"
                     f"Could not refund user `{solo_id}` because they are no longer in this server."
                 )
@@ -215,7 +223,7 @@ class LottoCog(commands.Cog):
         st["last_draw"] = today_key
         await save_data()
 
-        base_bonus_xp = float(pot) * 5.0
+        base_bonus_xp = float(pot) * float(LOTTO_JACKPOT_POT_BOOST_MULTIPLIER)
         if winner:
             jackpot_amp = float(consume_lotto_jackpot_boost_multiplier(guild.id, winner.id))
             target_bonus_xp = base_bonus_xp * max(1.0, jackpot_amp)
@@ -243,13 +251,13 @@ class LottoCog(commands.Cog):
             target_bonus_xp = base_bonus_xp
 
         msg = (
-            f"🎉 **Lottery Draw!** Pool: **{pot} XP** from **{total_tickets} ticket(s)**.\n"
-            "Jackpot reward is a temporary XP-rate boost worth 5x the pot at the winner's passive rate."
+            f"{EMOJI_PARTY_POPPER} **Lottery Draw!** Pool: **{pot} XP** from **{total_tickets} ticket(s)**.\n"
+            f"Jackpot reward is a temporary XP-rate boost worth {LOTTO_JACKPOT_POT_BOOST_MULTIPLIER:g}x the pot at the winner's passive rate."
         )
         if winner and boost is not None:
             amp_line = f"\nWheel jackpot amp: **x{jackpot_amp:.2f}**." if jackpot_amp > 1.0 else ""
             msg += (
-                f"\nWinner: {winner.mention} 🎊 "
+                f"\nWinner: {winner.mention} {EMOJI_CONFETTI_BALL} "
                 f"({winner_tickets} ticket(s))"
                 f"\nBoost: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m** "
                 f"(worth about **{boost['equivalent_bonus_xp']:.0f} XP**, target **{target_bonus_xp:.0f} XP**)."
@@ -266,7 +274,7 @@ class LottoCog(commands.Cog):
 
         # If disabled, block usage for everyone (including pot checks)
         if not st.get("enabled", True):
-            await ctx.reply("🎟️ The lottery is currently **disabled**.")
+            await ctx.reply(f"{EMOJI_ADMISSION_TICKETS} The lottery is currently **disabled**.")
             return
 
         draw_h, draw_m = _sanitize_draw_time(st.get("draw_hour", LOTTO_DRAW_HOUR), st.get("draw_minute", LOTTO_DRAW_MINUTE))
@@ -279,7 +287,7 @@ class LottoCog(commands.Cog):
             tickets = int(st["tickets"].get(uid_s, 0))
             total_tickets, _ = _ticket_totals(st)
             await ctx.reply(
-                f"🎟️ Pot: **{st['pot']} XP** from **{total_tickets} ticket(s)** "
+                f"{EMOJI_ADMISSION_TICKETS} Pot: **{st['pot']} XP** from **{total_tickets} ticket(s)** "
                 f"| {target.display_name} has **{tickets} ticket(s)**"
                 f"\nNext draw: **{_draw_time_label(draw_h, draw_m)}** "
                 f"({next_draw.strftime('%Y-%m-%d %I:%M %p ET')})."
@@ -305,11 +313,11 @@ class LottoCog(commands.Cog):
         if already + cost > LOTTO_MAX_PER_USER:
             remaining = max(0, LOTTO_MAX_PER_USER - already)
             if remaining <= 0:
-                await ctx.reply(f"🎟️ You’ve already reached the max of {LOTTO_MAX_PER_USER} XP in the current pot.")
+                await ctx.reply(f"{EMOJI_ADMISSION_TICKETS} You've already reached the max of {LOTTO_MAX_PER_USER} XP in the current pot.")
             else:
                 max_more_tickets = max(0, remaining // LOTTO_TICKET_COST)
                 await ctx.reply(
-                    f"🎟️ You can only add **{remaining} XP** more to this pot "
+                    f"{EMOJI_ADMISSION_TICKETS} You can only add **{remaining} XP** more to this pot "
                     f"(~{max_more_tickets} ticket(s) at current ticket cost)."
                 )
             return
@@ -345,7 +353,7 @@ class LottoCog(commands.Cog):
         if bonus_tickets > 0:
             bonus_line = f" (wheel bonus +{bonus_tickets} ticket(s))"
         await ctx.reply(
-            f"🎟️ Bought {count} ticket(s){bonus_line}! Pot is now **{st['pot']} XP** "
+            f"{EMOJI_ADMISSION_TICKETS} Bought {count} ticket(s){bonus_line}! Pot is now **{st['pot']} XP** "
             f"from **{total_tickets} ticket(s)**."
         )
 
@@ -373,7 +381,7 @@ class LottoCog(commands.Cog):
         if not when:
             nxt = _next_draw_dt(cur_h, cur_m)
             await ctx.reply(
-                f"🕕 Lottery draw time is **{_draw_time_label(cur_h, cur_m)}**.\n"
+                f"{EMOJI_CLOCK_FACE_SIX_OCLOCK} Lottery draw time is **{_draw_time_label(cur_h, cur_m)}**.\n"
                 f"Next draw: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**."
             )
             return
@@ -394,7 +402,7 @@ class LottoCog(commands.Cog):
 
         nxt = _next_draw_dt(h, m)
         msg = (
-            f"🕕 Lottery draw time set to **{_draw_time_label(h, m)}** by {ctx.author.mention}.\n"
+            f"{EMOJI_CLOCK_FACE_SIX_OCLOCK} Lottery draw time set to **{_draw_time_label(h, m)}** by {ctx.author.mention}.\n"
             f"Next draw: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**."
         )
         await ctx.reply(msg)
@@ -410,7 +418,7 @@ class LottoCog(commands.Cog):
         st["enabled"] = not st.get("enabled", True)
         await save_data()
         state = "ENABLED" if st["enabled"] else "DISABLED"
-        msg = f"🔁 Lottery has been **{state}** by {ctx.author.mention}."
+        msg = f"{EMOJI_REPEAT_ARROWS} Lottery has been **{state}** by {ctx.author.mention}."
         await ctx.reply(msg)
         ch = get_log_channel(ctx.guild)
         if ch and ch.permissions_for(ctx.guild.me).send_messages:

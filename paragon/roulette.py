@@ -9,23 +9,18 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+from .config import (
+    ROULETTE_BASE_SUCCESS_CHANCE,
+    ROULETTE_COOLDOWN_SECONDS,
+    ROULETTE_GAP_STEP_CHANCE,
+    ROULETTE_MAX_SUCCESS_CHANCE,
+    ROULETTE_MAX_TIMEOUT_SECONDS,
+    ROULETTE_MIN_SUCCESS_CHANCE,
+    ROULETTE_MIN_TIMEOUT_SECONDS,
+)
 from .spin_support import consume_roulette_accuracy_bonus, consume_roulette_backfire_shield
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
-
-ROULETTE_COOLDOWN_SECONDS = 30 * 60
-
-# Base success chance is fixed at 20%, then shifts by 2.5% per prestige gap.
-# Shooter advantage raises the odds; target advantage lowers them.
-ROULETTE_BASE_SUCCESS_CHANCE = 0.20
-ROULETTE_GAP_STEP_CHANCE = 0.025
-ROULETTE_MIN_SUCCESS_CHANCE = 0.025
-ROULETTE_MAX_SUCCESS_CHANCE = 0.60
-
-# Timeout scales off the base shot odds only:
-# 2.5% odds -> 3m timeout, 60% odds -> 30s timeout.
-ROULETTE_MIN_TIMEOUT_SECONDS = 30
-ROULETTE_MAX_TIMEOUT_SECONDS = 3 * 60
 
 
 def _get_user_prestige(member: discord.Member) -> int:

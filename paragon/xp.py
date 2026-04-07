@@ -6,43 +6,21 @@ import time
 
 from .config import (
     BASE_XP_PER_MINUTE,
-    XP_REWARD_BOOST_MIN_PCT,
-    XP_REWARD_BOOST_MAX_PCT,
-    XP_REWARD_BOOST_SCALE,
-    XP_REWARD_BOOST_MIN_MINUTES,
-    XP_REWARD_BOOST_MAX_MINUTES,
+    BOOST_VALUE_MAX_MINUTES,
+    BOOST_VALUE_PCT_ROUND_STEP,
+    BOOST_VALUE_PREFERRED_PCTS,
+    PRESTIGE_BASE_STEP_LEVELS,
+    PRESTIGE_BASE_STEP_XP_PER_MIN,
+    PRESTIGE_COMPRESSION_MODE,
+    PRESTIGE_COST_A,
+    PRESTIGE_COST_B,
+    PRESTIGE_COST_C0,
+    PRESTIGE_MAX_BASE_PROGRESS_MINUTES,
+    PRESTIGE_RATE_K,
+    PRESTIGE_STACK_SOFTCAP,
 )
 from .storage import _udict, save_data
 from .stats_store import record_xp_boost, record_xp_change
-
-
-# ---------------------------
-# Prestige tuning (starter build)
-# ---------------------------
-# Stepped base rate:
-#   base(p) = BASE_XP_PER_MINUTE + floor(p / 5)
-PRESTIGE_BASE_STEP_LEVELS = 5
-PRESTIGE_BASE_STEP_XP_PER_MIN = 1.0
-
-# cost(p) follows the quadratic curve until it would take longer than
-# 24h at that tier's stepped base rate.
-PRESTIGE_COST_C0 = 120.0
-PRESTIGE_COST_A = 0.45
-PRESTIGE_COST_B = 0.065
-PRESTIGE_MAX_BASE_PROGRESS_MINUTES = 24 * 60
-
-# prestige multiplier = 1 + k*p
-PRESTIGE_RATE_K = 0.025
-
-# Optional boost-stack compression mode:
-# - "progress_only": only affects prestige ETA/progress estimates
-# - "global": affects all XP gain
-# - "off": disabled
-PRESTIGE_COMPRESSION_MODE = "progress_only"
-PRESTIGE_STACK_SOFTCAP = 6.0
-BOOST_VALUE_PREFERRED_PCTS = (0.50, 1.00, 0.25, 1.50, 2.00, 3.00, 4.00)
-BOOST_VALUE_MAX_MINUTES = 720
-BOOST_VALUE_PCT_ROUND_STEP = 0.25
 
 
 def _now_ts() -> int:
@@ -187,32 +165,6 @@ def _progress_boost_multiplier(u: dict, *, now: Optional[int] = None) -> float:
     return raw * debuff_mult
 
 
-def _reward_to_boost(reward_xp: int | float) -> tuple[float, int]:
-    reward = max(1.0, float(reward_xp))
-    scaled = math.log10(reward + 1.0)
-    pct = XP_REWARD_BOOST_MIN_PCT + (scaled * XP_REWARD_BOOST_SCALE)
-    pct = max(XP_REWARD_BOOST_MIN_PCT, min(XP_REWARD_BOOST_MAX_PCT, pct))
-
-    minutes = int(round(XP_REWARD_BOOST_MIN_MINUTES + (scaled * 18.0) + math.sqrt(reward)))
-    minutes = max(XP_REWARD_BOOST_MIN_MINUTES, min(XP_REWARD_BOOST_MAX_MINUTES, minutes))
-    return pct, minutes
-
-
-async def grant_reward_boost(member, reward_xp: int | float, *, source: str = "activity") -> dict:
-    """
-    Convert a reward into a temporary XP/min multiplier boost.
-    Returns a summary dict for user-facing messaging.
-    """
-    pct, minutes = _reward_to_boost(reward_xp)
-    return await grant_fixed_boost(
-        member,
-        pct=pct,
-        minutes=minutes,
-        source=source,
-        reward_seed_xp=reward_xp,
-    )
-
-
 def bonus_xp_boost_profile(
     rate_per_min: int | float,
     bonus_xp: int | float,
@@ -298,93 +250,6 @@ def prestige_reward_scale(
     pw = max(0.1, float(power))
     decay = 1.0 / (1.0 + (float(p) / c) ** pw)
     return floor + ((1.0 - floor) * decay)
-
-
-def _build_prestige_scaled_boost_profile(
-    *,
-    prestige: int,
-    pct: int | float,
-    minutes: int,
-    flat_multiplier: int | float = 1.0,
-) -> dict:
-    base_pct = max(0.0, float(pct))
-    base_minutes = max(1, int(minutes))
-    scale = prestige_reward_scale(prestige)
-    prestige_scaled_pct = max(0.0, base_pct * scale)
-    prestige_scaled_minutes = max(1, int(round(base_minutes * scale)))
-    wheel_mult = max(1.0, float(flat_multiplier))
-    final_pct = max(0.0, prestige_scaled_pct * wheel_mult)
-    final_minutes = max(1, int(round(prestige_scaled_minutes * wheel_mult)))
-    return {
-        "prestige": int(prestige),
-        "scale": float(scale),
-        "flat_multiplier": float(wheel_mult),
-        "base_pct": float(base_pct),
-        "base_minutes": int(base_minutes),
-        "prestige_scaled_pct": float(prestige_scaled_pct),
-        "prestige_scaled_minutes": int(prestige_scaled_minutes),
-        "final_pct": float(final_pct),
-        "final_minutes": int(final_minutes),
-    }
-
-
-async def grant_prestige_scaled_fixed_boost(
-    member,
-    *,
-    pct: int | float,
-    minutes: int,
-    source: str = "activity",
-    reward_seed_xp: int | float = 0,
-    flat_multiplier: int | float = 1.0,
-) -> dict:
-    u = _udict(member.guild.id, member.id)
-    prestige = int(u.get("prestige", 0))
-    profile = _build_prestige_scaled_boost_profile(
-        prestige=prestige,
-        pct=pct,
-        minutes=minutes,
-        flat_multiplier=flat_multiplier,
-    )
-    result = await grant_fixed_boost(
-        member,
-        pct=profile["final_pct"],
-        minutes=profile["final_minutes"],
-        source=source,
-        reward_seed_xp=reward_seed_xp,
-    )
-    result["prestige"] = int(prestige)
-    result["scale"] = float(profile["scale"])
-    result["flat_multiplier"] = float(profile["flat_multiplier"])
-    result["base_percent"] = float(profile["base_pct"] * 100.0)
-    result["base_minutes"] = int(profile["base_minutes"])
-    result["prestige_scaled_percent"] = float(profile["prestige_scaled_pct"] * 100.0)
-    result["prestige_scaled_minutes"] = int(profile["prestige_scaled_minutes"])
-    return result
-
-
-async def grant_prestige_scaled_reward_boost(
-    member,
-    reward_xp: int | float,
-    *,
-    source: str = "activity",
-    flat_multiplier: int | float = 1.0,
-) -> dict:
-    """
-    Convert a reward into a temporary XP/min boost, dampened by prestige.
-    This is intended for game rewards where high prestige should get smaller boosts.
-    """
-    base_pct, base_minutes = _reward_to_boost(reward_xp)
-    result = await grant_prestige_scaled_fixed_boost(
-        member,
-        pct=base_pct,
-        minutes=base_minutes,
-        source=source,
-        reward_seed_xp=reward_xp,
-        flat_multiplier=flat_multiplier,
-    )
-    result["base_percent"] = float(base_pct * 100.0)
-    result["base_minutes"] = int(base_minutes)
-    return result
 
 
 async def grant_fixed_boost(

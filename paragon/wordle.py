@@ -9,13 +9,18 @@ import discord
 from discord.ext import commands, tasks
 
 from .config import (
+    WORDLE_FAIL_MINUTES,
+    WORDLE_FAIL_PCT,
     WORDLE_MAX_GUESSES,
     WORDLE_RESPECT_ACTIVE_HOURS,
     WORDLE_VALID_GUESSES_PATH,
+    WORDLE_WIN_MINUTES,
+    WORDLE_WIN_PCTS,
     WORDLE_WORD_LENGTH,
     WORDLE_WORDLIST_PATH,
     WORD_REGEX,
 )
+from .emojis import EMOJI_BLACK_LARGE_SQUARE, EMOJI_LARGE_GREEN_SQUARE, EMOJI_LARGE_YELLOW_SQUARE
 from .guild_setup import get_log_channel
 from .ownership import owner_only
 from .roles import enforce_level6_exclusive
@@ -69,11 +74,6 @@ _builtin_wordlist = [
 ]
 _wordlist: list[str] = []
 _guesslist: list[str] = []
-
-WORDLE_WIN_PCTS = [5.0, 4.0, 3.0, 2.0, 1.0]
-WORDLE_WIN_MINUTES = 600
-WORDLE_FAIL_PCT = 0.50
-WORDLE_FAIL_MINUTES = 60
 
 
 def _load_file_words(path: str) -> list[str]:
@@ -152,7 +152,11 @@ def wordle_compare(guess: str, target: str) -> tuple[str, list[str]]:
         if remaining.get(ch, 0) > 0:
             marks[i] = "y"
             remaining[ch] -= 1
-    to_emoji = {"g": "🟩", "y": "🟨", "b": "⬛"}
+    to_emoji = {
+        "g": EMOJI_LARGE_GREEN_SQUARE,
+        "y": EMOJI_LARGE_YELLOW_SQUARE,
+        "b": EMOJI_BLACK_LARGE_SQUARE,
+    }
     row = "".join(to_emoji[m] for m in marks)
     return row, marks
 

@@ -7,18 +7,23 @@ import random
 import discord
 from discord.ext import commands, tasks
 
-from .config import COMMAND_PREFIX, DROP_MAX_MINUTES, DROP_MAX_XP, DROP_MIN_MINUTES, DROP_MIN_XP
+from .config import (
+    COMMAND_PREFIX,
+    DROP_MAX_MINUTES,
+    DROP_MAX_XP,
+    DROP_MIN_MINUTES,
+    DROP_MIN_XP,
+    SURPRISE_BOOST_MINUTES,
+    SURPRISE_MAX_PCT,
+    SURPRISE_MIN_PCT,
+    SURPRISE_PCT_STEP,
+)
 from .guild_setup import get_log_channel
 from .ownership import owner_only
 from .roles import enforce_level6_exclusive
 from .stats_store import record_game_fields
 from .storage import _gdict, save_data
 from .xp import grant_fixed_boost
-
-SURPRISE_MIN_PCT = 0.50
-SURPRISE_MAX_PCT = 2.00
-SURPRISE_PCT_STEP = 0.10
-SURPRISE_BOOST_MINUTES = 60
 
 
 def _utcnow() -> datetime:

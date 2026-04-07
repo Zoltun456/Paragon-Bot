@@ -11,6 +11,7 @@ import discord
 from discord.ext import commands
 
 from .config import SPIN_DISABLED_REWARDS, SPIN_RESET_HOUR, SPIN_RESET_MINUTE
+from .emojis import EMOJI_FERRIS_WHEEL
 from .ownership import owner_only
 from .spin_support import (
     add_roulette_backfire_shield,
@@ -292,7 +293,7 @@ class SpinCog(commands.Cog):
             fill = max(0, min(12, i + 1))
             bar = f"[{'=' * fill}{'.' * (12 - fill)}]"
             return (
-                "🎡 **Daily Wheel Spin**\n"
+                f"{EMOJI_FERRIS_WHEEL} **Daily Wheel Spin**\n"
                 f"{bar} {pointer}\n"
                 f"`{slots[0]}`  **`{slots[1]}`**  `{slots[2]}`\n"
                 "_Spinning..._"
@@ -314,7 +315,7 @@ class SpinCog(commands.Cog):
         try:
             await msg.edit(
                 content=(
-                    "🎡 **Daily Wheel Spin**\n"
+                    f"{EMOJI_FERRIS_WHEEL} **Daily Wheel Spin**\n"
                     f"**Landed on:** `{self._short_label(final_key)}`"
                 )
             )

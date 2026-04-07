@@ -4,7 +4,7 @@ import time
 import discord
 from discord.ext import commands
 
-from .config import CF_MAX_BET, CF_TTL_SECONDS
+from .config import CF_MAX_BET, CF_POT_BOOST_MULTIPLIER, CF_TTL_SECONDS
 from .ownership import is_control_user_id
 from .spin_support import consume_coinflip_win_edge
 from .storage import _udict
@@ -121,7 +121,7 @@ class CoinFlipCog(commands.Cog):
                 k=1,
             )[0]
             loser = acceptor if winner is challenger else challenger
-            target_bonus_xp = float(pot) * 5.0
+            target_bonus_xp = float(pot) * float(CF_POT_BOOST_MULTIPLIER)
             boost = await grant_bonus_xp_equivalent_boost(
                 winner,
                 target_bonus_xp,
@@ -164,7 +164,7 @@ class CoinFlipCog(commands.Cog):
             await ctx.reply(
                 f"Coin Flip! {challenger.mention} vs {acceptor.mention} - Bet **{amount} XP** each (pot **{pot} XP**)\n"
                 f"**Winner:** {winner.mention} earned **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m** "
-                f"(worth about **{boost['equivalent_bonus_xp']:.0f} XP**, target **{target_bonus_xp:.0f} XP** = 5x pot)\n"
+                f"(worth about **{boost['equivalent_bonus_xp']:.0f} XP**, target **{target_bonus_xp:.0f} XP** = {CF_POT_BOOST_MULTIPLIER:g}x pot)\n"
                 f"**Loser:** {loser.mention} lost **{amount} XP**"
                 f"{edge_note}"
             )

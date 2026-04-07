@@ -5,15 +5,12 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
-from .config import THANKS_GIFT_XP
+from .config import THANKS_BOOST_MINUTES, THANKS_BOOST_PCT, THANKS_REWARD_SEED_XP
 from .roles import enforce_level6_exclusive
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
 from .time_windows import _date_key, _today_local
 from .xp import grant_fixed_boost
-
-THANKS_BOOST_PCT = 2.00
-THANKS_BOOST_MINUTES = 60
 
 
 def _thanks_state(gid: int, uid: int) -> dict:
@@ -79,7 +76,7 @@ class ThanksCog(commands.Cog):
             pct=THANKS_BOOST_PCT,
             minutes=THANKS_BOOST_MINUTES,
             source="thanks gift",
-            reward_seed_xp=THANKS_GIFT_XP,
+            reward_seed_xp=THANKS_REWARD_SEED_XP,
         )
         record_game_fields(ctx.guild.id, author.id, "thanks", sent=1)
         record_game_fields(
@@ -87,7 +84,7 @@ class ThanksCog(commands.Cog):
             target.id,
             "thanks",
             received=1,
-            boost_seed_xp_total=THANKS_GIFT_XP,
+            boost_seed_xp_total=THANKS_REWARD_SEED_XP,
             boost_percent_total=boost["percent"],
             boost_minutes_total=boost["minutes"],
         )

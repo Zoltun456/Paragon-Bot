@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands, tasks
 
 from .config import resolve_afk_channel_id
+from .emojis import EMOJI_FIRST_PLACE_MEDAL, EMOJI_SECOND_PLACE_MEDAL, EMOJI_THIRD_PLACE_MEDAL
 from .guild_setup import ensure_guild_setup
 from .storage import load_data, _gdict, _udict, save_data
 from .xp import apply_delta, get_gain_state, grant_fixed_boost, grant_fixed_debuff
@@ -328,7 +329,15 @@ class CoreCog(commands.Cog):
         for i, (uid, total) in enumerate(rows, start=1):
             m = ctx.guild.get_member(uid)
             name = m.display_name if m else f"User {uid}"
-            medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "•"))
+            medal = (
+                EMOJI_FIRST_PLACE_MEDAL
+                if i == 1
+                else (
+                    EMOJI_SECOND_PLACE_MEDAL
+                    if i == 2
+                    else (EMOJI_THIRD_PLACE_MEDAL if i == 3 else "\N{BULLET}")
+                )
+            )
             lines.append(f"`{i:>2}.` {medal} **{name}** - {total} XP")
         await ctx.reply("\n".join(lines))
 

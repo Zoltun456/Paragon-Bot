@@ -11,7 +11,18 @@ import re
 import discord
 from discord.ext import commands
 
-from .config import ANAGRAM_DAILY_LIMIT, ANAGRAM_PHRASES_PATH
+from .config import (
+    ANAGRAM_DAILY_LIMIT,
+    ANAGRAM_FAIL_ADD_MINUTES,
+    ANAGRAM_FAIL_ADD_PCT,
+    ANAGRAM_FAIL_MAX_MINUTES,
+    ANAGRAM_FAIL_MAX_PCT,
+    ANAGRAM_PHRASES_PATH,
+    ANAGRAM_SOLVE_ADD_MINUTES,
+    ANAGRAM_SOLVE_ADD_PCT,
+    ANAGRAM_SOLVE_MAX_MINUTES,
+    ANAGRAM_SOLVE_MAX_PCT,
+)
 from .roles import enforce_level6_exclusive
 from .spin_support import consume_anagram_reward_multiplier
 from .stats_store import record_game_fields
@@ -34,14 +45,6 @@ _builtin_phrases = [
 _phrases: List[str] = []
 
 _word_re = re.compile(r"[A-Za-z]+")
-ANAGRAM_SOLVE_ADD_PCT = 0.20
-ANAGRAM_SOLVE_ADD_MINUTES = 60
-ANAGRAM_SOLVE_MAX_PCT = 2.00
-ANAGRAM_SOLVE_MAX_MINUTES = 600
-ANAGRAM_FAIL_ADD_PCT = 0.10
-ANAGRAM_FAIL_ADD_MINUTES = 60
-ANAGRAM_FAIL_MAX_PCT = 1.00
-ANAGRAM_FAIL_MAX_MINUTES = 600
 
 
 def _normalize_phrase(raw: str) -> str:
