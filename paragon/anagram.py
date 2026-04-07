@@ -1,36 +1,47 @@
-# paragon/anagram.py
 from __future__ import annotations
-from typing import Optional, List
-import os
-import random
+
+from datetime import date
+from typing import List, Optional
 import hashlib
 import math
+import os
+import random
 import re
-from datetime import date
+
 import discord
 from discord.ext import commands
 
-from .config import (
-    ANAGRAM_PHRASES_PATH, ANAGRAM_DAILY_LIMIT,
-    ANAGRAM_WIN_XP, ANAGRAM_LOSS_XP,
-)
-from .spin_support import consume_anagram_reward_multiplier
-from .storage import _udict, save_data
-from .stats_store import record_game_fields
-from .xp import apply_xp_change, grant_prestige_scaled_fixed_boost
+from .config import ANAGRAM_DAILY_LIMIT, ANAGRAM_PHRASES_PATH
 from .roles import enforce_level6_exclusive
-from .time_windows import _today_local, _date_key          # local day keys:contentReference[oaicite:8]{index=8}
+from .spin_support import consume_anagram_reward_multiplier
+from .stats_store import record_game_fields
+from .storage import _udict, save_data
+from .time_windows import _date_key, _today_local
+from .xp import grant_stacked_fixed_boost, grant_stacked_fixed_debuff
 
 _builtin_phrases = [
-    "silver sword", "ocean breeze", "golden apple", "hidden path", "vast horizon",
-    "midnight sun", "silent storm", "crystal river", "ancient ruins", "shadow dancer"
+    "silver sword",
+    "ocean breeze",
+    "golden apple",
+    "hidden path",
+    "vast horizon",
+    "midnight sun",
+    "silent storm",
+    "crystal river",
+    "ancient ruins",
+    "shadow dancer",
 ]
 _phrases: List[str] = []
 
 _word_re = re.compile(r"[A-Za-z]+")
-ANAGRAM_FIRST_SOLVE_BOOST_PCT = 1.00
-ANAGRAM_FIRST_SOLVE_BOOST_MINUTES = 180
-ANAGRAM_SOLVE_DECAY = 0.5
+ANAGRAM_SOLVE_ADD_PCT = 0.20
+ANAGRAM_SOLVE_ADD_MINUTES = 60
+ANAGRAM_SOLVE_MAX_PCT = 2.00
+ANAGRAM_SOLVE_MAX_MINUTES = 600
+ANAGRAM_FAIL_ADD_PCT = 0.10
+ANAGRAM_FAIL_ADD_MINUTES = 60
+ANAGRAM_FAIL_MAX_PCT = 1.00
+ANAGRAM_FAIL_MAX_MINUTES = 600
 
 
 def _normalize_phrase(raw: str) -> str:
@@ -60,6 +71,7 @@ def _sequence_index(user_id: int, position: int, mod: int) -> int:
     step = _coprime_step(seed + b":step", mod)
     return (start + step * position) % mod
 
+
 def _load_phrases():
     global _phrases
     if _phrases:
@@ -72,17 +84,17 @@ def _load_phrases():
                 s = _normalize_phrase(line)
                 if not s or s in seen:
                     continue
-                # Expect 2–3 word phrases, but allow any non-empty line
                 seen.add(s)
                 items.append(s)
         _phrases = items if items else [_normalize_phrase(p) for p in _builtin_phrases]
     else:
         _phrases = [_normalize_phrase(p) for p in _builtin_phrases]
 
+
 def _canonical(s: str) -> str:
-    """Lowercase; collapse all non-letters to single spaces; trim."""
     tokens = _word_re.findall(s.lower())
     return " ".join(tokens)
+
 
 def _phrase_for(user_id: int, day_key: str, slot: int) -> str:
     _load_phrases()
@@ -94,17 +106,15 @@ def _phrase_for(user_id: int, day_key: str, slot: int) -> str:
     idx = _sequence_index(user_id, position, len(_phrases))
     return _phrases[idx]
 
+
 def _scramble_phrase(phrase: str) -> str:
-    """Scramble letters within each word to preserve word count; avoid identity when possible."""
     out_words = []
     for w in phrase.split():
         if len(w) <= 3:
-            # tiny words often look the same; try once
             letters = list(w)
             random.shuffle(letters)
             out_words.append("".join(letters))
             continue
-        # scramble until different (max few tries)
         letters = list(w)
         for _ in range(6):
             random.shuffle(letters)
@@ -114,9 +124,9 @@ def _scramble_phrase(phrase: str) -> str:
         out_words.append("".join(letters))
     return " ".join(out_words)
 
+
 def _state(gid: int, uid: int) -> dict:
-    """Per-user anagram state under user record."""
-    u = _udict(gid, uid)  # ensures user record exists:contentReference[oaicite:9]{index=9}
+    u = _udict(gid, uid)
     st = u.get("anagram")
     if st is None:
         st = {"date": "", "used": 0, "solved": 0, "idx": 0, "awaiting": False, "scrambled": "", "answer": ""}
@@ -129,23 +139,15 @@ def _state(gid: int, uid: int) -> dict:
     return st
 
 
-def _anagram_boost_profile(solve_number: int) -> tuple[float, int]:
-    n = max(1, int(solve_number))
-    decay = float(ANAGRAM_SOLVE_DECAY) ** float(n - 1)
-    pct = max(0.0, float(ANAGRAM_FIRST_SOLVE_BOOST_PCT) * decay)
-    minutes = max(1, int(round(float(ANAGRAM_FIRST_SOLVE_BOOST_MINUTES) * decay)))
-    return pct, minutes
-
 class AnagramCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     @commands.command(name="anagram", aliases=["a"])
     async def anagram(self, ctx: commands.Context, *, guess: Optional[str] = None):
-        today = _date_key(_today_local())                   # local date string:contentReference[oaicite:10]{index=10}
+        today = _date_key(_today_local())
         st = _state(ctx.guild.id, ctx.author.id)
 
-        # New day? reset per-day counters and pending puzzle
         if st.get("date") != today:
             st["date"] = today
             st["used"] = 0
@@ -156,20 +158,22 @@ class AnagramCog(commands.Cog):
             st["answer"] = ""
             await save_data()
 
-        # Out of daily puzzles?
         used = int(st.get("used", 0))
         if used >= ANAGRAM_DAILY_LIMIT:
-            await ctx.reply(f"🧩 You’ve used **{ANAGRAM_DAILY_LIMIT}/{ANAGRAM_DAILY_LIMIT}** anagrams today. Come back tomorrow!")
+            await ctx.reply(
+                f"You have used **{ANAGRAM_DAILY_LIMIT}/{ANAGRAM_DAILY_LIMIT}** anagrams today. Come back tomorrow!"
+            )
             return
 
-        # If no guess provided, (re)show current scrambled or generate a new one
         if guess is None:
             p = ctx.clean_prefix
             if st.get("awaiting") and st.get("scrambled"):
-                left = ANAGRAM_DAILY_LIMIT - used
-                await ctx.reply(f"🧩 **Anagram:** `{st['scrambled']}`\nAttempts left today: **{used}/{ANAGRAM_DAILY_LIMIT}**\nReply with `{p}a <guess>`.")
+                await ctx.reply(
+                    f"**Anagram:** `{st['scrambled']}`\n"
+                    f"Attempts left today: **{used}/{ANAGRAM_DAILY_LIMIT}**\n"
+                    f"Reply with `{p}a <guess>`."
+                )
                 return
-            # Generate new puzzle for this slot
             phrase = _phrase_for(ctx.author.id, today, st["idx"])
             scrambled = _scramble_phrase(phrase)
             st["answer"] = phrase
@@ -177,10 +181,13 @@ class AnagramCog(commands.Cog):
             st["awaiting"] = True
             record_game_fields(ctx.guild.id, ctx.author.id, "anagram", puzzles_started=1)
             await save_data()
-            await ctx.reply(f"🧩 **Anagram:** `{scrambled}`\nAttempts used today: **{used}/{ANAGRAM_DAILY_LIMIT}**\nReply with `{p}a <guess>`.")
+            await ctx.reply(
+                f"**Anagram:** `{scrambled}`\n"
+                f"Attempts used today: **{used}/{ANAGRAM_DAILY_LIMIT}**\n"
+                f"Reply with `{p}a <guess>`."
+            )
             return
 
-        # A guess was provided
         if not st.get("awaiting"):
             await ctx.reply(f"No active puzzle. Type `{ctx.clean_prefix}a` to get one first.")
             return
@@ -195,27 +202,29 @@ class AnagramCog(commands.Cog):
         st["answer"] = ""
         await save_data()
 
-        # Check correctness (single attempt per puzzle)
         if norm_guess == norm_answer:
             solve_number = int(st.get("solved", 0)) + 1
             st["solved"] = solve_number
             wheel_mult = float(consume_anagram_reward_multiplier(ctx.guild.id, ctx.author.id))
-            profile_pct, profile_minutes = _anagram_boost_profile(solve_number)
-            reward_seed = int(max(1, round(float(ANAGRAM_WIN_XP) * float(profile_pct) * float(profile_minutes))))
-            boost = await grant_prestige_scaled_fixed_boost(
+            base_pct = float(ANAGRAM_SOLVE_ADD_PCT)
+            base_minutes = int(ANAGRAM_SOLVE_ADD_MINUTES)
+            final_pct = float(base_pct * wheel_mult)
+            final_minutes = int(max(1, round(float(base_minutes) * wheel_mult)))
+            boost = await grant_stacked_fixed_boost(
                 ctx.author,
-                pct=profile_pct,
-                minutes=profile_minutes,
+                pct_add=final_pct,
+                minutes_add=final_minutes,
+                pct_cap=ANAGRAM_SOLVE_MAX_PCT,
+                minutes_cap=ANAGRAM_SOLVE_MAX_MINUTES,
                 source="anagram solve",
-                reward_seed_xp=reward_seed,
-                flat_multiplier=wheel_mult,
+                reward_seed_xp=int(round(base_pct * 100.0)),
             )
             record_game_fields(
                 ctx.guild.id,
                 ctx.author.id,
                 "anagram",
                 solves=1,
-                boost_seed_xp_total=reward_seed,
+                boost_seed_xp_total=int(round(base_pct * 100.0)),
                 boost_percent_total=boost["percent"],
                 boost_minutes_total=boost["minutes"],
             )
@@ -224,23 +233,29 @@ class AnagramCog(commands.Cog):
             if wheel_mult > 1.0:
                 wheel_line = (
                     f" Wheel buff: x{wheel_mult:.2f} final buff scaling "
-                    f"(+{boost['prestige_scaled_percent']:.1f}%/{boost['prestige_scaled_minutes']}m "
-                    f"-> +{boost['percent']:.1f}%/{boost['minutes']}m)."
+                    f"(+{base_pct * 100.0:.1f}%/{base_minutes}m -> "
+                    f"+{final_pct * 100.0:.1f}%/{final_minutes}m)."
                 )
             await ctx.reply(
-                f"✅ Correct! Boost gained: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**. "
-                f"Solve **#{solve_number}** profile."
-                f" "
-                f"Progress: **{st['used']}/{ANAGRAM_DAILY_LIMIT}**."
-                f"{wheel_line}"
+                f"Correct! Anagram stack is now **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**. "
+                f"Solve **#{solve_number}** added **+{final_pct * 100.0:.1f}%** for **{final_minutes}m**. "
+                f"Progress: **{st['used']}/{ANAGRAM_DAILY_LIMIT}**.{wheel_line}"
             )
             return
 
-        # Wrong → −XP
-        await apply_xp_change(ctx.author, -ANAGRAM_LOSS_XP, source="anagram fail")
+        debuff = await grant_stacked_fixed_debuff(
+            ctx.author,
+            pct_add=ANAGRAM_FAIL_ADD_PCT,
+            minutes_add=ANAGRAM_FAIL_ADD_MINUTES,
+            pct_cap=ANAGRAM_FAIL_MAX_PCT,
+            minutes_cap=ANAGRAM_FAIL_MAX_MINUTES,
+            source="anagram fail",
+            reward_seed_xp=int(round(ANAGRAM_FAIL_ADD_PCT * 100.0)),
+        )
         record_game_fields(ctx.guild.id, ctx.author.id, "anagram", fails=1)
         await enforce_level6_exclusive(ctx.guild)
         await ctx.reply(
-            f"❌ Not quite. The answer was **{answer}**. **−{ANAGRAM_LOSS_XP} XP**.\n"
+            f"Not quite. The answer was **{answer}**. "
+            f"Anagram debuff is now **-{debuff['percent']:.1f}% XP/min** for **{debuff['minutes']}m**.\n"
             f"Progress: **{st['used']}/{ANAGRAM_DAILY_LIMIT}**."
         )

@@ -1,7 +1,6 @@
 # paragon/lotto.py
 from __future__ import annotations
 
-import math
 import random
 import re
 from datetime import datetime, timedelta
@@ -21,7 +20,7 @@ from .spin_support import consume_lotto_bonus_tickets_pct, consume_lotto_jackpot
 from .storage import _gdict, _udict, save_data
 from .stats_store import record_game_fields
 from .time_windows import LOCAL_TZ
-from .xp import apply_xp_change, grant_fixed_boost
+from .xp import apply_xp_change, grant_bonus_xp_equivalent_boost
 from .roles import enforce_level6_exclusive
 from .ownership import owner_only
 
@@ -93,39 +92,6 @@ def _parse_draw_time(raw: str) -> Optional[tuple[int, int]]:
             return None
 
     return h, mins
-
-
-def _lotto_boost_profile(total_tickets: int, winner_tickets: int, prestige: int) -> dict:
-    """
-    Balance goals:
-    - more pool tickets => longer buff duration
-    - lower prestige => much larger buff
-    - tiny ticket share (underdog) => larger buff
-    """
-    pool = max(1, int(total_tickets))
-    won = max(1, min(int(winner_tickets), pool))
-    p = max(0, int(prestige))
-
-    share = won / float(pool)
-    underdog_factor = min(2.5, max(1.0, (1.0 / max(share, 1e-9)) ** 0.20))
-
-    # Hard prestige dampening: high prestige gets much smaller buffs.
-    prestige_factor = 1.0 / ((1.0 + (p / 8.0)) ** 1.2)
-
-    pool_scale = 0.10 + (0.18 * math.log10(pool + 1.0))
-    pct = pool_scale * underdog_factor * prestige_factor
-    pct = max(0.03, min(1.75, pct))  # +3% .. +175%
-
-    minutes = int(round(25 + (40.0 * math.log2(pool + 1.0))))
-    minutes = max(30, min(720, minutes))  # 30m .. 12h
-
-    return {
-        "pct": float(pct),
-        "percent": float(pct * 100.0),
-        "minutes": int(minutes),
-        "share_pct": float(share * 100.0),
-        "prestige": int(p),
-    }
 
 
 def _lotto_state(gid: int) -> dict:
@@ -249,27 +215,22 @@ class LottoCog(commands.Cog):
         st["last_draw"] = today_key
         await save_data()
 
+        base_bonus_xp = float(pot) * 5.0
         if winner:
-            wu = _udict(guild.id, winner.id)
-            prestige = int(wu.get("prestige", 0))
-            profile = _lotto_boost_profile(total_tickets, winner_tickets, prestige)
             jackpot_amp = float(consume_lotto_jackpot_boost_multiplier(guild.id, winner.id))
-            if jackpot_amp > 1.0:
-                profile["pct"] = max(0.0, min(4.0, float(profile["pct"]) * jackpot_amp))
-                profile["minutes"] = max(1, min(720, int(round(float(profile["minutes"]) * jackpot_amp))))
-            boost = await grant_fixed_boost(
+            target_bonus_xp = base_bonus_xp * max(1.0, jackpot_amp)
+            boost = await grant_bonus_xp_equivalent_boost(
                 winner,
-                pct=profile["pct"],
-                minutes=profile["minutes"],
+                target_bonus_xp,
                 source="lotto jackpot",
-                reward_seed_xp=pot,
+                reward_seed_xp=target_bonus_xp,
             )
             record_game_fields(
                 guild.id,
                 winner.id,
                 "lotto",
                 jackpots_won=1,
-                boost_seed_xp_total=pot,
+                boost_seed_xp_total=target_bonus_xp,
                 boost_percent_total=boost["percent"],
                 boost_minutes_total=boost["minutes"],
                 winning_tickets_total=winner_tickets,
@@ -277,20 +238,21 @@ class LottoCog(commands.Cog):
             )
             await enforce_level6_exclusive(guild)
         else:
-            profile = None
             boost = None
             jackpot_amp = 1.0
+            target_bonus_xp = base_bonus_xp
 
         msg = (
             f"🎉 **Lottery Draw!** Pool: **{pot} XP** from **{total_tickets} ticket(s)**.\n"
-            "Jackpot reward is a temporary XP-rate boost (no direct XP payout)."
+            "Jackpot reward is a temporary XP-rate boost worth 5x the pot at the winner's passive rate."
         )
-        if winner and boost is not None and profile is not None:
+        if winner and boost is not None:
             amp_line = f"\nWheel jackpot amp: **x{jackpot_amp:.2f}**." if jackpot_amp > 1.0 else ""
             msg += (
                 f"\nWinner: {winner.mention} 🎊 "
-                f"({winner_tickets} ticket(s), Prestige {profile['prestige']})"
-                f"\nBoost: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**."
+                f"({winner_tickets} ticket(s))"
+                f"\nBoost: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m** "
+                f"(worth about **{boost['equivalent_bonus_xp']:.0f} XP**, target **{target_bonus_xp:.0f} XP**)."
                 f"{amp_line}"
             )
         else:
