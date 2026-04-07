@@ -11,6 +11,7 @@ import discord
 from discord.ext import commands
 
 from .config import SPIN_DISABLED_REWARDS, SPIN_RESET_HOUR, SPIN_RESET_MINUTE
+from .emojis import EMOJI_FERRIS_WHEEL
 from .ownership import owner_only
 from .spin_support import (
     add_roulette_backfire_shield,
@@ -29,8 +30,10 @@ from .time_windows import LOCAL_TZ
 from .xp import (
     apply_xp_change,
     grant_fixed_boost,
+    prestige_base_rate,
     prestige_cost,
     prestige_multiplier,
+    prestige_passive_rate,
 )
 from .roles import enforce_level6_exclusive
 
@@ -290,7 +293,7 @@ class SpinCog(commands.Cog):
             fill = max(0, min(12, i + 1))
             bar = f"[{'=' * fill}{'.' * (12 - fill)}]"
             return (
-                "🎡 **Daily Wheel Spin**\n"
+                f"{EMOJI_FERRIS_WHEEL} **Daily Wheel Spin**\n"
                 f"{bar} {pointer}\n"
                 f"`{slots[0]}`  **`{slots[1]}`**  `{slots[2]}`\n"
                 "_Spinning..._"
@@ -312,7 +315,7 @@ class SpinCog(commands.Cog):
         try:
             await msg.edit(
                 content=(
-                    "🎡 **Daily Wheel Spin**\n"
+                    f"{EMOJI_FERRIS_WHEEL} **Daily Wheel Spin**\n"
                     f"**Landed on:** `{self._short_label(final_key)}`"
                 )
             )
@@ -425,10 +428,13 @@ class SpinCog(commands.Cog):
             new_p = max(0, old_p + add_levels)
             u["prestige"] = int(new_p)
             await enforce_level6_exclusive(ctx.guild)
+            base_rate = prestige_base_rate(new_p)
             mult = prestige_multiplier(new_p)
+            passive_rate = prestige_passive_rate(new_p)
             return (
                 f"Prestige increased by **+{add_levels}** to **P{new_p}**. "
-                f"Passive prestige bonus now **+{(mult - 1.0) * 100.0:.1f}%**."
+                f"Passive rate now **{passive_rate:.2f} XP/min** "
+                f"(base **{base_rate:.2f}**, prestige x**{mult:.3f}**)."
             )
 
         if key == "clear_debuffs":

@@ -4,12 +4,12 @@ import time
 import discord
 from discord.ext import commands
 
-from .config import CF_MAX_BET, CF_TTL_SECONDS
+from .config import CF_MAX_BET, CF_POT_BOOST_MULTIPLIER, CF_TTL_SECONDS
 from .ownership import is_control_user_id
 from .spin_support import consume_coinflip_win_edge
 from .storage import _udict
 from .stats_store import record_game_fields
-from .xp import apply_xp_change, grant_reward_boost
+from .xp import apply_xp_change, grant_bonus_xp_equivalent_boost
 from .roles import enforce_level6_exclusive
 
 coinflip_challenges: Dict[int, dict] = {}
@@ -121,7 +121,13 @@ class CoinFlipCog(commands.Cog):
                 k=1,
             )[0]
             loser = acceptor if winner is challenger else challenger
-            boost = await grant_reward_boost(winner, pot, source="coinflip win")
+            target_bonus_xp = float(pot) * float(CF_POT_BOOST_MULTIPLIER)
+            boost = await grant_bonus_xp_equivalent_boost(
+                winner,
+                target_bonus_xp,
+                source="coinflip win",
+                reward_seed_xp=target_bonus_xp,
+            )
 
             record_game_fields(
                 ctx.guild.id,
@@ -142,7 +148,7 @@ class CoinFlipCog(commands.Cog):
                 winner.id,
                 "coinflip",
                 wins=1,
-                boost_seed_xp_total=pot,
+                boost_seed_xp_total=target_bonus_xp,
                 boost_percent_total=boost["percent"],
                 boost_minutes_total=boost["minutes"],
             )
@@ -156,8 +162,9 @@ class CoinFlipCog(commands.Cog):
                     f"{acceptor.display_name} +{acc_edge * 100.0:.1f}%"
                 )
             await ctx.reply(
-                f"Coin Flip! {challenger.mention} vs {acceptor.mention} - Bet **{amount} XP** each (pot seed **{pot}**)\n"
-                f"**Winner:** {winner.mention} earned **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**\n"
+                f"Coin Flip! {challenger.mention} vs {acceptor.mention} - Bet **{amount} XP** each (pot **{pot} XP**)\n"
+                f"**Winner:** {winner.mention} earned **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m** "
+                f"(worth about **{boost['equivalent_bonus_xp']:.0f} XP**, target **{target_bonus_xp:.0f} XP** = {CF_POT_BOOST_MULTIPLIER:g}x pot)\n"
                 f"**Loser:** {loser.mention} lost **{amount} XP**"
                 f"{edge_note}"
             )

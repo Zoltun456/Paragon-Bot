@@ -9,24 +9,18 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+from .config import (
+    ROULETTE_BASE_SUCCESS_CHANCE,
+    ROULETTE_COOLDOWN_SECONDS,
+    ROULETTE_GAP_STEP_CHANCE,
+    ROULETTE_MAX_SUCCESS_CHANCE,
+    ROULETTE_MAX_TIMEOUT_SECONDS,
+    ROULETTE_MIN_SUCCESS_CHANCE,
+    ROULETTE_MIN_TIMEOUT_SECONDS,
+)
 from .spin_support import consume_roulette_accuracy_bonus, consume_roulette_backfire_shield
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
-
-ROULETTE_COOLDOWN_SECONDS = 30 * 60
-
-# Success chance is driven by the shooter's prestige and soft-capped at 50%.
-# Higher-target prestige reduces that chance further.
-ROULETTE_MIN_SUCCESS_CHANCE = 0.10
-ROULETTE_MAX_SUCCESS_CHANCE = 0.75
-ROULETTE_PRESTIGE_CURVE = 45.0
-ROULETTE_TARGET_DEFENSE_GAP_SCALE = 40.0
-
-# Timeout scales by prestige difference of loser relative to winner.
-# If loser prestige <= winner prestige, timeout stays at the minimum.
-ROULETTE_MIN_TIMEOUT_SECONDS = 10
-ROULETTE_MAX_TIMEOUT_SECONDS = 5 * 60
-ROULETTE_TIMEOUT_MAX_GAP = 49
 
 
 def _get_user_prestige(member: discord.Member) -> int:
@@ -37,29 +31,18 @@ def _get_user_prestige(member: discord.Member) -> int:
 def _roulette_success_chance(shooter_prestige: int, target_prestige: int) -> float:
     sp = max(0, int(shooter_prestige))
     tp = max(0, int(target_prestige))
-
-    base = ROULETTE_MIN_SUCCESS_CHANCE + (
-        (ROULETTE_MAX_SUCCESS_CHANCE - ROULETTE_MIN_SUCCESS_CHANCE)
-        * (1.0 - math.exp(-float(sp) / ROULETTE_PRESTIGE_CURVE))
-    )
-
-    defense_gap = max(0, tp - sp)
-    defense_mult = 1.0 / (1.0 + (float(defense_gap) / ROULETTE_TARGET_DEFENSE_GAP_SCALE))
-
-    chance = base * defense_mult
+    gap = sp - tp
+    chance = ROULETTE_BASE_SUCCESS_CHANCE + (float(gap) * ROULETTE_GAP_STEP_CHANCE)
     return max(ROULETTE_MIN_SUCCESS_CHANCE, min(ROULETTE_MAX_SUCCESS_CHANCE, chance))
 
 
-def _timeout_seconds_for_loser(loser_prestige: int, winner_prestige: int) -> int:
-    lp = max(0, int(loser_prestige))
-    wp = max(0, int(winner_prestige))
-    gap = max(0, lp - wp)
-
-    ratio = min(1.0, float(gap) / float(ROULETTE_TIMEOUT_MAX_GAP))
+def _timeout_seconds_for_chance(base_chance: float) -> int:
+    chance = max(ROULETTE_MIN_SUCCESS_CHANCE, min(ROULETTE_MAX_SUCCESS_CHANCE, float(base_chance)))
+    ratio = (chance - ROULETTE_MIN_SUCCESS_CHANCE) / (ROULETTE_MAX_SUCCESS_CHANCE - ROULETTE_MIN_SUCCESS_CHANCE)
     seconds = int(
         round(
-            ROULETTE_MIN_TIMEOUT_SECONDS
-            + (ROULETTE_MAX_TIMEOUT_SECONDS - ROULETTE_MIN_TIMEOUT_SECONDS) * ratio
+            ROULETTE_MAX_TIMEOUT_SECONDS
+            - (ROULETTE_MAX_TIMEOUT_SECONDS - ROULETTE_MIN_TIMEOUT_SECONDS) * ratio
         )
     )
     return max(ROULETTE_MIN_TIMEOUT_SECONDS, min(ROULETTE_MAX_TIMEOUT_SECONDS, seconds))
@@ -94,9 +77,10 @@ class RouletteCog(commands.Cog):
     !roulette @user
     - No XP cost
     - 30 minute personal cooldown after each use
-    - Success chance scales with shooter prestige and soft-caps at 50%
-    - If shooter targets much higher prestige, success odds are reduced
-    - Loser timeout scales from 10s up to 5m by prestige gap (loser minus winner)
+    - Base success chance is 20%
+    - Prestige gap changes that base by 2.5% per level, capped to 2.5%..60%
+    - Timeout scales from 3m down to 30s based on the base shot odds
+    - Wheel aim bonus increases hit odds only and can push final odds above 60%
     """
 
     def __init__(self, bot: commands.Bot):
@@ -138,10 +122,13 @@ class RouletteCog(commands.Cog):
 
         author_p = _get_user_prestige(author)
         target_p = _get_user_prestige(target)
-        chance = _roulette_success_chance(author_p, target_p)
+        base_chance = _roulette_success_chance(author_p, target_p)
+        chance = base_chance
         wheel_aim_bonus = float(consume_roulette_accuracy_bonus(ctx.guild.id, author.id))
         if wheel_aim_bonus > 0.0:
-            chance = max(ROULETTE_MIN_SUCCESS_CHANCE, min(0.90, chance + wheel_aim_bonus))
+            chance = max(ROULETTE_MIN_SUCCESS_CHANCE, min(1.0, chance + wheel_aim_bonus))
+        timeout_seconds = _timeout_seconds_for_chance(base_chance)
+        base_chance_pct = base_chance * 100.0
         chance_pct = chance * 100.0
 
         # Consume cooldown on use, regardless of outcome.
@@ -158,7 +145,6 @@ class RouletteCog(commands.Cog):
 
         success = random.random() < chance
         if success:
-            timeout_seconds = _timeout_seconds_for_loser(target_p, author_p)
             applied = await _timeout_member(
                 target,
                 timeout_seconds,
@@ -176,7 +162,7 @@ class RouletteCog(commands.Cog):
                     f"Roulette: {author.mention} landed the shot.\n"
                     f"{target.mention} timed out for **{_fmt_remaining(timeout_seconds)}**.\n"
                     f"{wheel_line}"
-                    f"Odds this shot: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
+                    f"Base odds: **{base_chance_pct:.2f}%** | Final odds: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
                     f"Cooldown: **{_fmt_remaining(ROULETTE_COOLDOWN_SECONDS)}**."
                 )
             else:
@@ -189,7 +175,7 @@ class RouletteCog(commands.Cog):
                     f"Roulette: {author.mention} rolled success, but I could not time out "
                     f"{target.mention} (permission/hierarchy).\n"
                     f"{wheel_line}"
-                    f"Odds this shot: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
+                    f"Base odds: **{base_chance_pct:.2f}%** | Final odds: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
                     f"Cooldown still applied: **{_fmt_remaining(ROULETTE_COOLDOWN_SECONDS)}**."
                 )
             return
@@ -206,12 +192,11 @@ class RouletteCog(commands.Cog):
             await ctx.reply(
                 f"Roulette: {author.mention} backfired, but your wheel shield blocked the timeout.\n"
                 f"{wheel_line}"
-                f"Odds this shot: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
+                f"Base odds: **{base_chance_pct:.2f}%** | Final odds: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
                 f"Cooldown: **{_fmt_remaining(ROULETTE_COOLDOWN_SECONDS)}**."
             )
             return
 
-        timeout_seconds = _timeout_seconds_for_loser(author_p, target_p)
         applied = await _timeout_member(
             author,
             timeout_seconds,
@@ -229,7 +214,7 @@ class RouletteCog(commands.Cog):
                 f"Roulette: {author.mention} backfired.\n"
                 f"{author.mention} timed out for **{_fmt_remaining(timeout_seconds)}**.\n"
                 f"{wheel_line}"
-                f"Odds this shot: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
+                f"Base odds: **{base_chance_pct:.2f}%** | Final odds: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
                 f"Cooldown: **{_fmt_remaining(ROULETTE_COOLDOWN_SECONDS)}**."
             )
         else:
@@ -242,6 +227,6 @@ class RouletteCog(commands.Cog):
                 f"Roulette: {author.mention} backfired, but I could not apply timeout "
                 f"(permission/hierarchy).\n"
                 f"{wheel_line}"
-                f"Odds this shot: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
+                f"Base odds: **{base_chance_pct:.2f}%** | Final odds: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
                 f"Cooldown still applied: **{_fmt_remaining(ROULETTE_COOLDOWN_SECONDS)}**."
             )

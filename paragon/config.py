@@ -22,6 +22,19 @@ def _as_float(name: str, default: float) -> float:
     return float(raw)
 
 
+def _as_float_tuple(name: str, default: tuple[float, ...]) -> tuple[float, ...]:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return tuple(default)
+    values = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        values.append(float(token))
+    return tuple(values) if values else tuple(default)
+
+
 def _as_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
@@ -78,11 +91,26 @@ LOCAL_TZ = ZoneInfo(TZ)
 
 # XP model
 BASE_XP_PER_MINUTE = _as_float("BASE_XP_PER_MINUTE", 1.0)
-XP_REWARD_BOOST_MIN_PCT = _as_float("XP_REWARD_BOOST_MIN_PCT", 0.08)     # 8%
-XP_REWARD_BOOST_MAX_PCT = _as_float("XP_REWARD_BOOST_MAX_PCT", 2.50)     # 250%
-XP_REWARD_BOOST_SCALE = _as_float("XP_REWARD_BOOST_SCALE", 0.22)         # log10 scaling
-XP_REWARD_BOOST_MIN_MINUTES = _as_int("XP_REWARD_BOOST_MIN_MINUTES", 10)
-XP_REWARD_BOOST_MAX_MINUTES = _as_int("XP_REWARD_BOOST_MAX_MINUTES", 720)
+PRESTIGE_BASE_STEP_LEVELS = _as_int("PRESTIGE_BASE_STEP_LEVELS", 5)
+PRESTIGE_BASE_STEP_XP_PER_MIN = _as_float("PRESTIGE_BASE_STEP_XP_PER_MIN", 1.0)
+PRESTIGE_COST_C0 = _as_float("PRESTIGE_COST_C0", 120.0)
+PRESTIGE_COST_A = _as_float("PRESTIGE_COST_A", 0.45)
+PRESTIGE_COST_B = _as_float("PRESTIGE_COST_B", 0.065)
+PRESTIGE_MAX_BASE_PROGRESS_MINUTES = _as_int("PRESTIGE_MAX_BASE_PROGRESS_MINUTES", 24 * 60)
+PRESTIGE_RATE_K = _as_float("PRESTIGE_RATE_K", 0.025)
+_PRESTIGE_COMPRESSION_MODE = os.getenv("PRESTIGE_COMPRESSION_MODE", "progress_only").strip().lower()
+PRESTIGE_COMPRESSION_MODE = (
+    _PRESTIGE_COMPRESSION_MODE
+    if _PRESTIGE_COMPRESSION_MODE in {"progress_only", "global", "off"}
+    else "progress_only"
+)
+PRESTIGE_STACK_SOFTCAP = _as_float("PRESTIGE_STACK_SOFTCAP", 6.0)
+BOOST_VALUE_PREFERRED_PCTS = _as_float_tuple(
+    "BOOST_VALUE_PREFERRED_PCTS",
+    (0.50, 1.00, 0.25, 1.50, 2.00, 3.00, 4.00),
+)
+BOOST_VALUE_MAX_MINUTES = _as_int("BOOST_VALUE_MAX_MINUTES", 720)
+BOOST_VALUE_PCT_ROUND_STEP = _as_float("BOOST_VALUE_PCT_ROUND_STEP", 0.25)
 
 # Playback
 PLAYBACK_VOLUME = _as_float("PLAYBACK_VOLUME", 0.25)
@@ -105,9 +133,12 @@ LOTTO_TICKET_COST = _as_int("LOTTO_TICKET_COST", 1)
 LOTTO_DRAW_HOUR = _as_int("LOTTO_DRAW_HOUR", 18)
 LOTTO_DRAW_MINUTE = _as_int("LOTTO_DRAW_MINUTE", 0)
 LOTTO_MAX_PER_USER = _as_int("LOTTO_MAX_PER_USER", 5_000)
+LOTTO_JACKPOT_POT_BOOST_MULTIPLIER = _as_float("LOTTO_JACKPOT_POT_BOOST_MULTIPLIER", 5.0)
 
 # Thanks
-THANKS_GIFT_XP = _as_int("THANKS_GIFT_XP", 20)
+THANKS_REWARD_SEED_XP = _as_int("THANKS_REWARD_SEED_XP", _as_int("THANKS_GIFT_XP", 20))
+THANKS_BOOST_PCT = _as_float("THANKS_BOOST_PCT", 2.00)
+THANKS_BOOST_MINUTES = _as_int("THANKS_BOOST_MINUTES", 60)
 
 # Anagram
 ANAGRAM_PHRASES_PATH = _resolve_data_path(
@@ -116,20 +147,32 @@ ANAGRAM_PHRASES_PATH = _resolve_data_path(
     "OLD/anagram_phrases.txt",
 )
 ANAGRAM_DAILY_LIMIT = _as_int("ANAGRAM_DAILY_LIMIT", 10)
-ANAGRAM_WIN_XP = _as_int("ANAGRAM_WIN_XP", 5)
-ANAGRAM_LOSS_XP = _as_int("ANAGRAM_LOSS_XP", 5)
+ANAGRAM_SOLVE_ADD_PCT = _as_float("ANAGRAM_SOLVE_ADD_PCT", 0.20)
+ANAGRAM_SOLVE_ADD_MINUTES = _as_int("ANAGRAM_SOLVE_ADD_MINUTES", 60)
+ANAGRAM_SOLVE_MAX_PCT = _as_float("ANAGRAM_SOLVE_MAX_PCT", 2.00)
+ANAGRAM_SOLVE_MAX_MINUTES = _as_int("ANAGRAM_SOLVE_MAX_MINUTES", 600)
+ANAGRAM_FAIL_ADD_PCT = _as_float("ANAGRAM_FAIL_ADD_PCT", 0.10)
+ANAGRAM_FAIL_ADD_MINUTES = _as_int("ANAGRAM_FAIL_ADD_MINUTES", 60)
+ANAGRAM_FAIL_MAX_PCT = _as_float("ANAGRAM_FAIL_MAX_PCT", 1.00)
+ANAGRAM_FAIL_MAX_MINUTES = _as_int("ANAGRAM_FAIL_MAX_MINUTES", 600)
 
 # Surprise Drops
 DROP_MIN_MINUTES = _as_int("DROP_MIN_MINUTES", 30)
 DROP_MAX_MINUTES = _as_int("DROP_MAX_MINUTES", 240)
 DROP_MIN_XP = _as_int("DROP_MIN_XP", 50)
 DROP_MAX_XP = _as_int("DROP_MAX_XP", 150)
+SURPRISE_MIN_PCT = _as_float("SURPRISE_MIN_PCT", 0.50)
+SURPRISE_MAX_PCT = _as_float("SURPRISE_MAX_PCT", 2.00)
+SURPRISE_PCT_STEP = _as_float("SURPRISE_PCT_STEP", 0.10)
+SURPRISE_BOOST_MINUTES = _as_int("SURPRISE_BOOST_MINUTES", 60)
 
 # Wordle
 WORDLE_WORD_LENGTH = _as_int("WORDLE_WORD_LENGTH", 5)
-WORDLE_WIN_XP = _as_int("WORDLE_WIN_XP", 50)
-WORDLE_LOSS_XP = _as_int("WORDLE_LOSS_XP", 50)
 WORDLE_MAX_GUESSES = _as_int("WORDLE_MAX_GUESSES", 5)
+WORDLE_WIN_PCTS = _as_float_tuple("WORDLE_WIN_PCTS", (5.0, 4.0, 3.0, 2.0, 1.0))
+WORDLE_WIN_MINUTES = _as_int("WORDLE_WIN_MINUTES", 600)
+WORDLE_FAIL_PCT = _as_float("WORDLE_FAIL_PCT", 0.50)
+WORDLE_FAIL_MINUTES = _as_int("WORDLE_FAIL_MINUTES", 60)
 WORDLE_RESPECT_ACTIVE_HOURS = os.getenv("WORDLE_RESPECT_ACTIVE_HOURS", "false").lower() in {
     "1",
     "true",
@@ -151,6 +194,16 @@ WORD_REGEX = re.compile(rf"^[A-Za-z]{{{WORDLE_WORD_LENGTH}}}$")
 # Coin flip
 CF_MAX_BET = _as_int("CF_MAX_BET", -1)
 CF_TTL_SECONDS = _as_int("CF_TTL_SECONDS", 120)
+CF_POT_BOOST_MULTIPLIER = _as_float("CF_POT_BOOST_MULTIPLIER", 5.0)
+
+# Roulette
+ROULETTE_COOLDOWN_SECONDS = _as_int("ROULETTE_COOLDOWN_SECONDS", 30 * 60)
+ROULETTE_BASE_SUCCESS_CHANCE = _as_float("ROULETTE_BASE_SUCCESS_CHANCE", 0.20)
+ROULETTE_GAP_STEP_CHANCE = _as_float("ROULETTE_GAP_STEP_CHANCE", 0.025)
+ROULETTE_MIN_SUCCESS_CHANCE = _as_float("ROULETTE_MIN_SUCCESS_CHANCE", 0.025)
+ROULETTE_MAX_SUCCESS_CHANCE = _as_float("ROULETTE_MAX_SUCCESS_CHANCE", 0.60)
+ROULETTE_MIN_TIMEOUT_SECONDS = _as_int("ROULETTE_MIN_TIMEOUT_SECONDS", 30)
+ROULETTE_MAX_TIMEOUT_SECONDS = _as_int("ROULETTE_MAX_TIMEOUT_SECONDS", 3 * 60)
 
 # TTS (ElevenLabs)
 ELEVEN_API = os.getenv("ELEVEN_API", "").strip()

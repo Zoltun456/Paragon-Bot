@@ -1,16 +1,22 @@
-# paragon/prestige.py
 from __future__ import annotations
-from typing import Optional, List, Tuple
+
+from typing import List, Optional, Tuple
 
 import discord
 from discord.ext import commands
 
 from .config import PRESTIGE_BOARD_LIMIT
-from .stats_store import record_xp_change
-from .storage import _udict, _gdict, save_data
-from .roles import enforce_level6_exclusive
 from .ownership import owner_only
-from .xp import prestige_cost, prestige_multiplier, get_gain_state
+from .roles import enforce_level6_exclusive
+from .stats_store import record_xp_change
+from .storage import _gdict, _udict, save_data
+from .xp import (
+    get_gain_state,
+    prestige_base_rate,
+    prestige_cost,
+    prestige_multiplier,
+    prestige_passive_rate,
+)
 
 
 def _fmt_eta(minutes: Optional[int]) -> str:
@@ -54,10 +60,14 @@ class PrestigeCog(commands.Cog):
         await enforce_level6_exclusive(guild)
 
         nxt = prestige_cost(int(amount))
+        base_rate = prestige_base_rate(int(amount))
         mult = prestige_multiplier(int(amount))
+        passive_rate = prestige_passive_rate(int(amount))
         await ctx.reply(
             f"Set prestige for **{target.display_name}** to **{amount}**. "
-            f"Rate bonus now **+{(mult - 1.0) * 100.0:.1f}%**, next prestige cost **{nxt} XP**."
+            f"Passive rate now **{passive_rate:.2f} XP/min** "
+            f"(base **{base_rate:.2f}**, prestige x**{mult:.3f}**). "
+            f"Next prestige cost **{nxt} XP**."
         )
 
     @commands.command(name="prestige", aliases=["p"])
@@ -103,11 +113,14 @@ class PrestigeCog(commands.Cog):
 
         new_p = int(u["prestige"])
         next_cost = prestige_cost(new_p)
+        new_base = prestige_base_rate(new_p)
         new_mult = prestige_multiplier(new_p)
+        new_rate = prestige_passive_rate(new_p)
         await ctx.reply(
-            f"🌟 **Prestiged!** You are now **Prestige {new_p}**.\n"
+            f"Prestiged! You are now **Prestige {new_p}**.\n"
             f"Spent **{cost} XP**. Remaining XP: **{u['xp']}**.\n"
-            f"Passive prestige bonus: **+{(new_mult - 1.0) * 100.0:.1f}%**. "
+            f"Passive rate now **{new_rate:.2f} XP/min** "
+            f"(base **{new_base:.2f}**, prestige x**{new_mult:.3f}**). "
             f"Next cost: **{next_cost} XP**."
         )
 
@@ -127,25 +140,30 @@ class PrestigeCog(commands.Cog):
         my_xp = int(me.get("xp_f", me.get("xp", 0)))
         my_cost = prestige_cost(my_p)
         my_need = max(0, my_cost - my_xp)
+        my_base = prestige_base_rate(my_p)
         my_mult = prestige_multiplier(my_p)
+        my_rate = prestige_passive_rate(my_p)
 
         if not rows:
             await ctx.reply(
-                "🌟 **Prestige Board**\n"
+                "Prestige Board\n"
                 "No prestige data yet.\n"
-                f"Your prestige: **{my_p}** | XP: **{my_xp}/{my_cost}** | Need: **{my_need}**"
+                f"Your prestige: **{my_p}** | Passive rate: **{my_rate:.2f} XP/min** "
+                f"(base **{my_base:.2f}**, prestige x**{my_mult:.3f}**) | "
+                f"XP: **{my_xp}/{my_cost}** | Need: **{my_need}**"
             )
             return
 
         top = rows[: max(1, PRESTIGE_BOARD_LIMIT)]
-        lines = ["🌟 **Prestige Board**"]
+        lines = ["Prestige Board"]
         for i, (uid, p, xp) in enumerate(top, start=1):
             m = ctx.guild.get_member(uid)
             name = m.display_name if m else f"User {uid}"
-            lines.append(f"`{i:>2}.` **{name}** — P{p} | {xp} XP")
+            lines.append(f"`{i:>2}.` **{name}** - P{p} | {xp} XP")
 
         lines.append(
-            f"\nYou: **P{my_p}** | Rate bonus **+{(my_mult - 1.0) * 100.0:.1f}%** | "
+            f"\nYou: **P{my_p}** | Passive rate **{my_rate:.2f} XP/min** "
+            f"(base {my_base:.2f}, prestige x{my_mult:.3f}) | "
             f"Next prestige: **{my_xp}/{my_cost} XP** (need **{my_need}**)"
         )
         await ctx.reply("\n".join(lines))

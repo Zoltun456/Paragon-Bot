@@ -5,6 +5,7 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+from .emojis import EMOJI_BAR_CHART, EMOJI_CHART_WITH_UPWARDS_TREND
 from .ownership import is_control_user_id
 from .stats_store import get_user_stats, iter_guild_user_stats
 from .storage import _udict
@@ -177,7 +178,7 @@ class StatsCog(commands.Cog):
         total_xp = int(u.get("xp_f", u.get("xp", 0)))
 
         lines = [
-            f"📊 **Stats for {target.display_name}**",
+            f"{EMOJI_BAR_CHART} **Stats for {target.display_name}**",
             f"Total XP: **{total_xp:,}**",
             (
                 "XP Ledger: "
@@ -284,7 +285,7 @@ class StatsCog(commands.Cog):
                         tgt[k] = prev + float(v)
 
         lines = [
-            f"📈 **Guild Game Stats** ({len(entries)} users with stats)",
+            f"{EMOJI_CHART_WITH_UPWARDS_TREND} **Guild Game Stats** ({len(entries)} users with stats)",
             (
                 "XP Ledger: "
                 f"gained **{_fmt_num(xp_gain)}**, "
