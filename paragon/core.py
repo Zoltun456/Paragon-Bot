@@ -21,7 +21,7 @@ HELP_DESCRIPTIONS = {
     "wordle": "Play Wordle (daily progression/guess command).",
     "resetwordle": "Admin: reset the current Wordle session.",
     "cf": "Start, accept, or cancel coinflip wagers.",
-    "roulette": "Prestige-based roulette duel (30m cooldown, timeout scales by prestige gap).",
+    "roulette": "Roulette duel with 20% base odds, 2.5% per prestige gap, and timeouts based on shot odds.",
     "claim": "Claim the active surprise drop.",
     "claimnow": "Admin: spawn a surprise drop immediately.",
     "anagram": "Play the anagram phrase challenge.",
