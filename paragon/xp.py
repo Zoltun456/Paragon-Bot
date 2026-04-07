@@ -19,6 +19,7 @@ from .config import (
     PRESTIGE_RATE_K,
     PRESTIGE_STACK_SOFTCAP,
 )
+from .spin_support import consume_mulligan_charge
 from .storage import _udict, save_data
 from .stats_store import record_xp_boost, record_xp_change
 
@@ -340,6 +341,23 @@ def _pop_matching_effect(
     return float(total_pct), int(total_minutes)
 
 
+def _blocked_debuff_result(member, *, source: str, now: int, changed: bool) -> dict:
+    u = _udict(member.guild.id, member.id)
+    prestige = int(u.get("prestige", 0))
+    rate_per_min = prestige_passive_rate(prestige, boost_multiplier=_actual_boost_multiplier(u, now=now))
+    return {
+        "pct": 0.0,
+        "percent": 0.0,
+        "minutes": 0,
+        "until": int(now),
+        "rate_per_min": float(rate_per_min),
+        "source": str(source).strip() or "activity",
+        "pruned": bool(changed),
+        "blocked": True,
+        "blocked_reason": "mulligan",
+    }
+
+
 async def grant_stacked_fixed_boost(
     member,
     *,
@@ -402,6 +420,10 @@ async def grant_fixed_debuff(
     now = _now_ts()
     changed = _prune_expired_boosts(u, now=now)
     changed = _prune_expired_debuffs(u, now=now) or changed
+    if consume_mulligan_charge(member.guild.id, member.id):
+        if persist:
+            await save_data()
+        return _blocked_debuff_result(member, source=source, now=now, changed=changed)
     debuffs = _coerce_debuffs(u)
     pct = max(0.0, min(1.0, float(pct)))
     minutes = max(1, int(minutes))
@@ -433,6 +455,7 @@ async def grant_fixed_debuff(
         "rate_per_min": float(rate_per_min),
         "source": str(source).strip() or "activity",
         "pruned": bool(changed),
+        "blocked": False,
     }
 
 
@@ -452,6 +475,13 @@ async def grant_stacked_fixed_debuff(
     now = _now_ts()
     changed = _prune_expired_boosts(u, now=now)
     changed = _prune_expired_debuffs(u, now=now) or changed
+    if consume_mulligan_charge(member.guild.id, member.id):
+        if persist:
+            await save_data()
+        result = _blocked_debuff_result(member, source=source, now=now, changed=changed)
+        result["stacked_pct"] = 0.0
+        result["stacked_minutes"] = 0
+        return result
     existing_pct, existing_minutes = _pop_matching_effect(
         u,
         effect_type="debuff",

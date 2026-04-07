@@ -24,7 +24,11 @@ from .emojis import EMOJI_BLACK_LARGE_SQUARE, EMOJI_LARGE_GREEN_SQUARE, EMOJI_LA
 from .guild_setup import get_log_channel
 from .ownership import owner_only
 from .roles import enforce_level6_exclusive
-from .spin_support import consume_wordle_reward_multiplier
+from .spin_support import (
+    consume_wordle_hint_charges,
+    consume_wordle_reward_multiplier,
+    wordle_hint_positions,
+)
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
 from .time_windows import _date_key, _today_local, is_active_hours
@@ -197,6 +201,15 @@ def format_guessed_letters_line(letters: list[str], target: str) -> str:
     return f"Green: {green_line}\nRed: {red_line}"
 
 
+def format_wordle_hint_line(gid: int, uid: int, today: str, target: str) -> str:
+    slots = wordle_hint_positions(gid, uid, wordle_date=today, target=target)
+    if not slots:
+        return ""
+    parts = [f"pos {idx + 1} = **{target[idx].upper()}**" for idx in slots]
+    noun = "Hint" if len(parts) == 1 else "Hints"
+    return f"{noun}: " + ", ".join(parts)
+
+
 class WordleCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -271,7 +284,13 @@ class WordleCog(commands.Cog):
             else:
                 status = f"{WORDLE_MAX_GUESSES - len(st['guesses'])} guesses left."
             letters_line = format_guessed_letters_line(st.get("letters", []), target)
-            await ctx.reply(f"{status}\n{board}\n{letters_line}")
+            hint_line = ""
+            if not st["done"]:
+                hint_line = format_wordle_hint_line(ctx.guild.id, ctx.author.id, today, target)
+            reply = f"{status}\n{board}\n{letters_line}"
+            if hint_line:
+                reply += f"\n{hint_line}"
+            await ctx.reply(reply)
             return
 
         if st["done"]:
@@ -304,6 +323,7 @@ class WordleCog(commands.Cog):
             attempts = len(st["guesses"])
             base_pct, base_minutes = _wordle_win_profile(attempts)
             wheel_mult = float(consume_wordle_reward_multiplier(ctx.guild.id, ctx.author.id))
+            consume_wordle_hint_charges(ctx.guild.id, ctx.author.id)
             final_pct = float(base_pct * wheel_mult)
             final_minutes = int(max(1, round(float(base_minutes) * wheel_mult)))
             boost = await grant_fixed_boost(
@@ -349,13 +369,23 @@ class WordleCog(commands.Cog):
                 source="wordle fail",
                 reward_seed_xp=int(round(WORDLE_FAIL_PCT * 100.0)),
             )
+            consume_wordle_hint_charges(ctx.guild.id, ctx.author.id)
             record_game_fields(ctx.guild.id, ctx.author.id, "wordle", losses=1)
             await enforce_level6_exclusive(ctx.guild)
+            debuff_line = (
+                f"Debuff gained: **-{debuff['percent']:.1f}% XP/min** for **{debuff['minutes']}m**."
+                if not debuff.get("blocked", False)
+                else "Mulligan consumed: your loss debuff was blocked."
+            )
             await ctx.reply(
                 f"{row}  `{guess}`\n**Out of guesses!** The word was **{target}**. "
-                f"Debuff gained: **-{debuff['percent']:.1f}% XP/min** for **{debuff['minutes']}m**."
+                f"{debuff_line}"
             )
             return
 
         await save_data()
-        await ctx.reply(f"{row}  `{guess}`\n{remaining} guesses left.\n{letters_line}")
+        hint_line = format_wordle_hint_line(ctx.guild.id, ctx.author.id, today, target)
+        reply = f"{row}  `{guess}`\n{remaining} guesses left.\n{letters_line}"
+        if hint_line:
+            reply += f"\n{hint_line}"
+        await ctx.reply(reply)

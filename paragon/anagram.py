@@ -257,8 +257,13 @@ class AnagramCog(commands.Cog):
         )
         record_game_fields(ctx.guild.id, ctx.author.id, "anagram", fails=1)
         await enforce_level6_exclusive(ctx.guild)
+        debuff_line = (
+            f"Anagram debuff is now **-{debuff['percent']:.1f}% XP/min** for **{debuff['minutes']}m**."
+            if not debuff.get("blocked", False)
+            else "Mulligan consumed: your anagram debuff was blocked."
+        )
         await ctx.reply(
             f"Not quite. The answer was **{answer}**. "
-            f"Anagram debuff is now **-{debuff['percent']:.1f}% XP/min** for **{debuff['minutes']}m**.\n"
+            f"{debuff_line}\n"
             f"Progress: **{st['used']}/{ANAGRAM_DAILY_LIMIT}**."
         )

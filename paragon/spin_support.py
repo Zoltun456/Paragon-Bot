@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import random
+
 from .storage import _udict
 
 
@@ -12,17 +15,22 @@ def _wheel_buffs(gid: int, uid: int) -> dict:
     b.setdefault("blackjack_natural_charges", 0)
     b.setdefault("wordle_reward_multiplier", 1.0)
     b.setdefault("wordle_reward_charges", 0)
+    b.setdefault("wordle_hint_charges", 0)
     b.setdefault("anagram_reward_multiplier", 1.0)
     b.setdefault("anagram_reward_charges", 0)
+    b.setdefault("mulligan_charges", 0)
     b.setdefault("roulette_accuracy_bonus", 0.0)
     b.setdefault("roulette_accuracy_charges", 0)
     b.setdefault("roulette_backfire_shield_charges", 0)
+    b.setdefault("roulette_timeout_bonus_seconds", 0)
     b.setdefault("coinflip_win_edge_bonus", 0.0)
     b.setdefault("coinflip_win_edge_charges", 0)
     b.setdefault("lotto_bonus_tickets_pct", 0.0)
     b.setdefault("lotto_bonus_tickets_charges", 0)
     b.setdefault("lotto_jackpot_boost_multiplier", 1.0)
     b.setdefault("lotto_jackpot_boost_charges", 0)
+    b.setdefault("cleanse_charges", 0)
+    b.setdefault("drain_charges", 0)
     return b
 
 
@@ -76,6 +84,36 @@ def consume_wordle_reward_multiplier(gid: int, uid: int) -> float:
     return mult
 
 
+def add_wordle_hint_charges(gid: int, uid: int, *, charges: int = 1) -> int:
+    b = _wheel_buffs(gid, uid)
+    add_n = max(0, int(charges))
+    b["wordle_hint_charges"] = max(0, int(b.get("wordle_hint_charges", 0))) + add_n
+    return int(b["wordle_hint_charges"])
+
+
+def wordle_hint_positions(gid: int, uid: int, *, wordle_date: str, target: str) -> list[int]:
+    b = _wheel_buffs(gid, uid)
+    charges = max(0, int(b.get("wordle_hint_charges", 0)))
+    word = str(target or "").strip().lower()
+    if charges <= 0 or not word:
+        return []
+    count = max(0, min(len(word), charges))
+    if count <= 0:
+        return []
+    seed_bytes = f"{gid}:{uid}:{wordle_date}:{word}".encode("utf-8")
+    seed = int.from_bytes(hashlib.sha256(seed_bytes).digest()[:8], "big")
+    slots = list(range(len(word)))
+    random.Random(seed).shuffle(slots)
+    return sorted(slots[:count])
+
+
+def consume_wordle_hint_charges(gid: int, uid: int) -> int:
+    b = _wheel_buffs(gid, uid)
+    charges = max(0, int(b.get("wordle_hint_charges", 0)))
+    b["wordle_hint_charges"] = 0
+    return charges
+
+
 def set_anagram_reward_multiplier(gid: int, uid: int, *, multiplier: float, charges: int = 1) -> dict:
     b = _wheel_buffs(gid, uid)
     mult = max(1.0, float(multiplier))
@@ -108,6 +146,22 @@ def consume_anagram_reward_multiplier(gid: int, uid: int) -> float:
     if charges <= 0:
         b["anagram_reward_multiplier"] = 1.0
     return mult
+
+
+def add_mulligan_charges(gid: int, uid: int, *, charges: int = 1) -> int:
+    b = _wheel_buffs(gid, uid)
+    add_n = max(0, int(charges))
+    b["mulligan_charges"] = max(0, int(b.get("mulligan_charges", 0))) + add_n
+    return int(b["mulligan_charges"])
+
+
+def consume_mulligan_charge(gid: int, uid: int) -> bool:
+    b = _wheel_buffs(gid, uid)
+    cur = max(0, int(b.get("mulligan_charges", 0)))
+    if cur <= 0:
+        return False
+    b["mulligan_charges"] = cur - 1
+    return True
 
 
 def add_roulette_backfire_shield(gid: int, uid: int, *, charges: int = 1) -> int:
@@ -158,6 +212,25 @@ def consume_roulette_accuracy_bonus(gid: int, uid: int) -> float:
     if charges <= 0:
         b["roulette_accuracy_bonus"] = 0.0
     return bonus
+
+
+def add_roulette_timeout_bonus_seconds(gid: int, uid: int, *, seconds: int = 60) -> int:
+    b = _wheel_buffs(gid, uid)
+    add_s = max(0, int(seconds))
+    b["roulette_timeout_bonus_seconds"] = max(0, int(b.get("roulette_timeout_bonus_seconds", 0))) + add_s
+    return int(b["roulette_timeout_bonus_seconds"])
+
+
+def get_roulette_timeout_bonus_seconds(gid: int, uid: int) -> int:
+    b = _wheel_buffs(gid, uid)
+    return max(0, int(b.get("roulette_timeout_bonus_seconds", 0)))
+
+
+def consume_roulette_timeout_bonus_seconds(gid: int, uid: int) -> int:
+    b = _wheel_buffs(gid, uid)
+    seconds = max(0, int(b.get("roulette_timeout_bonus_seconds", 0)))
+    b["roulette_timeout_bonus_seconds"] = 0
+    return int(seconds)
 
 
 def set_coinflip_win_edge(gid: int, uid: int, *, bonus: float, charges: int = 1) -> dict:
@@ -262,6 +335,48 @@ def consume_lotto_jackpot_boost_multiplier(gid: int, uid: int) -> float:
     return mult
 
 
+def add_cleanse_charges(gid: int, uid: int, *, charges: int = 1) -> int:
+    b = _wheel_buffs(gid, uid)
+    add_n = max(0, int(charges))
+    b["cleanse_charges"] = max(0, int(b.get("cleanse_charges", 0))) + add_n
+    return int(b["cleanse_charges"])
+
+
+def get_cleanse_charges(gid: int, uid: int) -> int:
+    b = _wheel_buffs(gid, uid)
+    return max(0, int(b.get("cleanse_charges", 0)))
+
+
+def consume_cleanse_charge(gid: int, uid: int) -> bool:
+    b = _wheel_buffs(gid, uid)
+    cur = max(0, int(b.get("cleanse_charges", 0)))
+    if cur <= 0:
+        return False
+    b["cleanse_charges"] = cur - 1
+    return True
+
+
+def add_drain_charges(gid: int, uid: int, *, charges: int = 1) -> int:
+    b = _wheel_buffs(gid, uid)
+    add_n = max(0, int(charges))
+    b["drain_charges"] = max(0, int(b.get("drain_charges", 0))) + add_n
+    return int(b["drain_charges"])
+
+
+def get_drain_charges(gid: int, uid: int) -> int:
+    b = _wheel_buffs(gid, uid)
+    return max(0, int(b.get("drain_charges", 0)))
+
+
+def consume_drain_charge(gid: int, uid: int) -> bool:
+    b = _wheel_buffs(gid, uid)
+    cur = max(0, int(b.get("drain_charges", 0)))
+    if cur <= 0:
+        return False
+    b["drain_charges"] = cur - 1
+    return True
+
+
 def wheel_buff_lines(gid: int, uid: int) -> list[str]:
     b = _wheel_buffs(gid, uid)
     lines: list[str] = []
@@ -272,10 +387,17 @@ def wheel_buff_lines(gid: int, uid: int) -> list[str]:
     if w_charges > 0:
         w_mult = max(1.0, float(b.get("wordle_reward_multiplier", 1.0)))
         lines.append(f"Wordle buff multiplier: **x{w_mult:.2f}** ({w_charges} use(s) left)")
+    hint_charges = max(0, int(b.get("wordle_hint_charges", 0)))
+    if hint_charges > 0:
+        noun = "letter" if hint_charges == 1 else "letters"
+        lines.append(f"Wordle hint queued: **{hint_charges}** {noun} for your next unfinished Wordle")
     a_charges = max(0, int(b.get("anagram_reward_charges", 0)))
     if a_charges > 0:
         a_mult = max(1.0, float(b.get("anagram_reward_multiplier", 1.0)))
         lines.append(f"Anagram buff multiplier: **x{a_mult:.2f}** ({a_charges} use(s) left)")
+    mulligan = max(0, int(b.get("mulligan_charges", 0)))
+    if mulligan > 0:
+        lines.append(f"Mulligan charges: **{mulligan}**")
     rr_charges = max(0, int(b.get("roulette_accuracy_charges", 0)))
     if rr_charges > 0:
         bonus = max(0.0, float(b.get("roulette_accuracy_bonus", 0.0))) * 100.0
@@ -283,6 +405,9 @@ def wheel_buff_lines(gid: int, uid: int) -> list[str]:
     shield = max(0, int(b.get("roulette_backfire_shield_charges", 0)))
     if shield > 0:
         lines.append(f"Roulette backfire shield: **{shield}**")
+    timeout_bonus = max(0, int(b.get("roulette_timeout_bonus_seconds", 0)))
+    if timeout_bonus > 0:
+        lines.append(f"Roulette timeout extend: **+{timeout_bonus}s** on next successful timeout")
     cf_charges = max(0, int(b.get("coinflip_win_edge_charges", 0)))
     if cf_charges > 0:
         edge = max(0.0, float(b.get("coinflip_win_edge_bonus", 0.0))) * 100.0
@@ -295,4 +420,10 @@ def wheel_buff_lines(gid: int, uid: int) -> list[str]:
     if lj_charges > 0:
         mult = max(1.0, float(b.get("lotto_jackpot_boost_multiplier", 1.0)))
         lines.append(f"Lotto jackpot amp: **x{mult:.2f}** ({lj_charges} jackpot(s) left)")
+    cleanse = max(0, int(b.get("cleanse_charges", 0)))
+    if cleanse > 0:
+        lines.append(f"Cleanse item: **{cleanse}** (`!cleanse`)")
+    drain = max(0, int(b.get("drain_charges", 0)))
+    if drain > 0:
+        lines.append(f"Drain item: **{drain}** (`!drain`)")
     return lines

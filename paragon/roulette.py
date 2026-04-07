@@ -18,7 +18,12 @@ from .config import (
     ROULETTE_MIN_SUCCESS_CHANCE,
     ROULETTE_MIN_TIMEOUT_SECONDS,
 )
-from .spin_support import consume_roulette_accuracy_bonus, consume_roulette_backfire_shield
+from .spin_support import (
+    consume_roulette_accuracy_bonus,
+    consume_roulette_backfire_shield,
+    consume_roulette_timeout_bonus_seconds,
+    get_roulette_timeout_bonus_seconds,
+)
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
 
@@ -145,23 +150,34 @@ class RouletteCog(commands.Cog):
 
         success = random.random() < chance
         if success:
+            timeout_bonus_seconds = get_roulette_timeout_bonus_seconds(ctx.guild.id, author.id)
+            final_timeout_seconds = timeout_seconds + timeout_bonus_seconds
             applied = await _timeout_member(
                 target,
-                timeout_seconds,
+                final_timeout_seconds,
                 f"Roulette by {author} (success, chance {chance_pct:.2f}%)",
             )
             record_game_fields(ctx.guild.id, author.id, "roulette", successes=1)
             if applied:
+                if timeout_bonus_seconds > 0:
+                    consume_roulette_timeout_bonus_seconds(ctx.guild.id, author.id)
+                    await save_data()
                 record_game_fields(ctx.guild.id, target.id, "roulette", got_timed_out=1)
                 wheel_line = (
                     f"Wheel aim bonus applied: **+{wheel_aim_bonus * 100.0:.1f}%**.\n"
                     if wheel_aim_bonus > 0.0
                     else ""
                 )
+                timeout_line = (
+                    f"Wheel timeout extend applied: **+{timeout_bonus_seconds}s**.\n"
+                    if timeout_bonus_seconds > 0
+                    else ""
+                )
                 await ctx.reply(
                     f"Roulette: {author.mention} landed the shot.\n"
-                    f"{target.mention} timed out for **{_fmt_remaining(timeout_seconds)}**.\n"
+                    f"{target.mention} timed out for **{_fmt_remaining(final_timeout_seconds)}**.\n"
                     f"{wheel_line}"
+                    f"{timeout_line}"
                     f"Base odds: **{base_chance_pct:.2f}%** | Final odds: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
                     f"Cooldown: **{_fmt_remaining(ROULETTE_COOLDOWN_SECONDS)}**."
                 )

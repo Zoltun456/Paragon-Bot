@@ -137,10 +137,11 @@ It provides:
 - `!blackjack [arg]` (alias: `!bj`)
   - Common use:
   - `!bj` (open/show table state)
-  - `!bj join` / `!bj enter` / `!bj buyin` (enter table)
+  - `!bj <amount>` (place a bet for the next hand)
+  - `!bj all` (go all in)
   - `!bj leave` / `!bj stop` / `!bj exit` (leave table)
   - Or react on the table prompt:
-    - `:dollar:` enter table
+    - `:dollar:` go all in
     - `:octagonal_sign:` leave table
     - `:arrow_forward:` deal
   - `!bj hit`
@@ -148,12 +149,14 @@ It provides:
   - `!bj dd` / `!bj doubledown`
   - `!bj surrender`
   - `!bj split`
-- Entry is **free** (no XP cost).
+- Bets are paid in **XP**.
+- A normal win returns **2x** your wager.
+- A natural blackjack returns **2.5x** your wager.
+- A push returns your wager.
+- A surrender returns half your wager.
 - Daily eligibility is reset on a configurable ET schedule (default midnight ET).
-- Win: grants a scaled XP-rate buff and you can keep playing.
-- Loss: applies a scaled XP-rate debuff (current blackjack win buff remains active).
-- Daily lockout is enabled by default, but can be toggled by admin.
-- Push: no buff/debuff.
+- After each hand, everyone must place a fresh bet to play again.
+- Daily lockout is disabled by default, but can be toggled by admin.
 
 ### Admin
 - `!bjreset`

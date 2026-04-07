@@ -23,7 +23,7 @@ from .guild_setup import get_blackjack_channel_id
 from .storage import _gdict, _udict, save_data
 from .stats_store import record_game_fields, record_xp_change
 from .spin_support import consume_blackjack_natural_charge
-from .xp import apply_xp_change, grant_fixed_boost, grant_fixed_debuff, prestige_reward_scale
+from .xp import apply_xp_change
 from .roles import announce_level_up, sync_level_roles, enforce_level6_exclusive
 from .ownership import owner_only
 from .time_windows import LOCAL_TZ
@@ -237,11 +237,15 @@ def _table(gid: int) -> dict:
     st.setdefault("reset_hour", int(BJ_DAILY_RESET_HOUR))
     st.setdefault("reset_minute", int(BJ_DAILY_RESET_MINUTE))
     st.setdefault("cooldown_enabled", bool(BJ_COOLDOWN_ENABLED))
+    st.setdefault("xp_betting_migrated_v1", False)
     st.setdefault("last_cycle_key", "")
     st["reset_hour"], st["reset_minute"] = _sanitize_reset_time(
         st.get("reset_hour", BJ_DAILY_RESET_HOUR),
         st.get("reset_minute", BJ_DAILY_RESET_MINUTE),
     )
+    if not bool(st.get("xp_betting_migrated_v1", False)):
+        st["cooldown_enabled"] = False
+        st["xp_betting_migrated_v1"] = True
     return st
 
 def in_right_channel(ctx: commands.Context) -> bool:
@@ -263,11 +267,11 @@ def in_right_channel(ctx: commands.Context) -> bool:
 class BlackjackCog(commands.Cog):
     """
     Blackjack table flow:
-      - React 💵 on the deal prompt to enter (no XP entry cost).
-      - React 🛑 to leave the table.
+      - Bet with `!bj <amount>` or react 💵 on the deal prompt to go all in.
+      - React 🛑 to cancel a pending bet before the hand starts.
       - React ▶️ to deal.
-      - On loss: apply a scaling XP-rate debuff and lock out until the daily reset.
-      - On win: apply a scaling XP-rate buff; push gives no buff/debuff.
+      - Wagers settle directly in XP using standard blackjack payouts.
+      - Optional daily loss lockout can be enabled by admin, but defaults off.
     """
 
     def __init__(self, bot: commands.Bot):
@@ -283,9 +287,6 @@ class BlackjackCog(commands.Cog):
     async def _dprint(self, guild: discord.Guild, channel: discord.TextChannel, msg: str):
         if self._dbg(guild.id):
             await channel.send(f"🛠️ **BJ DEBUG**: {msg}")
-
-    def _entry_cost(self) -> int:
-        return 0
 
     def _cooldown_enabled(self, gid: int) -> bool:
         st = _table(gid)
@@ -336,106 +337,21 @@ class BlackjackCog(commands.Cog):
             except Exception:
                 pass
 
-    def _pop_existing_blackjack_boost_minutes(self, gid: int, uid: int) -> int:
-        """
-        Keep only one blackjack boost stack by removing existing blackjack-win boosts.
-        Returns the longest remaining blackjack boost duration in whole minutes.
-        """
-        u = _udict(gid, uid)
-        raw = u.get("xp_boosts")
-        if not isinstance(raw, list):
-            raw = []
-        now = now_ts()
-        kept = []
-        remaining = 0
-        for b in raw:
-            if not isinstance(b, dict):
-                continue
-            try:
-                until = int(b.get("until", 0))
-            except Exception:
-                until = 0
-            src = str(b.get("source", "")).strip().lower()
-            if until <= now:
-                continue
-            if src.startswith("blackjack win"):
-                left = max(0, until - now)
-                left_min = max(1, int((left + 59) // 60))
-                remaining = max(remaining, left_min)
-                continue
-            kept.append(b)
-        u["xp_boosts"] = kept
-        return remaining
+    def _natural_blackjack_payout(self, bet: int) -> int:
+        wager = max(0, int(bet))
+        return (wager * 5) // 2
 
-    def _win_boost_profile(self, prestige: int, streak: int, *, natural: bool) -> tuple[float, int]:
-        # Start strong and ramp multiplicatively by streak.
-        s = max(1, int(streak))
-        scale = prestige_reward_scale(max(0, int(prestige)), min_scale=0.75, curve=60.0, power=1.0)
-        pct = 0.30 * (1.55 ** float(s - 1)) * scale
-        minutes_add = 30 + min(80, (s - 1) * 8)
-        if natural:
-            pct *= 1.30
-            minutes_add += 20
-        pct = max(0.20, min(4.00, pct))
-        minutes_add = max(30, min(180, int(minutes_add)))
-        return pct, minutes_add
-
-    def _loss_debuff_profile(self, prestige: int, streak: int, *, dealer_natural: bool) -> tuple[float, int]:
-        # Loss scales by streak but remains capped to keep risk bounded.
-        _p = max(0, int(prestige))  # reserved for future tuning
-        s = max(1, int(streak))
-        pct = 0.20 * (1.18 ** float(s - 1))
-        minutes = 75 + min(180, (s - 1) * 12)
-        if dealer_natural:
-            pct *= 1.10
-            minutes = int(round(minutes * 1.10))
-        pct = max(0.15, min(0.50, pct))
-        minutes = max(45, min(360, int(minutes)))
-        return pct, minutes
-
-    async def _apply_win_effect(self, guild: discord.Guild, member: discord.Member, *, natural: bool) -> dict:
-        d = self._daily_state(guild.id, member.id, self._current_cycle_key(guild.id))
-        prestige = int(_udict(guild.id, member.id).get("prestige", 0))
-        streak_before = int(d.get("streak", 0))
-        streak_now = streak_before + 1
-        pct, minutes_add = self._win_boost_profile(prestige, streak_now, natural=natural)
-        remaining = self._pop_existing_blackjack_boost_minutes(guild.id, member.id)
-        minutes = max(1, min(720, remaining + minutes_add))
-        boost = await grant_fixed_boost(
-            member,
-            pct=pct,
-            minutes=minutes,
-            source="blackjack win natural" if natural else "blackjack win",
-            reward_seed_xp=self._entry_cost(),
-            persist=False,
-        )
-        d["locked"] = False
-        d["locked_ts"] = 0
-        d["last_result"] = "win"
-        d["streak"] = streak_now
-        await save_data()
-        return boost
-
-    async def _apply_loss_effect(self, guild: discord.Guild, member: discord.Member, *, dealer_natural: bool) -> dict:
-        d = self._daily_state(guild.id, member.id, self._current_cycle_key(guild.id))
-        prestige = int(_udict(guild.id, member.id).get("prestige", 0))
-        streak_for_loss = max(1, int(d.get("streak", 0)))
-        pct, minutes = self._loss_debuff_profile(prestige, streak_for_loss, dealer_natural=dealer_natural)
+    async def _set_round_result_state(self, guild: discord.Guild, uid: int, *, result: str) -> bool:
+        d = self._daily_state(guild.id, uid, self._current_cycle_key(guild.id))
+        normalized = str(result).strip().lower()
+        lost = normalized == "loss"
         cooldown_on = self._cooldown_enabled(guild.id)
-        debuff = await grant_fixed_debuff(
-            member,
-            pct=pct,
-            minutes=minutes,
-            source="blackjack loss natural" if dealer_natural else "blackjack loss",
-            reward_seed_xp=self._entry_cost(),
-            persist=False,
-        )
-        d["locked"] = bool(cooldown_on)
-        d["locked_ts"] = now_ts() if cooldown_on else 0
-        d["last_result"] = "loss"
+        d["locked"] = bool(lost and cooldown_on)
+        d["locked_ts"] = now_ts() if lost and cooldown_on else 0
+        d["last_result"] = normalized if normalized in {"win", "loss", "push"} else ""
         d["streak"] = 0
         await save_data()
-        return debuff
+        return bool(lost and cooldown_on)
 
     # -------- State helpers --------
     def _player(self, gid: int, uid: int) -> dict:
@@ -610,7 +526,7 @@ class BlackjackCog(commands.Cog):
                     if bot_user_id and recent.author.id != bot_user_id:
                         continue
                     content = str(recent.content or "")
-                    if "DEAL" in content and "ENTER" in content and "LEAVE" in content:
+                    if "DEAL" in content and "ALL IN" in content:
                         preserve_ids.add(recent.id)
                         break
             except (discord.Forbidden, discord.HTTPException):
@@ -656,10 +572,13 @@ class BlackjackCog(commands.Cog):
         guild: discord.Guild,
         channel: discord.TextChannel,
         member: discord.Member,
+        *,
+        bet_amount: Optional[int] = None,
+        all_in: bool = False,
     ) -> bool:
         st = _table(guild.id)
         if st["phase"] not in ("betting", "idle"):
-            await channel.send("Table entry is locked while a hand is active.")
+            await channel.send("Betting is locked while a hand is active.")
             return False
 
         locked, daily = self._is_locked(guild.id, member.id)
@@ -670,17 +589,48 @@ class BlackjackCog(commands.Cog):
             return False
 
         p = self._player(guild.id, member.id)
-        if p.get("in_table"):
-            await channel.send(f"**{member.display_name}** is already at the table.")
+        current_locked = int(p.get("locked", 0))
+        u = _udict(guild.id, member.id)
+        current_xp = int(u.get("xp_f", u.get("xp", 0)))
+        bankroll = max(0, current_xp + current_locked)
+        desired_bet = bankroll if all_in else max(0, int(bet_amount or 0))
+        if desired_bet <= 0:
+            if all_in:
+                await channel.send(f"**{member.display_name}** has no XP available to go all in.")
+            else:
+                await channel.send("Bet amount must be at least 1 XP.")
+            return False
+        if desired_bet > bankroll:
+            await channel.send(
+                f"**{member.display_name}** only has **{bankroll} XP** available but needs **{desired_bet} XP**."
+            )
             return False
 
         seated_count = sum(1 for seat in st.get("players", {}).values() if seat.get("in_table"))
-        if seated_count >= BJ_MAX_PLAYERS:
+        if not p.get("in_table") and seated_count >= BJ_MAX_PLAYERS:
             await channel.send(f"Table is full (**{BJ_MAX_PLAYERS}** players).")
             return False
 
-        p["bet"] = 0
-        p["locked"] = 0
+        if current_locked > 0:
+            await self._apply_member_xp(
+                guild,
+                member,
+                current_locked,
+                sync_level=False,
+                source="blackjack refund pending",
+            )
+
+        await self._apply_member_xp(
+            guild,
+            member,
+            -desired_bet,
+            sync_level=False,
+            source="blackjack ante",
+        )
+
+        was_seated = bool(p.get("in_table"))
+        p["bet"] = desired_bet
+        p["locked"] = desired_bet
         p["status"] = "betting"
         p["in_table"] = True
         p["joined_ts"] = now_ts()
@@ -692,12 +642,16 @@ class BlackjackCog(commands.Cog):
             member.id,
             "blackjack",
             bets_set=1,
-            stake_set_total=0,
+            stake_set_total=desired_bet,
             streak_snapshot=int(daily.get("streak", 0)),
         )
         await save_data()
 
-        await channel.send(f"{EMOJI_JOIN} **{member.display_name}** entered the table.")
+        if all_in:
+            verb = "updated to all in" if was_seated else "went all in"
+        else:
+            verb = "updated bet" if was_seated else "joined with a bet"
+        await channel.send(f"{EMOJI_JOIN} **{member.display_name}** {verb} of **{desired_bet} XP**.")
         if not st.get("deal_msg_id"):
             await self._post_new_deal_button(guild, channel)
         return True
@@ -796,7 +750,7 @@ class BlackjackCog(commands.Cog):
     async def _post_new_deal_button(self, guild: discord.Guild, channel: discord.TextChannel):
         st = _table(guild.id)
         m = await channel.send(
-            f"**{EMOJI_DEAL}** DEAL | **{EMOJI_JOIN}** ENTER | **{EMOJI_LEAVE}** LEAVE"
+            f"**{EMOJI_DEAL}** DEAL | **{EMOJI_JOIN}** ALL IN | **{EMOJI_LEAVE}** CANCEL BET"
         )
         st["deal_msg_id"] = m.id
         try: await m.add_reaction(EMOJI_DEAL)
@@ -947,7 +901,9 @@ class BlackjackCog(commands.Cog):
             return
 
         if a in ("join", "enter", "buy", "buyin"):
-            await self._join_table(ctx.guild, ctx.channel, ctx.author)
+            await ctx.reply(
+                f"Blackjack is XP-based now. Use `{ctx.clean_prefix}bj <amount>` or `{ctx.clean_prefix}bj all`."
+            )
             return
 
         if a in ("leave", "stop", "exit"):
@@ -958,8 +914,12 @@ class BlackjackCog(commands.Cog):
             await self._begin_deal_core(ctx.guild, ctx.channel)
             return
 
-        if a.isdigit() or a == "all":
-            await ctx.reply(f"Blackjack has no XP buy-in now. React **{EMOJI_JOIN}** on the table prompt to enter.")
+        if a in ("all", "allin", "all-in", "ai", "max"):
+            await self._join_table(ctx.guild, ctx.channel, ctx.author, all_in=True)
+            return
+
+        if a.replace(",", "").isdigit():
+            await self._join_table(ctx.guild, ctx.channel, ctx.author, bet_amount=int(a.replace(",", "")))
             return
 
         if st["phase"] != "acting":
@@ -1012,7 +972,7 @@ class BlackjackCog(commands.Cog):
 
         lines = [
             "**Blackjack Table**",
-            "Entry cost: **none**",
+            f"Bet with `{ctx.clean_prefix}bj <amount>` or react **{EMOJI_JOIN}** on the deal prompt to go all in.",
             f"Daily reset: **{_draw_time_label(h, m)}** (next {nxt.strftime('%Y-%m-%d %I:%M %p ET')})",
             f"Daily lockout cooldown: **{'ENABLED' if self._cooldown_enabled(ctx.guild.id) else 'DISABLED'}**",
         ]
@@ -1031,11 +991,11 @@ class BlackjackCog(commands.Cog):
             if p.get("split"):
                 parts.append(f"H2 {pretty(p.get('hand2', [])) or '(no cards)'}")
             lines.append(
-                f"- **{mbr.display_name if mbr else uid}** buy-in **{p.get('bet', 0)}** | {' | '.join(parts)} | {p.get('status', 'betting')}"
+                f"- **{mbr.display_name if mbr else uid}** bet **{p.get('bet', 0)} XP** | {' | '.join(parts)} | {p.get('status', 'betting')}"
             )
 
         if not seated:
-            lines.append(f"No seated players. React **{EMOJI_JOIN}** on the deal prompt to enter.")
+            lines.append(f"No active bets. Use `{ctx.clean_prefix}bj <amount>` or react **{EMOJI_JOIN}** to go all in.")
 
         locked, d = self._is_locked(ctx.guild.id, ctx.author.id)
         if not self._cooldown_enabled(ctx.guild.id):
@@ -1043,7 +1003,7 @@ class BlackjackCog(commands.Cog):
         elif locked:
             lines.append("You are currently locked out until the next blackjack reset.")
         else:
-            lines.append(f"You are eligible. Current streak: **{int(d.get('streak', 0))}**")
+            lines.append("You are eligible to bet.")
 
         await ctx.reply("\n".join(lines))
     # =========================
@@ -1057,14 +1017,28 @@ class BlackjackCog(commands.Cog):
         st["turn_idx"] = 0
 
         for p in st["players"].values():
-            if p.get("in_table"):
-                p.update({
-                    "status": "betting", "bet": 0, "locked": 0, "hand": [], "hand2": [], "split": False, "active_hand": 0,
-                    "stood": False, "busted": False, "finished": False, "doubled": False, "surrendered": False,
-                    "stood2": False, "busted2": False, "finished2": False, "doubled2": False, "surrendered2": False,
-                    "natural_bj": False,
-                })
-                p["last_active_ts"] = now_ts()
+            p.update({
+                "status": "idle",
+                "bet": 0,
+                "locked": 0,
+                "hand": [],
+                "hand2": [],
+                "split": False,
+                "active_hand": 0,
+                "stood": False,
+                "busted": False,
+                "finished": False,
+                "doubled": False,
+                "surrendered": False,
+                "stood2": False,
+                "busted2": False,
+                "finished2": False,
+                "doubled2": False,
+                "surrendered2": False,
+                "natural_bj": False,
+                "in_table": False,
+            })
+            p["last_active_ts"] = now_ts()
 
         self._touch(st)
         await save_data()
@@ -1084,10 +1058,10 @@ class BlackjackCog(commands.Cog):
             seated = self._seated_order(st, guild)
             ready = [
                 uid for uid in seated
-                if st["players"][str(uid)].get("in_table")
+                if st["players"][str(uid)].get("in_table") and int(st["players"][str(uid)].get("bet", 0)) > 0
             ]
             if not ready:
-                await channel.send(f"No seated players. React **{EMOJI_JOIN}** to enter."); return
+                await channel.send(f"No active bets. Use `!bj <amount>` or react **{EMOJI_JOIN}** to go all in."); return
 
             for uid in ready:
                 bet_amt = int(st["players"][str(uid)].get("bet", 0))
@@ -1142,18 +1116,28 @@ class BlackjackCog(commands.Cog):
                     _, player_bj = value_of_hand(p["hand"])
 
                     if player_bj:
+                        if member and locked_amt > 0:
+                            await self._apply_member_xp(
+                                guild,
+                                member,
+                                locked_amt,
+                                sync_level=True,
+                                source="blackjack payout",
+                            )
+                        await self._set_round_result_state(guild, uid, result="push")
                         record_game_fields(guild.id, uid, "blackjack", draws=1, naturals=1, xp_profit_total=0)
                         out_lines.append(f"- **{member.display_name if member else uid}**: push")
-                        p["in_table"] = True
                     else:
                         record_game_fields(guild.id, uid, "blackjack", losses=1, xp_profit_total=-locked_amt)
+                        locked_out = await self._set_round_result_state(guild, uid, result="loss")
                         if member:
-                            debuff = await self._apply_loss_effect(guild, member, dealer_natural=True)
-                            lock_text = "lockout" if cooldown_on else "no lockout"
-                            out_lines.append(f"- **{member.display_name}**: loss ({lock_text}; debuff -{debuff['percent']:.1f}% for {debuff['minutes']}m)")
-                        p["in_table"] = False
+                            lock_text = "locked until reset" if locked_out else "can play again immediately"
+                            out_lines.append(f"- **{member.display_name}**: loss ({lock_text})")
 
-                    p["bet"] = 0; p["locked"] = 0; p["status"] = "done"; p["finished"] = True
+                    p["bet"] = 0
+                    p["locked"] = 0
+                    p["status"] = "done"
+                    p["finished"] = True
 
                 await save_data()
                 await channel.send("\n".join(out_lines))
@@ -1167,32 +1151,24 @@ class BlackjackCog(commands.Cog):
                 if not p_bj:
                     continue
                 member = guild.get_member(uid)
-                if member:
-                    boost = await self._apply_win_effect(guild, member, natural=True)
-                    winners.append((member.display_name, boost["percent"], boost["minutes"]))
-                    record_game_fields(
-                        guild.id,
-                        uid,
-                        "blackjack",
-                        wins=1,
-                        naturals=1,
-                        boost_percent_total=boost["percent"],
-                        boost_minutes_total=boost["minutes"],
-                        xp_profit_total=0,
-                    )
-
-                p["locked"] = 0; p["bet"] = 0; p["natural_bj"] = True; p["status"] = "done"; p["finished"] = True
+                name = member.display_name if member else str(uid)
+                winners.append((name, int(p.get("bet", 0))))
+                p["natural_bj"] = True
+                p["status"] = "done"
+                p["finished"] = True
 
             if winners:
                 msg_lines = ["Natural blackjack winners:"]
-                for name, pct, mins in winners:
-                    msg_lines.append(f"- **{name}**: +{pct:.1f}% XP/min for {mins}m")
+                for name, bet_amt in winners:
+                    msg_lines.append(
+                        f"- **{name}**: blackjack pays **{self._natural_blackjack_payout(bet_amt)} XP** on a **{bet_amt} XP** bet"
+                    )
                 await channel.send("\n".join(msg_lines))
 
             st["phase"] = "acting"; st["turn_idx"] = 0; self._start_turn(st); await save_data()
             remaining = [uid for uid in ready if st["players"][str(uid)].get("status") == "acting"]
             if not remaining:
-                await self._round_cleanup_and_prompt(guild, channel); return
+                await self._dealer_then_payout(self._ShimCtx(guild, channel), st); return
 
             await channel.send("Turn order: " + " -> ".join(guild.get_member(uid).display_name for uid in remaining if guild.get_member(uid)))
             await self._prompt_turn_with_reactions(guild, channel); return
@@ -1445,30 +1421,40 @@ class BlackjackCog(commands.Cog):
             member = guild.get_member(uid)
             bet = int(p.get("bet", 0))
 
-            if p.get("natural_bj"):
-                p["bet"] = 0
-                p["locked"] = 0
-                continue
-
             locked_total = int(p.get("locked", 0))
 
-            def settle_one(hand: List[str], doubled_flag: bool, surrendered_flag: bool, busted_flag: bool, label: str):
+            def settle_one(
+                hand: List[str],
+                doubled_flag: bool,
+                surrendered_flag: bool,
+                busted_flag: bool,
+                label: str,
+                *,
+                natural_flag: bool = False,
+            ):
                 total, _ = value_of_hand(hand)
                 base_bet = bet * (2 if doubled_flag else 1)
+                if natural_flag:
+                    return self._natural_blackjack_payout(base_bet), f"{label} natural blackjack", "win"
                 if surrendered_flag:
                     return base_bet // 2, f"{label} surrender", "loss"
                 if busted_flag:
                     return 0, f"{label} bust", "loss"
                 if dealer_bust:
-                    return base_bet, f"{label} win (dealer bust)", "win"
+                    return base_bet * 2, f"{label} win (dealer bust)", "win"
                 if total > dealer_total:
-                    return base_bet, f"{label} win", "win"
+                    return base_bet * 2, f"{label} win", "win"
                 if total < dealer_total:
                     return 0, f"{label} loss", "loss"
                 return base_bet, f"{label} push", "push"
 
             r1, out1, kind1 = settle_one(
-                p["hand"], p.get("doubled", False), p.get("surrendered", False), p.get("busted", False), "H1"
+                p["hand"],
+                p.get("doubled", False),
+                p.get("surrendered", False),
+                p.get("busted", False),
+                "H1",
+                natural_flag=bool(p.get("natural_bj", False)),
             )
             r2 = 0
             out2 = None
@@ -1482,56 +1468,30 @@ class BlackjackCog(commands.Cog):
                     "H2",
                 )
 
-            kinds = [kind1] + ([kind2] if kind2 is not None else [])
-            any_loss = any(k == "loss" for k in kinds)
-            any_win = any(k == "win" for k in kinds)
-            push_only = (not any_loss) and (not any_win)
-
             payout_total = int(r1 + r2)
             if member and payout_total > 0:
-                await self._apply_member_xp(guild, member, payout_total, sync_level=True, source="blackjack refund")
+                await self._apply_member_xp(guild, member, payout_total, sync_level=True, source="blackjack payout")
 
             profit = payout_total - locked_total
-            if any_loss:
+            if profit < 0:
                 record_game_fields(guild.id, uid, "blackjack", losses=1, xp_profit_total=profit)
-            elif any_win:
-                record_game_fields(guild.id, uid, "blackjack", wins=1, xp_profit_total=profit)
+            elif profit > 0:
+                extra = {"naturals": 1} if p.get("natural_bj") else {}
+                record_game_fields(guild.id, uid, "blackjack", wins=1, xp_profit_total=profit, **extra)
             else:
                 record_game_fields(guild.id, uid, "blackjack", draws=1, xp_profit_total=profit)
 
             effect_line = ""
-            if member and any_loss:
-                debuff = await self._apply_loss_effect(guild, member, dealer_natural=False)
-                p["in_table"] = False
-                if self._cooldown_enabled(guild.id):
-                    effect_line = f"debuff -{debuff['percent']:.1f}% for {debuff['minutes']}m; locked until reset"
-                else:
-                    effect_line = f"debuff -{debuff['percent']:.1f}% for {debuff['minutes']}m; cooldown disabled"
-                record_game_fields(
-                    guild.id,
-                    uid,
-                    "blackjack",
-                    debuff_percent_total=debuff["percent"],
-                    debuff_minutes_total=debuff["minutes"],
-                )
-            elif member and any_win:
-                boost = await self._apply_win_effect(guild, member, natural=False)
-                effect_line = f"buff +{boost['percent']:.1f}% for {boost['minutes']}m"
-                record_game_fields(
-                    guild.id,
-                    uid,
-                    "blackjack",
-                    boost_percent_total=boost["percent"],
-                    boost_minutes_total=boost["minutes"],
-                )
-            elif push_only:
-                effect_line = "push - no buff/debuff"
+            result_key = "loss" if profit < 0 else ("win" if profit > 0 else "push")
+            locked_out = await self._set_round_result_state(guild, uid, result=result_key)
+            if profit < 0:
+                effect_line = "locked until reset" if locked_out else "can play again immediately"
 
             name = member.display_name if member else f"User {uid}"
             parts = [f"- {name}: {out1}"]
             if out2 is not None:
                 parts.append(out2)
-            parts.append(f"refund={payout_total} XP")
+            parts.append(f"payout={payout_total} XP")
             if effect_line:
                 parts.append(effect_line)
             lines.append(" | ".join(parts))
@@ -1574,7 +1534,7 @@ class BlackjackCog(commands.Cog):
                 member = await self._resolve_member(guild, payload.user_id)
                 if not member or member.bot:
                     return
-                await self._join_table(guild, ch, member)
+                await self._join_table(guild, ch, member, all_in=True)
             elif em_name in LEAVE_EMOJIS or payload.emoji.name in LEAVE_EMOJIS:
                 member = await self._resolve_member(guild, payload.user_id)
                 if not member or member.bot:

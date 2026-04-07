@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from difflib import get_close_matches
 import random
 import re
 import time
@@ -14,8 +15,17 @@ from .config import SPIN_DISABLED_REWARDS, SPIN_RESET_HOUR, SPIN_RESET_MINUTE
 from .emojis import EMOJI_FERRIS_WHEEL
 from .ownership import owner_only
 from .spin_support import (
-    add_roulette_backfire_shield,
     add_blackjack_natural_charges,
+    add_cleanse_charges,
+    add_drain_charges,
+    add_mulligan_charges,
+    add_roulette_backfire_shield,
+    add_roulette_timeout_bonus_seconds,
+    add_wordle_hint_charges,
+    consume_cleanse_charge,
+    consume_drain_charge,
+    get_cleanse_charges,
+    get_drain_charges,
     set_anagram_reward_multiplier,
     set_coinflip_win_edge,
     set_lotto_bonus_tickets_pct,
@@ -30,6 +40,8 @@ from .time_windows import LOCAL_TZ
 from .xp import (
     apply_xp_change,
     grant_fixed_boost,
+    grant_stacked_fixed_boost,
+    grant_stacked_fixed_debuff,
     prestige_base_rate,
     prestige_cost,
     prestige_multiplier,
@@ -73,6 +85,26 @@ WHEEL_REWARDS: dict[str, dict] = {
         "label": "Next lotto jackpot win boost is amplified x1.75.",
         "weight": 3.5,
     },
+    "mulligan_next": {
+        "label": "Next debuff is blocked.",
+        "weight": 6.5,
+    },
+    "wordle_hint_next": {
+        "label": "Reveal a correct letter in your next unfinished Wordle.",
+        "weight": 7.0,
+    },
+    "drain_item": {
+        "label": "Gain a Drain item (`!drain`).",
+        "weight": 3.0,
+    },
+    "bonus_spins_2": {
+        "label": "Gain +2 bonus spins that stack and roll over.",
+        "weight": 4.5,
+    },
+    "roulette_timeout_plus_60": {
+        "label": "Next successful roulette timeout gains +60s.",
+        "weight": 5.0,
+    },
     "xp_boost_minor": {
         "label": "+20% XP/min for 60m.",
         "weight": 14.0,
@@ -106,7 +138,7 @@ WHEEL_REWARDS: dict[str, dict] = {
         "weight": 0.6,
     },
     "clear_debuffs": {
-        "label": "Cleanse all active XP debuffs.",
+        "label": "Gain a Cleanse item (`!cleanse`).",
         "weight": 7.0,
     },
 }
@@ -120,6 +152,11 @@ _REWARD_SHORT_LABELS: dict[str, str] = {
     "coinflip_edge_next": "Coinflip Edge",
     "lotto_ticket_surge_next": "Lotto Ticket Surge",
     "lotto_jackpot_amp_next": "Lotto Jackpot Amp",
+    "mulligan_next": "Mulligan",
+    "wordle_hint_next": "Wordle Hint",
+    "drain_item": "Drain",
+    "bonus_spins_2": "+2 Spins",
+    "roulette_timeout_plus_60": "Timeout +60",
     "xp_boost_minor": "XP Boost Minor",
     "xp_boost_major": "XP Boost Major",
     "xp_boost_jackpot": "XP Boost Jackpot",
@@ -130,6 +167,16 @@ _REWARD_SHORT_LABELS: dict[str, str] = {
     "prestige_plus_2": "Prestige +2",
     "clear_debuffs": "Debuff Cleanse",
 }
+
+SHOP_ITEMS: list[dict[str, object]] = [
+    {
+        "key": "wheel_spin",
+        "name": "Wheel Spin",
+        "aliases": ["wheel", "spin", "wheelspin"],
+        "cost": 500,
+        "description": "Adds 1 bonus wheel spin. Bonus spins stack and roll over.",
+    },
+]
 
 
 def _sanitize_reset_time(hour: int, minute: int) -> tuple[int, int]:
@@ -227,13 +274,131 @@ def _spin_user_state(gid: int, uid: int) -> dict:
     u = _udict(gid, uid)
     st = u.get("spin_daily")
     if not isinstance(st, dict):
-        st = {"cycle_key": "", "spun": False, "last_reward": "", "last_spin_ts": 0}
+        st = {
+            "cycle_key": "",
+            "spun": False,
+            "daily_spins_remaining": 1,
+            "bonus_spins": 0,
+            "last_reward": "",
+            "last_spin_ts": 0,
+        }
         u["spin_daily"] = st
     st.setdefault("cycle_key", "")
     st.setdefault("spun", False)
+    if "daily_spins_remaining" not in st:
+        st["daily_spins_remaining"] = 0 if bool(st.get("spun", False)) else 1
+    st.setdefault("bonus_spins", 0)
     st.setdefault("last_reward", "")
     st.setdefault("last_spin_ts", 0)
     return st
+
+
+def _sync_spin_cycle_state(st: dict, cycle: str) -> None:
+    cur_cycle = str(st.get("cycle_key", ""))
+    if cur_cycle != cycle:
+        st["cycle_key"] = cycle
+        st["daily_spins_remaining"] = 1
+        st["spun"] = False
+    else:
+        st["daily_spins_remaining"] = max(0, int(st.get("daily_spins_remaining", 0)))
+    st["bonus_spins"] = max(0, int(st.get("bonus_spins", 0)))
+    st["spun"] = bool(int(st.get("daily_spins_remaining", 0)) <= 0)
+
+
+def _available_spins(st: dict) -> int:
+    return max(0, int(st.get("daily_spins_remaining", 0))) + max(0, int(st.get("bonus_spins", 0)))
+
+
+def _consume_spin(st: dict) -> bool:
+    daily = max(0, int(st.get("daily_spins_remaining", 0)))
+    bonus = max(0, int(st.get("bonus_spins", 0)))
+    if daily > 0:
+        st["daily_spins_remaining"] = daily - 1
+    elif bonus > 0:
+        st["bonus_spins"] = bonus - 1
+    else:
+        return False
+    st["spun"] = bool(int(st.get("daily_spins_remaining", 0)) <= 0)
+    return True
+
+
+def _add_bonus_spins(st: dict, amount: int) -> int:
+    add_n = max(0, int(amount))
+    st["bonus_spins"] = max(0, int(st.get("bonus_spins", 0))) + add_n
+    return int(st["bonus_spins"])
+
+
+def _count_active_debuffs(u: dict, *, now: Optional[int] = None) -> int:
+    now_ts = int(time.time()) if now is None else int(now)
+    raw = u.get("xp_debuffs")
+    debuffs = raw if isinstance(raw, list) else []
+    active = 0
+    for d in debuffs:
+        if not isinstance(d, dict):
+            continue
+        try:
+            until = int(d.get("until", 0))
+        except Exception:
+            until = 0
+        if until > now_ts:
+            active += 1
+    return active
+
+
+def _cleanse_debuffs(gid: int, uid: int) -> int:
+    u = _udict(gid, uid)
+    active = _count_active_debuffs(u)
+    u["xp_debuffs"] = []
+    return active
+
+
+def _normalize_shop_text(raw: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(raw or "").strip().lower()).strip()
+
+
+def _resolve_shop_item(query: str) -> Optional[dict[str, object]]:
+    q = _normalize_shop_text(query)
+    if not q:
+        return None
+    if q.isdigit():
+        idx = int(q) - 1
+        if 0 <= idx < len(SHOP_ITEMS):
+            return SHOP_ITEMS[idx]
+        return None
+
+    exact_map: dict[str, dict[str, object]] = {}
+    fuzzy_labels: list[str] = []
+    fuzzy_map: dict[str, dict[str, object]] = {}
+    for item in SHOP_ITEMS:
+        labels = [
+            _normalize_shop_text(str(item.get("key", ""))),
+            _normalize_shop_text(str(item.get("name", ""))),
+        ]
+        for alias in item.get("aliases", []) or []:
+            labels.append(_normalize_shop_text(str(alias)))
+        labels = [label for label in labels if label]
+        for label in labels:
+            exact_map.setdefault(label, item)
+            fuzzy_labels.append(label)
+            fuzzy_map[label] = item
+
+    if q in exact_map:
+        return exact_map[q]
+
+    substring_matches = []
+    q_tokens = q.split()
+    for label, item in fuzzy_map.items():
+        label_tokens = label.split()
+        if q in label or label.startswith(q) or all(token in label_tokens for token in q_tokens):
+            substring_matches.append((len(label), label, item))
+    if substring_matches:
+        substring_matches.sort(key=lambda row: (row[0], row[1]))
+        return substring_matches[0][2]
+
+    close = get_close_matches(q, fuzzy_labels, n=1, cutoff=0.55)
+    if close:
+        return fuzzy_map.get(close[0])
+    return None
 
 
 def _reward_enabled(st: dict, reward_key: str) -> bool:
@@ -377,6 +542,33 @@ class SpinCog(commands.Cog):
                 f"for **{state['charges']}** jackpot(s)."
             )
 
+        if key == "mulligan_next":
+            charges = add_mulligan_charges(gid, uid, charges=1)
+            return f"Mulligan granted. Your next debuff is blocked. Charges now: **{charges}**."
+
+        if key == "wordle_hint_next":
+            charges = add_wordle_hint_charges(gid, uid, charges=1)
+            return (
+                f"Wordle hint queued. Use `!wordle` to view it. "
+                f"Queued hint letters for your next unfinished Wordle: **{charges}**."
+            )
+
+        if key == "drain_item":
+            charges = add_drain_charges(gid, uid, charges=1)
+            return f"Drain item granted. Use `!drain` when you're in voice. Charges now: **{charges}**."
+
+        if key == "bonus_spins_2":
+            spin_state = _spin_user_state(gid, uid)
+            bonus_total = _add_bonus_spins(spin_state, 2)
+            return (
+                f"Bonus spins granted: **+2**. "
+                f"Bonus bank now: **{bonus_total}** | Available spins: **{_available_spins(spin_state)}**."
+            )
+
+        if key == "roulette_timeout_plus_60":
+            total_seconds = add_roulette_timeout_bonus_seconds(gid, uid, seconds=60)
+            return f"Next successful roulette timeout gets **+60s**. Total queued timeout bonus: **+{total_seconds}s**."
+
         if key == "xp_boost_minor":
             boost = await grant_fixed_boost(
                 ctx.author,
@@ -438,22 +630,8 @@ class SpinCog(commands.Cog):
             )
 
         if key == "clear_debuffs":
-            now = int(time.time())
-            u = _udict(gid, uid)
-            raw = u.get("xp_debuffs")
-            debuffs = raw if isinstance(raw, list) else []
-            active = 0
-            for d in debuffs:
-                if not isinstance(d, dict):
-                    continue
-                try:
-                    until = int(d.get("until", 0))
-                except Exception:
-                    until = 0
-                if until > now:
-                    active += 1
-            u["xp_debuffs"] = []
-            return f"Debuffs cleansed. Removed **{active}** active debuff(s)."
+            charges = add_cleanse_charges(gid, uid, charges=1)
+            return f"Cleanse item granted. Use `!cleanse` when you want. Charges now: **{charges}**."
 
         # Should not happen when reward table is valid.
         return "No effect was applied."
@@ -472,14 +650,15 @@ class SpinCog(commands.Cog):
         nxt = _next_reset_dt(h, m)
 
         ust = _spin_user_state(gid, uid)
-        if str(ust.get("cycle_key", "")) != cycle:
-            ust["cycle_key"] = cycle
-            ust["spun"] = False
+        _sync_spin_cycle_state(ust, cycle)
+        spins_left = _available_spins(ust)
 
-        if bool(ust.get("spun", False)):
+        if spins_left <= 0:
             buffs = wheel_buff_lines(gid, uid)
             lines = [
-                f"You already used your daily spin for cycle **{cycle}**.",
+                f"You have no wheel spins left for cycle **{cycle}**.",
+                f"Daily free spin remaining: **{int(ust.get('daily_spins_remaining', 0))}**.",
+                f"Bonus spin bank: **{int(ust.get('bonus_spins', 0))}**.",
                 f"Next reset: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**.",
             ]
             if buffs:
@@ -493,12 +672,12 @@ class SpinCog(commands.Cog):
             await ctx.reply("Spin wheel has no enabled rewards. Ask an admin to enable rewards.")
             return
 
+        _consume_spin(ust)
         await self._animate_spin(ctx, st, reward_key)
 
         reward_meta = WHEEL_REWARDS.get(reward_key, {})
         effect_text = await self._apply_reward(ctx, reward_key)
 
-        ust["spun"] = True
         ust["cycle_key"] = cycle
         ust["last_reward"] = reward_key
         ust["last_spin_ts"] = int(time.time())
@@ -512,6 +691,8 @@ class SpinCog(commands.Cog):
             f"Daily spin result: **{reward_key}**",
             f"{reward_meta.get('label', '').strip()}",
             effect_text,
+            f"Spins left: **{_available_spins(ust)}** "
+            f"(daily **{int(ust.get('daily_spins_remaining', 0))}**, bonus **{int(ust.get('bonus_spins', 0))}**).",
             f"Next reset: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**.",
         ]
         if buffs:
@@ -532,12 +713,16 @@ class SpinCog(commands.Cog):
         cycle = _cycle_key(h, m)
         nxt = _next_reset_dt(h, m)
         ust = _spin_user_state(gid, uid)
-        spun = bool(ust.get("spun", False)) and str(ust.get("cycle_key", "")) == cycle
+        _sync_spin_cycle_state(ust, cycle)
+        daily_remaining = int(ust.get("daily_spins_remaining", 0))
+        bonus_spins = int(ust.get("bonus_spins", 0))
 
         lines = [
             f"Daily wheel reset: **{_draw_time_label(h, m)}**",
             f"Current cycle: **{cycle}**",
-            f"Spin used this cycle: **{'yes' if spun else 'no'}**",
+            f"Free daily spin remaining this cycle: **{daily_remaining}**",
+            f"Bonus spin bank: **{bonus_spins}**",
+            f"Total spins available now: **{_available_spins(ust)}**",
             f"Next reset: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**",
         ]
         buffs = wheel_buff_lines(gid, uid)
@@ -545,6 +730,190 @@ class SpinCog(commands.Cog):
             lines.append("Active wheel buffs:")
             lines.extend(f"- {line}" for line in buffs)
         await ctx.reply("\n".join(lines))
+
+    @commands.command(name="cleanse")
+    async def cleanse(self, ctx: commands.Context):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+
+        gid = int(ctx.guild.id)
+        uid = int(ctx.author.id)
+        charges = get_cleanse_charges(gid, uid)
+        if charges <= 0:
+            await ctx.reply("You do not have a Cleanse item right now.")
+            return
+
+        u = _udict(gid, uid)
+        active = _count_active_debuffs(u)
+        if active <= 0:
+            await ctx.reply(
+                f"You have **{charges}** Cleanse item(s), but no active debuffs to remove."
+            )
+            return
+
+        consume_cleanse_charge(gid, uid)
+        removed = _cleanse_debuffs(gid, uid)
+        await save_data()
+        await ctx.reply(
+            f"Cleanse used. Removed **{removed}** active debuff(s). "
+            f"Charges left: **{get_cleanse_charges(gid, uid)}**."
+        )
+
+    @commands.command(name="drain")
+    async def drain(self, ctx: commands.Context):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+
+        gid = int(ctx.guild.id)
+        uid = int(ctx.author.id)
+        charges = get_drain_charges(gid, uid)
+        if charges <= 0:
+            await ctx.reply("You do not have a Drain item right now.")
+            return
+
+        voice = getattr(ctx.author, "voice", None)
+        channel = getattr(voice, "channel", None)
+        if channel is None:
+            await ctx.reply("You must be in a voice channel to use Drain.")
+            return
+
+        targets = [m for m in channel.members if not m.bot and m.id != ctx.author.id]
+        if not targets:
+            await ctx.reply("Drain needs at least one other non-bot user in your voice channel.")
+            return
+
+        consume_drain_charge(gid, uid)
+
+        drained = 0
+        blocked = 0
+        for member in targets:
+            debuff = await grant_stacked_fixed_debuff(
+                member,
+                pct_add=1.0,
+                minutes_add=60,
+                pct_cap=1.0,
+                source="wheel drain",
+                source_prefix="wheel drain",
+                reward_seed_xp=100,
+                persist=False,
+            )
+            if debuff.get("blocked", False):
+                blocked += 1
+            else:
+                drained += 1
+
+        boost = None
+        if drained > 0:
+            boost = await grant_stacked_fixed_boost(
+                ctx.author,
+                pct_add=float(drained),
+                minutes_add=int(drained * 60),
+                source="wheel drain",
+                source_prefix="wheel drain",
+                reward_seed_xp=int(drained * 100),
+                persist=False,
+            )
+
+        await save_data()
+
+        lines = [
+            f"Drain used on **{len(targets)}** player(s) in **{channel.name}**.",
+        ]
+        if drained > 0:
+            lines.append(
+                f"Applied **-100.0% XP/min** for **60m** to **{drained}** player(s)."
+            )
+            lines.append(
+                f"You gained **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**."
+            )
+        else:
+            lines.append("No target was successfully drained, so you gained no self boost.")
+        if blocked > 0:
+            lines.append(f"Mulligan blocked **{blocked}** drain debuff(s).")
+        lines.append(f"Drain charges left: **{get_drain_charges(gid, uid)}**.")
+        await ctx.reply("\n".join(lines))
+
+    @commands.command(name="shop")
+    async def shop(self, ctx: commands.Context):
+        lines = ["**Shop**"]
+        for idx, item in enumerate(SHOP_ITEMS, start=1):
+            lines.append(
+                f"`{idx}.` **{item['name']}** - **{int(item['cost'])} XP** - {item['description']}"
+            )
+        lines.append(f"Buy with `{ctx.clean_prefix}buy <index|name> [amount]`.")
+        await ctx.reply("\n".join(lines))
+
+    @commands.command(name="buy")
+    async def buy(self, ctx: commands.Context, *args: str):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+        if not args:
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}buy <index|name> [amount]`")
+            return
+
+        tokens = [str(arg).strip() for arg in args if str(arg).strip()]
+        if not tokens:
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}buy <index|name> [amount]`")
+            return
+
+        amount = 1
+        query_tokens = list(tokens)
+        if len(tokens) >= 2:
+            try:
+                amount = int(tokens[-1])
+                query_tokens = tokens[:-1]
+            except ValueError:
+                amount = 1
+                query_tokens = list(tokens)
+
+        if amount <= 0:
+            await ctx.reply("Buy amount must be at least 1.")
+            return
+
+        query = " ".join(query_tokens).strip()
+        if not query:
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}buy <index|name> [amount]`")
+            return
+
+        item = _resolve_shop_item(query)
+        if not item:
+            await ctx.reply(f"I couldn't find a shop item matching `{query}`.")
+            return
+
+        cost_each = int(item.get("cost", 0))
+        total_cost = max(0, cost_each * amount)
+        u = _udict(ctx.guild.id, ctx.author.id)
+        cur_xp = int(u.get("xp_f", u.get("xp", 0)))
+        if cur_xp < total_cost:
+            await ctx.reply(
+                f"You need **{total_cost} XP** to buy **{amount}x {item['name']}**, "
+                f"but you only have **{cur_xp} XP**."
+            )
+            return
+
+        key = str(item.get("key", "")).strip().lower()
+        if key != "wheel_spin":
+            await ctx.reply(f"`{item['name']}` is not purchasable yet.")
+            return
+
+        await apply_xp_change(ctx.author, -total_cost, source="shop wheel_spin")
+        wheel_state = _wheel_state(ctx.guild.id)
+        h, m = _sanitize_reset_time(
+            wheel_state.get("reset_hour", SPIN_RESET_HOUR),
+            wheel_state.get("reset_minute", SPIN_RESET_MINUTE),
+        )
+        ust = _spin_user_state(ctx.guild.id, ctx.author.id)
+        _sync_spin_cycle_state(ust, _cycle_key(h, m))
+        bonus_total = _add_bonus_spins(ust, amount)
+        await save_data()
+
+        await ctx.reply(
+            f"Bought **{amount}x {item['name']}** for **{total_cost} XP**. "
+            f"Bonus spin bank: **{bonus_total}** | Total spins available now: **{_available_spins(ust)}**."
+        )
 
     @commands.command(name="spintime")
     @owner_only()
@@ -654,6 +1023,7 @@ class SpinCog(commands.Cog):
 
         ust = _spin_user_state(gid, target.id)
         ust["cycle_key"] = cycle
+        ust["daily_spins_remaining"] = 1
         ust["spun"] = False
         ust["last_reward"] = ""
         ust["last_spin_ts"] = 0
