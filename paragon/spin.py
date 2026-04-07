@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from difflib import get_close_matches
+import math
 import random
 import re
 import time
@@ -57,8 +58,8 @@ WHEEL_REWARDS: dict[str, dict] = {
         "label": "Next blackjack hand is a guaranteed natural blackjack.",
         "weight": 8.0,
     },
-    "wordle_x4_next": {
-        "label": "Next Wordle clear is 4x final buff strength.",
+    "wordle_x2_next": {
+        "label": "Next Wordle clear is 2x final buff strength.",
         "weight": 8.0,
     },
     "anagram_x3_next": {
@@ -145,7 +146,7 @@ WHEEL_REWARDS: dict[str, dict] = {
 
 _REWARD_SHORT_LABELS: dict[str, str] = {
     "bj_natural_next": "Natural BJ",
-    "wordle_x4_next": "Wordle x4",
+    "wordle_x2_next": "Wordle x2",
     "anagram_x3_next": "Anagram x3",
     "roulette_aim_next": "Roulette Aim",
     "roulette_shield_next": "Roulette Shield",
@@ -173,10 +174,40 @@ SHOP_ITEMS: list[dict[str, object]] = [
         "key": "wheel_spin",
         "name": "Wheel Spin",
         "aliases": ["wheel", "spin", "wheelspin"],
-        "cost": 500,
-        "description": "Adds 1 bonus wheel spin. Bonus spins stack and roll over.",
+        "description": "Adds 1 bonus wheel spin. Costs 20% of your next prestige, rounded to the nearest 10 XP.",
     },
 ]
+
+_REWARD_KEY_ALIASES: dict[str, str] = {
+    "wordle_x4_next": "wordle_x2_next",
+}
+
+
+def _normalize_reward_key(reward_key: str) -> str:
+    key = str(reward_key).strip().lower()
+    return _REWARD_KEY_ALIASES.get(key, key)
+
+
+def _reward_key_variants(reward_key: str) -> set[str]:
+    canonical = _normalize_reward_key(reward_key)
+    variants = {canonical}
+    for alias, target in _REWARD_KEY_ALIASES.items():
+        if target == canonical:
+            variants.add(alias)
+    return variants
+
+
+def _round_to_nearest_10(value: float) -> int:
+    return int(max(0, 10 * math.floor((float(value) / 10.0) + 0.5)))
+
+
+def _shop_item_cost(item: dict[str, object], gid: int, uid: int) -> int:
+    key = str(item.get("key", "")).strip().lower()
+    if key == "wheel_spin":
+        u = _udict(gid, uid)
+        p = int(u.get("prestige", 0))
+        return _round_to_nearest_10(float(prestige_cost(p)) * 0.20)
+    return max(0, int(item.get("cost", 0)))
 
 
 def _sanitize_reset_time(hour: int, minute: int) -> tuple[int, int]:
@@ -267,6 +298,13 @@ def _wheel_state(gid: int) -> dict:
     )
     if not isinstance(st.get("reward_overrides"), dict):
         st["reward_overrides"] = {}
+    else:
+        normalized: dict[str, bool] = {}
+        for raw_key, enabled in st["reward_overrides"].items():
+            key = _normalize_reward_key(raw_key)
+            if key in WHEEL_REWARDS:
+                normalized[key] = bool(enabled)
+        st["reward_overrides"] = normalized
     return st
 
 
@@ -402,11 +440,14 @@ def _resolve_shop_item(query: str) -> Optional[dict[str, object]]:
 
 
 def _reward_enabled(st: dict, reward_key: str) -> bool:
-    key = str(reward_key).strip().lower()
+    key = _normalize_reward_key(reward_key)
+    variants = _reward_key_variants(key)
     overrides = st.get("reward_overrides")
-    if isinstance(overrides, dict) and key in overrides:
-        return bool(overrides[key])
-    return key not in SPIN_DISABLED_REWARDS
+    if isinstance(overrides, dict):
+        for variant in variants:
+            if variant in overrides:
+                return bool(overrides[variant])
+    return not any(variant in SPIN_DISABLED_REWARDS for variant in variants)
 
 
 class SpinCog(commands.Cog):
@@ -425,7 +466,7 @@ class SpinCog(commands.Cog):
         return out
 
     def _short_label(self, reward_key: str) -> str:
-        key = str(reward_key).strip().lower()
+        key = _normalize_reward_key(reward_key)
         return _REWARD_SHORT_LABELS.get(key, key.replace("_", " ").title())
 
     def _pick_reward(self, st: dict) -> Optional[str]:
@@ -490,14 +531,14 @@ class SpinCog(commands.Cog):
     async def _apply_reward(self, ctx: commands.Context, reward_key: str) -> str:
         gid = int(ctx.guild.id)
         uid = int(ctx.author.id)
-        key = str(reward_key).strip().lower()
+        key = _normalize_reward_key(reward_key)
 
         if key == "bj_natural_next":
             charges = add_blackjack_natural_charges(gid, uid, charges=1)
             return f"Guaranteed natural blackjack added. Charges now: **{charges}**."
 
-        if key == "wordle_x4_next":
-            state = set_wordle_reward_multiplier(gid, uid, multiplier=4.0, charges=1)
+        if key == "wordle_x2_next":
+            state = set_wordle_reward_multiplier(gid, uid, multiplier=2.0, charges=1)
             return (
                 f"Next Wordle clear buff multiplier set to **x{state['multiplier']:.2f}** "
                 f"for **{state['charges']}** clear(s)."
@@ -688,7 +729,7 @@ class SpinCog(commands.Cog):
 
         buffs = wheel_buff_lines(gid, uid)
         lines = [
-            f"Daily spin result: **{reward_key}**",
+            f"Daily spin result: **{self._short_label(reward_key)}**",
             f"{reward_meta.get('label', '').strip()}",
             effect_text,
             f"Spins left: **{_available_spins(ust)}** "
@@ -837,10 +878,15 @@ class SpinCog(commands.Cog):
 
     @commands.command(name="shop")
     async def shop(self, ctx: commands.Context):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+
         lines = ["**Shop**"]
         for idx, item in enumerate(SHOP_ITEMS, start=1):
+            cost = _shop_item_cost(item, ctx.guild.id, ctx.author.id)
             lines.append(
-                f"`{idx}.` **{item['name']}** - **{int(item['cost'])} XP** - {item['description']}"
+                f"`{idx}.` **{item['name']}** - **{cost} XP** - {item['description']}"
             )
         lines.append(f"Buy with `{ctx.clean_prefix}buy <index|name> [amount]`.")
         await ctx.reply("\n".join(lines))
@@ -883,7 +929,7 @@ class SpinCog(commands.Cog):
             await ctx.reply(f"I couldn't find a shop item matching `{query}`.")
             return
 
-        cost_each = int(item.get("cost", 0))
+        cost_each = _shop_item_cost(item, ctx.guild.id, ctx.author.id)
         total_cost = max(0, cost_each * amount)
         u = _udict(ctx.guild.id, ctx.author.id)
         cur_xp = int(u.get("xp_f", u.get("xp", 0)))
@@ -976,7 +1022,7 @@ class SpinCog(commands.Cog):
             await ctx.reply("\n".join(lines))
             return
 
-        key = str(reward_key).strip().lower()
+        key = _normalize_reward_key(reward_key)
         if key not in WHEEL_REWARDS:
             await ctx.reply(f"Unknown reward key: `{key}`.")
             return

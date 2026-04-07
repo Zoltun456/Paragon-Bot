@@ -27,6 +27,8 @@ from .spin_support import (
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
 
+ROULETTE_CENTER_TIMEOUT_SECONDS = 60
+
 
 def _get_user_prestige(member: discord.Member) -> int:
     u = _udict(member.guild.id, member.id)
@@ -41,15 +43,31 @@ def _roulette_success_chance(shooter_prestige: int, target_prestige: int) -> flo
     return max(ROULETTE_MIN_SUCCESS_CHANCE, min(ROULETTE_MAX_SUCCESS_CHANCE, chance))
 
 
-def _timeout_seconds_for_chance(base_chance: float) -> int:
+def _lerp(start: float, end: float, ratio: float) -> float:
+    r = max(0.0, min(1.0, float(ratio)))
+    return float(start) + (float(end) - float(start)) * r
+
+
+def _timeout_seconds_for_chance(base_chance: float, *, success: bool) -> int:
     chance = max(ROULETTE_MIN_SUCCESS_CHANCE, min(ROULETTE_MAX_SUCCESS_CHANCE, float(base_chance)))
-    ratio = (chance - ROULETTE_MIN_SUCCESS_CHANCE) / (ROULETTE_MAX_SUCCESS_CHANCE - ROULETTE_MIN_SUCCESS_CHANCE)
-    seconds = int(
-        round(
-            ROULETTE_MAX_TIMEOUT_SECONDS
-            - (ROULETTE_MAX_TIMEOUT_SECONDS - ROULETTE_MIN_TIMEOUT_SECONDS) * ratio
-        )
-    )
+    center = max(ROULETTE_MIN_SUCCESS_CHANCE, min(ROULETTE_MAX_SUCCESS_CHANCE, ROULETTE_BASE_SUCCESS_CHANCE))
+    center_timeout = float(ROULETTE_CENTER_TIMEOUT_SECONDS)
+
+    if chance <= center:
+        span = max(1e-9, center - ROULETTE_MIN_SUCCESS_CHANCE)
+        ratio = (chance - ROULETTE_MIN_SUCCESS_CHANCE) / span
+        if success:
+            seconds = _lerp(ROULETTE_MAX_TIMEOUT_SECONDS, center_timeout, ratio)
+        else:
+            seconds = _lerp(ROULETTE_MIN_TIMEOUT_SECONDS, center_timeout, ratio)
+    else:
+        span = max(1e-9, ROULETTE_MAX_SUCCESS_CHANCE - center)
+        ratio = (chance - center) / span
+        if success:
+            seconds = _lerp(center_timeout, ROULETTE_MIN_TIMEOUT_SECONDS, ratio)
+        else:
+            seconds = _lerp(center_timeout, ROULETTE_MAX_TIMEOUT_SECONDS, ratio)
+    seconds = int(round(seconds))
     return max(ROULETTE_MIN_TIMEOUT_SECONDS, min(ROULETTE_MAX_TIMEOUT_SECONDS, seconds))
 
 
@@ -84,7 +102,7 @@ class RouletteCog(commands.Cog):
     - 30 minute personal cooldown after each use
     - Base success chance is 20%
     - Prestige gap changes that base by 2.5% per level, capped to 2.5%..60%
-    - Timeout scales from 3m down to 30s based on the base shot odds
+    - Same-prestige shots timeout for 60s either way; lower hit odds lengthen hits and shorten backfires, while higher hit odds do the reverse
     - Wheel aim bonus increases hit odds only and can push final odds above 60%
     """
 
@@ -132,7 +150,8 @@ class RouletteCog(commands.Cog):
         wheel_aim_bonus = float(consume_roulette_accuracy_bonus(ctx.guild.id, author.id))
         if wheel_aim_bonus > 0.0:
             chance = max(ROULETTE_MIN_SUCCESS_CHANCE, min(1.0, chance + wheel_aim_bonus))
-        timeout_seconds = _timeout_seconds_for_chance(base_chance)
+        hit_timeout_seconds = _timeout_seconds_for_chance(base_chance, success=True)
+        backfire_timeout_seconds = _timeout_seconds_for_chance(base_chance, success=False)
         base_chance_pct = base_chance * 100.0
         chance_pct = chance * 100.0
 
@@ -151,7 +170,7 @@ class RouletteCog(commands.Cog):
         success = random.random() < chance
         if success:
             timeout_bonus_seconds = get_roulette_timeout_bonus_seconds(ctx.guild.id, author.id)
-            final_timeout_seconds = timeout_seconds + timeout_bonus_seconds
+            final_timeout_seconds = hit_timeout_seconds + timeout_bonus_seconds
             applied = await _timeout_member(
                 target,
                 final_timeout_seconds,
@@ -215,7 +234,7 @@ class RouletteCog(commands.Cog):
 
         applied = await _timeout_member(
             author,
-            timeout_seconds,
+            backfire_timeout_seconds,
             f"Roulette by {author} (backfire, chance {chance_pct:.2f}%)",
         )
         record_game_fields(ctx.guild.id, author.id, "roulette", backfires=1)
@@ -228,7 +247,7 @@ class RouletteCog(commands.Cog):
             )
             await ctx.reply(
                 f"Roulette: {author.mention} backfired.\n"
-                f"{author.mention} timed out for **{_fmt_remaining(timeout_seconds)}**.\n"
+                f"{author.mention} timed out for **{_fmt_remaining(backfire_timeout_seconds)}**.\n"
                 f"{wheel_line}"
                 f"Base odds: **{base_chance_pct:.2f}%** | Final odds: **{chance_pct:.2f}%** (P{author_p} vs P{target_p}).\n"
                 f"Cooldown: **{_fmt_remaining(ROULETTE_COOLDOWN_SECONDS)}**."

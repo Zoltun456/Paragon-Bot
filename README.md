@@ -68,8 +68,8 @@ It provides:
 - `!roulette @user` (alias: `!r`)
 - No XP cost
 - 30 minute personal cooldown per user
-- Success chance scales by prestige and approaches a 50% cap
-- Timeout ranges from 10s to 5m based on prestige gap of loser vs winner
+- Success chance scales by prestige and caps at 60%
+- Same-prestige shots timeout for 60s either way; lower hit odds lengthen hits and shorten backfires, while higher hit odds do the reverse, ranging from 30s to 3m
 
 ### Admin
 - None
@@ -125,6 +125,7 @@ It provides:
 - `!spin` (alias: `!wheel`) once per reset cycle
 - `!spinstatus` (alias: `!wheelstatus`) to view spin lock + active wheel buffs
 - Wheel rewards now include game-specific buffs (blackjack, wordle, anagram, roulette, coinflip, lotto) plus XP/prestige rewards.
+- `!shop` lists the Wheel Spin item at 20% of your next prestige cost, rounded to the nearest 10 XP.
 
 ### Admin
 - `!spintime [time]` (view/set daily wheel reset time, ET; e.g. `!spintime 5:00am`)
