@@ -40,7 +40,7 @@ HELP_DESCRIPTIONS = {
     "spintime": "Admin: view or set daily spin reset time (ET).",
     "spinrewards": "Admin: list and toggle spin rewards by key.",
     "spinreset": "Admin: reset current-cycle spin usage for a user.",
-    "prestige": "Spend XP to increase your prestige tier.",
+    "prestige": "Show the prestige board or spend XP to increase a prestige tier; add all to prestige as many times as possible.",
     "setp": "Admin: set a user's prestige tier.",
     "blackjack": "Join/leave the blackjack table, deal hands, and play until you lose.",
     "bjreset": "Admin: reset blackjack table state and refunds.",

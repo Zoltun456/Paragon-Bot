@@ -114,9 +114,12 @@ It provides:
 ## PrestigeCog
 
 ### Non-Admin
-- `!prestige [@self]` (alias: `!p`)
+- `!prestige [@self] [all]` (alias: `!p`)
+- `!p` with no arguments shows the prestige board
+- `!p @self all` prestiges you as many times as your current XP allows
 
 ### Admin
+- `!p @user [all]` uses that user's current XP; `all` prestiges them as many times as possible
 - `!setp <amount> @user`
 
 ## SpinCog
