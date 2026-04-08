@@ -125,7 +125,7 @@ It provides:
 ## SpinCog
 
 ### Non-Admin
-- `!spin` (alias: `!wheel`) once per reset cycle
+- `!spin [all]` (alias: `!wheel`) for a normal daily spin, or use `all` to instantly spend every available daily + bonus spin with no animation
 - `!spinstatus` (alias: `!wheelstatus`) to view spin lock + active wheel buffs
 - Wheel rewards now include game-specific buffs (blackjack, wordle, anagram, roulette, coinflip, lotto) plus XP/prestige rewards.
 - `!shop` lists the Wheel Spin item at 20% of your next prestige cost, rounded to the nearest 10 XP.

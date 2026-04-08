@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from difflib import get_close_matches
 import math
 import random
@@ -450,6 +451,21 @@ def _reward_enabled(st: dict, reward_key: str) -> bool:
     return not any(variant in SPIN_DISABLED_REWARDS for variant in variants)
 
 
+def _reward_result(
+    message: str,
+    *,
+    flat_xp: int = 0,
+    prestige_gain: int = 0,
+    bonus_spins_gained: int = 0,
+) -> dict[str, object]:
+    return {
+        "message": str(message),
+        "flat_xp": max(0, int(flat_xp)),
+        "prestige_gain": max(0, int(prestige_gain)),
+        "bonus_spins_gained": max(0, int(bonus_spins_gained)),
+    }
+
+
 class SpinCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -528,87 +544,94 @@ class SpinCog(commands.Cog):
         except Exception:
             return
 
-    async def _apply_reward(self, ctx: commands.Context, reward_key: str) -> str:
+    async def _apply_reward(self, ctx: commands.Context, reward_key: str) -> dict[str, object]:
         gid = int(ctx.guild.id)
         uid = int(ctx.author.id)
         key = _normalize_reward_key(reward_key)
 
         if key == "bj_natural_next":
             charges = add_blackjack_natural_charges(gid, uid, charges=1)
-            return f"Guaranteed natural blackjack added. Charges now: **{charges}**."
+            return _reward_result(f"Guaranteed natural blackjack added. Charges now: **{charges}**.")
 
         if key == "wordle_x2_next":
             state = set_wordle_reward_multiplier(gid, uid, multiplier=2.0, charges=1)
-            return (
+            return _reward_result(
                 f"Next Wordle clear buff multiplier set to **x{state['multiplier']:.2f}** "
                 f"for **{state['charges']}** clear(s)."
             )
 
         if key == "anagram_x3_next":
             state = set_anagram_reward_multiplier(gid, uid, multiplier=3.0, charges=1)
-            return (
+            return _reward_result(
                 f"Next anagram solve buff multiplier set to **x{state['multiplier']:.2f}** "
                 f"for **{state['charges']}** solve(s)."
             )
 
         if key == "roulette_aim_next":
             state = set_roulette_accuracy_bonus(gid, uid, bonus=0.20, charges=1)
-            return (
+            return _reward_result(
                 f"Next roulette shot aim boosted by **+{state['bonus'] * 100.0:.1f}%** "
                 f"for **{state['charges']}** use(s)."
             )
 
         if key == "roulette_shield_next":
             charges = add_roulette_backfire_shield(gid, uid, charges=1)
-            return f"Roulette backfire shield granted. Charges now: **{charges}**."
+            return _reward_result(f"Roulette backfire shield granted. Charges now: **{charges}**.")
 
         if key == "coinflip_edge_next":
             state = set_coinflip_win_edge(gid, uid, bonus=0.22, charges=1)
-            return (
+            return _reward_result(
                 f"Next coinflip gets **+{state['bonus'] * 100.0:.1f}%** win edge "
                 f"for **{state['charges']}** match(es)."
             )
 
         if key == "lotto_ticket_surge_next":
             state = set_lotto_bonus_tickets_pct(gid, uid, pct=0.50, charges=1)
-            return (
+            return _reward_result(
                 f"Next lotto buy gains **+{state['pct'] * 100.0:.0f}%** bonus tickets "
                 f"for **{state['charges']}** purchase(s)."
             )
 
         if key == "lotto_jackpot_amp_next":
             state = set_lotto_jackpot_boost_multiplier(gid, uid, multiplier=1.75, charges=1)
-            return (
+            return _reward_result(
                 f"Next lotto jackpot boost amp set to **x{state['multiplier']:.2f}** "
                 f"for **{state['charges']}** jackpot(s)."
             )
 
         if key == "mulligan_next":
             charges = add_mulligan_charges(gid, uid, charges=1)
-            return f"Mulligan granted. Your next debuff is blocked. Charges now: **{charges}**."
+            return _reward_result(f"Mulligan granted. Your next debuff is blocked. Charges now: **{charges}**.")
 
         if key == "wordle_hint_next":
             charges = add_wordle_hint_charges(gid, uid, charges=1)
-            return (
+            return _reward_result(
                 f"Wordle hint queued. Use `!wordle` to view it. "
                 f"Queued hint letters for your next unfinished Wordle: **{charges}**."
             )
 
         if key == "drain_item":
             charges = add_drain_charges(gid, uid, charges=1)
-            return f"Drain item granted. Use `!drain` when you're in voice. Charges now: **{charges}**."
+            return _reward_result(
+                f"Drain item granted. Use `!drain` when you're in voice. Charges now: **{charges}**."
+            )
 
         if key == "bonus_spins_2":
             spin_state = _spin_user_state(gid, uid)
             bonus_total = _add_bonus_spins(spin_state, 2)
-            return (
-                f"Bonus spins granted: **+2**. "
-                f"Bonus bank now: **{bonus_total}** | Available spins: **{_available_spins(spin_state)}**."
+            return _reward_result(
+                (
+                    f"Bonus spins granted: **+2**. "
+                    f"Bonus bank now: **{bonus_total}** | Available spins: **{_available_spins(spin_state)}**."
+                ),
+                bonus_spins_gained=2,
             )
 
         if key == "roulette_timeout_plus_60":
             total_seconds = add_roulette_timeout_bonus_seconds(gid, uid, seconds=60)
-            return f"Next successful roulette timeout gets **+60s**. Total queued timeout bonus: **+{total_seconds}s**."
+            return _reward_result(
+                f"Next successful roulette timeout gets **+60s**. Total queued timeout bonus: **+{total_seconds}s**."
+            )
 
         if key == "xp_boost_minor":
             boost = await grant_fixed_boost(
@@ -618,7 +641,7 @@ class SpinCog(commands.Cog):
                 source="wheel xp_boost_minor",
                 persist=False,
             )
-            return f"XP boost granted: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**."
+            return _reward_result(f"XP boost granted: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**.")
 
         if key == "xp_boost_major":
             boost = await grant_fixed_boost(
@@ -628,7 +651,7 @@ class SpinCog(commands.Cog):
                 source="wheel xp_boost_major",
                 persist=False,
             )
-            return f"XP boost granted: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**."
+            return _reward_result(f"XP boost granted: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**.")
 
         if key == "xp_boost_jackpot":
             boost = await grant_fixed_boost(
@@ -638,7 +661,7 @@ class SpinCog(commands.Cog):
                 source="wheel xp_boost_jackpot",
                 persist=False,
             )
-            return f"XP boost jackpot: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**."
+            return _reward_result(f"XP boost jackpot: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**.")
 
         if key in {"flat_xp_25pct", "flat_xp_60pct", "flat_xp_120pct"}:
             u = _udict(gid, uid)
@@ -652,7 +675,10 @@ class SpinCog(commands.Cog):
             pct = float(pct_map[key])
             gain = max(1, int(round(cost * pct)))
             await apply_xp_change(ctx.author, gain, source=f"wheel {key}")
-            return f"Flat XP awarded: **+{gain} XP** ({int(round(pct * 100.0))}% of prestige cost **{cost}**)."
+            return _reward_result(
+                f"Flat XP awarded: **+{gain} XP** ({int(round(pct * 100.0))}% of prestige cost **{cost}**).",
+                flat_xp=gain,
+            )
 
         if key in {"prestige_plus_1", "prestige_plus_2"}:
             add_levels = 1 if key == "prestige_plus_1" else 2
@@ -664,23 +690,77 @@ class SpinCog(commands.Cog):
             base_rate = prestige_base_rate(new_p)
             mult = prestige_multiplier(new_p)
             passive_rate = prestige_passive_rate(new_p)
-            return (
-                f"Prestige increased by **+{add_levels}** to **P{new_p}**. "
-                f"Passive rate now **{passive_rate:.2f} XP/min** "
-                f"(base **{base_rate:.2f}**, prestige x**{mult:.3f}**)."
+            return _reward_result(
+                (
+                    f"Prestige increased by **+{add_levels}** to **P{new_p}**. "
+                    f"Passive rate now **{passive_rate:.2f} XP/min** "
+                    f"(base **{base_rate:.2f}**, prestige x**{mult:.3f}**)."
+                ),
+                prestige_gain=add_levels,
             )
 
         if key == "clear_debuffs":
             charges = add_cleanse_charges(gid, uid, charges=1)
-            return f"Cleanse item granted. Use `!cleanse` when you want. Charges now: **{charges}**."
+            return _reward_result(f"Cleanse item granted. Use `!cleanse` when you want. Charges now: **{charges}**.")
 
         # Should not happen when reward table is valid.
-        return "No effect was applied."
+        return _reward_result("No effect was applied.")
 
-    @commands.command(name="spin", aliases=["wheel"])
-    async def spin(self, ctx: commands.Context):
+    async def _perform_spin_roll(
+        self,
+        ctx: commands.Context,
+        wheel_state: dict,
+        user_state: dict,
+        cycle: str,
+        *,
+        animate: bool,
+    ) -> Optional[dict[str, object]]:
+        reward_key = self._pick_reward(wheel_state)
+        if not reward_key:
+            return None
+        if not _consume_spin(user_state):
+            return None
+        if animate:
+            await self._animate_spin(ctx, wheel_state, reward_key)
+
+        reward_meta = WHEEL_REWARDS.get(reward_key, {})
+        reward_result = await self._apply_reward(ctx, reward_key)
+        user_state["cycle_key"] = cycle
+        user_state["last_reward"] = reward_key
+        user_state["last_spin_ts"] = int(time.time())
+
+        gid = int(ctx.guild.id)
+        uid = int(ctx.author.id)
+        record_game_fields(gid, uid, "spin", spins=1)
+        record_game_fields(gid, uid, "spin", **{f"reward_{reward_key}": 1})
+
+        return {
+            "reward_key": reward_key,
+            "reward_label": str(reward_meta.get("label", "")).strip(),
+            "effect_text": str(reward_result.get("message", "No effect was applied.")),
+            "flat_xp": int(reward_result.get("flat_xp", 0)),
+            "prestige_gain": int(reward_result.get("prestige_gain", 0)),
+            "bonus_spins_gained": int(reward_result.get("bonus_spins_gained", 0)),
+        }
+
+    def _reward_roll_summary_lines(self, reward_counts: Counter[str]) -> list[str]:
+        lines: list[str] = []
+        for key in WHEEL_REWARDS:
+            count = int(reward_counts.get(key, 0))
+            if count <= 0:
+                continue
+            lines.append(f"- **{self._short_label(key)}** x{count}")
+        return lines
+
+    @commands.command(name="spin", aliases=["wheel"], usage="[all]")
+    async def spin(self, ctx: commands.Context, mode: Optional[str] = None):
         if ctx.guild is None:
             await ctx.reply("This command can only be used in a server.")
+            return
+
+        mode_text = (mode or "").strip().lower()
+        if mode_text and mode_text != "all":
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}spin [all]`")
             return
 
         gid = int(ctx.guild.id)
@@ -708,30 +788,70 @@ class SpinCog(commands.Cog):
             await ctx.reply("\n".join(lines))
             return
 
-        reward_key = self._pick_reward(st)
-        if not reward_key:
+        if not self._eligible_rewards(st):
             await ctx.reply("Spin wheel has no enabled rewards. Ask an admin to enable rewards.")
             return
 
-        _consume_spin(ust)
-        await self._animate_spin(ctx, st, reward_key)
+        if mode_text == "all":
+            reward_counts: Counter[str] = Counter()
+            total_spins = 0
+            total_flat_xp = 0
+            total_prestige_gain = 0
+            total_bonus_spins_gained = 0
 
-        reward_meta = WHEEL_REWARDS.get(reward_key, {})
-        effect_text = await self._apply_reward(ctx, reward_key)
+            while _available_spins(ust) > 0:
+                spin_result = await self._perform_spin_roll(ctx, st, ust, cycle, animate=False)
+                if not spin_result:
+                    await ctx.reply("Spin wheel has no enabled rewards. Ask an admin to enable rewards.")
+                    return
+                reward_key = str(spin_result["reward_key"])
+                reward_counts[reward_key] += 1
+                total_spins += 1
+                total_flat_xp += int(spin_result.get("flat_xp", 0))
+                total_prestige_gain += int(spin_result.get("prestige_gain", 0))
+                total_bonus_spins_gained += int(spin_result.get("bonus_spins_gained", 0))
 
-        ust["cycle_key"] = cycle
-        ust["last_reward"] = reward_key
-        ust["last_spin_ts"] = int(time.time())
+            await save_data()
 
-        record_game_fields(gid, uid, "spin", spins=1)
-        record_game_fields(gid, uid, "spin", **{f"reward_{reward_key}": 1})
+            buffs = wheel_buff_lines(gid, uid)
+            lines = [
+                f"Instant wheel sweep complete for cycle **{cycle}**.",
+                f"Spent **{total_spins}** spin(s) and applied all rolled rewards immediately.",
+                "Rewards rolled:",
+            ]
+            lines.extend(self._reward_roll_summary_lines(reward_counts))
+            if total_flat_xp > 0:
+                lines.append(f"Flat XP awarded total: **+{total_flat_xp} XP**.")
+            if total_prestige_gain > 0:
+                lines.append(f"Prestige gained total: **+{total_prestige_gain}**.")
+            if total_bonus_spins_gained > 0:
+                lines.append(
+                    f"Bonus spins generated during the sweep: **+{total_bonus_spins_gained}** (already consumed)."
+                )
+            if any(reward_counts.get(key, 0) > 0 for key in ("xp_boost_minor", "xp_boost_major", "xp_boost_jackpot")):
+                lines.append(f"XP boosts from this sweep are active now. Use `{ctx.clean_prefix}boosts` to inspect them.")
+            lines.append(
+                f"Spins left: **{_available_spins(ust)}** "
+                f"(daily **{int(ust.get('daily_spins_remaining', 0))}**, bonus **{int(ust.get('bonus_spins', 0))}**)."
+            )
+            lines.append(f"Next reset: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**.")
+            if buffs:
+                lines.append("Active wheel buffs:")
+                lines.extend(f"- {line}" for line in buffs)
+            await ctx.reply("\n".join(lines))
+            return
+
+        spin_result = await self._perform_spin_roll(ctx, st, ust, cycle, animate=True)
+        if not spin_result:
+            await ctx.reply("Spin wheel has no enabled rewards. Ask an admin to enable rewards.")
+            return
         await save_data()
 
         buffs = wheel_buff_lines(gid, uid)
         lines = [
-            f"Daily spin result: **{self._short_label(reward_key)}**",
-            f"{reward_meta.get('label', '').strip()}",
-            effect_text,
+            f"Daily spin result: **{self._short_label(str(spin_result['reward_key']))}**",
+            str(spin_result.get("reward_label", "")).strip(),
+            str(spin_result.get("effect_text", "No effect was applied.")),
             f"Spins left: **{_available_spins(ust)}** "
             f"(daily **{int(ust.get('daily_spins_remaining', 0))}**, bonus **{int(ust.get('bonus_spins', 0))}**).",
             f"Next reset: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**.",

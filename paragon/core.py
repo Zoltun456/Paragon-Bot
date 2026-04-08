@@ -31,7 +31,7 @@ HELP_DESCRIPTIONS = {
     "poplatto": "Admin: force an immediate lottery draw.",
     "lottotime": "Admin: view or set daily lottery draw time (ET).",
     "lottotoggle": "Admin: enable or disable the lottery.",
-    "spin": "Spin a once-per-reset daily wheel for random buffs and rewards.",
+    "spin": "Spin your daily wheel, or use `all` to spend every available daily and bonus spin instantly.",
     "spinstatus": "Show your daily spin status and active wheel buffs.",
     "cleanse": "Use a stored Cleanse item to remove your active debuffs.",
     "drain": "Use a stored Drain item to debuff everyone else in your voice call and boost yourself.",
