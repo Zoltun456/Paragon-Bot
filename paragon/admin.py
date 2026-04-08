@@ -1,3 +1,4 @@
+import time
 from typing import Union
 
 import discord
@@ -13,6 +14,8 @@ from .xp import (
     apply_xp_change,
     get_gain_state,
 )
+
+SOFTRESET_CONFIRM_TTL_SECONDS = 30
 
 
 # ---- Helpers ----
@@ -30,9 +33,64 @@ def _set_member_xp_fields(member: discord.Member, xp_amount: int, *, source: str
         return old_level, u["level"]
 
 
+def _clear_spin_effect_rows(u: dict, key: str) -> int:
+        rows = u.get(key)
+        if not isinstance(rows, list):
+            u[key] = []
+            return 0
+
+        kept = []
+        removed = 0
+        for row in rows:
+            src = ""
+            if isinstance(row, dict):
+                src = str(row.get("source", "")).strip().lower()
+            if src == "wheel" or src.startswith("wheel "):
+                removed += 1
+                continue
+            kept.append(row)
+
+        u[key] = kept
+        return removed
+
+
+def _soft_reset_member_state(member: discord.Member) -> dict[str, int]:
+        u = _udict(member.guild.id, member.id)
+
+        removed_boosts = _clear_spin_effect_rows(u, "xp_boosts")
+        removed_debuffs = _clear_spin_effect_rows(u, "xp_debuffs")
+
+        bonus_spins_removed = 0
+        spin_daily = u.get("spin_daily")
+        if isinstance(spin_daily, dict):
+            bonus_spins_removed = max(0, int(spin_daily.get("bonus_spins", 0)))
+            spin_daily["bonus_spins"] = 0
+            spin_daily["last_reward"] = ""
+
+        had_wheel_buffs = 1 if isinstance(u.get("wheel_buffs"), dict) and u.get("wheel_buffs") else 0
+        u.pop("wheel_buffs", None)
+
+        old_xp = int(u.get("xp_f", u.get("xp", 0)))
+        old_prestige = max(0, int(u.get("prestige", 0)))
+        u["xp_f"] = 0.0
+        u["xp"] = 0
+        u["level"] = _compute_level_from_total_xp(0)
+        u["prestige"] = 0
+
+        return {
+            "old_xp": old_xp,
+            "old_prestige": old_prestige,
+            "bonus_spins_removed": bonus_spins_removed,
+            "wheel_buffs_cleared": had_wheel_buffs,
+            "boosts_removed": removed_boosts,
+            "debuffs_removed": removed_debuffs,
+        }
+
+
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._pending_softresets: dict[tuple[int, int, int], float] = {}
 
     @commands.command(name="role")
     @owner_only()
@@ -224,3 +282,56 @@ class AdminCog(commands.Cog):
         total = int(u.get("xp_f", u.get("xp", 0)))
         sign = "+" if delta_xp > 0 else ""
         await ctx.reply(f"Adjusted {member.display_name} by **{sign}{delta_xp} XP**. New total: **{total} XP**.")
+
+    @commands.command(name="softreset")
+    @owner_only()
+    async def softreset(self, ctx: commands.Context, member: discord.Member):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+        if member.bot:
+            await ctx.reply("Bots do not have player progression to soft reset.")
+            return
+
+        now = time.monotonic()
+        self._pending_softresets = {
+            key: expiry for key, expiry in self._pending_softresets.items() if expiry > now
+        }
+        pending_key = (int(ctx.guild.id), int(ctx.author.id), int(member.id))
+        expires_at = self._pending_softresets.get(pending_key, 0.0)
+
+        if expires_at <= now:
+            self._pending_softresets[pending_key] = now + SOFTRESET_CONFIRM_TTL_SECONDS
+            await ctx.reply(
+                f"Soft reset is armed for **{member.display_name}**. "
+                f"Send `{ctx.clean_prefix}softreset {member.mention}` again within "
+                f"**{SOFTRESET_CONFIRM_TTL_SECONDS} seconds** to confirm."
+            )
+            return
+
+        self._pending_softresets.pop(pending_key, None)
+        result = _soft_reset_member_state(member)
+        await save_data()
+
+        try:
+            await sync_level_roles(member, int(_udict(ctx.guild.id, member.id).get("level", 1)))
+        except Exception:
+            pass
+        await enforce_level6_exclusive(ctx.guild)
+
+        spin_lines = []
+        if result["bonus_spins_removed"] > 0:
+            spin_lines.append(f"bonus spins removed **{result['bonus_spins_removed']}**")
+        if result["wheel_buffs_cleared"] > 0:
+            spin_lines.append("wheel item/buff charges cleared")
+        if result["boosts_removed"] > 0:
+            spin_lines.append(f"wheel boosts removed **{result['boosts_removed']}**")
+        if result["debuffs_removed"] > 0:
+            spin_lines.append(f"wheel debuffs removed **{result['debuffs_removed']}**")
+        spin_summary = ", ".join(spin_lines) if spin_lines else "no active wheel rewards were present"
+
+        await ctx.reply(
+            f"Soft reset applied to **{member.display_name}**. "
+            f"XP **{result['old_xp']} -> 0**, prestige **{result['old_prestige']} -> 0**, "
+            f"and {spin_summary}. Stats were left intact."
+        )

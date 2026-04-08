@@ -66,6 +66,7 @@ HELP_DESCRIPTIONS = {
     "xprate": "Admin: show passive XP/min rates.",
     "setxp": "Admin: set total XP for users or roles.",
     "adjust": "Admin: add or subtract XP from a user.",
+    "softreset": "Admin: reset a user's current XP, prestige, and wheel rewards without deleting stats.",
 }
 
 def _settings(gid: int) -> dict:

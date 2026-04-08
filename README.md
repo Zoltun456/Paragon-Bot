@@ -246,6 +246,8 @@ It provides:
 - `!xprate [@user ...]`
 - `!setxp <targets...> <xp>`
 - `!adjust @user <+amount|-amount>`
+- `!softreset @user`
+  Send it twice within 30 seconds to confirm. Clears current XP, prestige, and wheel rewards without deleting recorded stats.
 
 ## Loaded Cogs
 
