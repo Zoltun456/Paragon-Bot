@@ -52,16 +52,34 @@ def _reward_to_pct(reward: int) -> float:
 
 def _state(gid: int) -> dict:
     g = _gdict(gid)
-    return g.setdefault(
+    st = g.setdefault(
         "surprise",
         {
             "next_at": None,
             "event_id": 0,
             "reward": 0,
+            "pending_rewards": [],
             "claimed": [],
             "active": False,
         },
     )
+    st.setdefault("next_at", None)
+    st.setdefault("event_id", 0)
+    st.setdefault("reward", 0)
+    st.setdefault("claimed", [])
+    pending = st.get("pending_rewards")
+    if not isinstance(pending, list):
+        pending = []
+        st["pending_rewards"] = pending
+
+    # Migrate legacy single-drop state into the new stacked queue.
+    if bool(st.get("active")) and not pending:
+        reward = int(st.get("reward", 0)) or _rand_xp()
+        pending.append(int(reward))
+        st["reward"] = int(reward)
+
+    st["active"] = bool(pending)
+    return st
 
 
 def _iso(dt: datetime) -> str:
@@ -95,10 +113,16 @@ class SurpriseCog(commands.Cog):
                 await save_data()
                 continue
             if now >= next_at:
+                reward = _rand_xp()
+                pending = st.get("pending_rewards")
+                if not isinstance(pending, list):
+                    pending = []
+                    st["pending_rewards"] = pending
                 st["event_id"] = int(now.timestamp())
-                st["reward"] = _rand_xp()
+                pending.append(int(reward))
+                st["reward"] = int(reward)
                 st["claimed"] = []
-                st["active"] = True
+                st["active"] = bool(pending)
                 st["next_at"] = _iso(now + timedelta(minutes=_rand_minutes()))
                 await self._announce_drop(guild)
                 await save_data()
@@ -110,57 +134,69 @@ class SurpriseCog(commands.Cog):
         perms = ch.permissions_for(guild.me)
         if not perms.send_messages:
             return
+        st = _state(guild.id)
+        pending_count = max(0, len(st.get("pending_rewards", [])))
+        stack_line = f" Unclaimed stack: **{pending_count}**." if pending_count > 1 else ""
         msg = f"@here Surprise Drop! Type `{COMMAND_PREFIX}claim` to trigger a timed XP boost."
+        msg += stack_line
         try:
             await ch.send(msg, allowed_mentions=discord.AllowedMentions(everyone=True))
         except Exception:
             try:
-                await ch.send(f"Surprise Drop! Type `{COMMAND_PREFIX}claim` to trigger a timed XP boost.")
+                await ch.send(
+                    f"Surprise Drop! Type `{COMMAND_PREFIX}claim` to trigger a timed XP boost.{stack_line}"
+                )
             except Exception:
                 pass
 
     @commands.command(name="claim")
     async def claim(self, ctx: commands.Context):
         st = _state(ctx.guild.id)
+        pending_raw = st.get("pending_rewards")
+        pending_rewards = list(pending_raw) if isinstance(pending_raw, list) else []
 
-        if not st.get("active"):
+        if not pending_rewards:
             await ctx.reply("There is not an active drop right now. Hang tight for the next one.")
             return
 
-        if st.get("claimed"):
-            claimer_id = st["claimed"][0]
-            claimer = ctx.guild.get_member(int(claimer_id)) if claimer_id else None
-            name = claimer.display_name if claimer else f"User {claimer_id}"
-            await ctx.reply(f"Too late. The drop was already claimed by **{name}**.")
-            return
-
         uid_s = str(ctx.author.id)
-        st["claimed"].append(uid_s)
+        st["claimed"] = [uid_s]
+        st["pending_rewards"] = []
         st["active"] = False
+        st["reward"] = 0
         await save_data()
 
-        reward = int(st.get("reward", 0)) or _rand_xp()
-        pct = _reward_to_pct(reward)
+        rewards = [int(reward) if int(reward) > 0 else _rand_xp() for reward in pending_rewards]
+        claim_count = len(rewards)
+        total_reward = sum(rewards)
+        total_pct = sum(_reward_to_pct(reward) for reward in rewards)
         boost = await grant_fixed_boost(
             ctx.author,
-            pct=pct,
+            pct=total_pct,
             minutes=SURPRISE_BOOST_MINUTES,
             source="surprise claim",
-            reward_seed_xp=reward,
+            reward_seed_xp=total_reward,
         )
         record_game_fields(
             ctx.guild.id,
             ctx.author.id,
             "surprise",
-            claims=1,
-            boost_seed_xp_total=reward,
+            claims=claim_count,
+            boost_seed_xp_total=total_reward,
             boost_percent_total=boost["percent"],
-            boost_minutes_total=boost["minutes"],
+            boost_minutes_total=(boost["minutes"] * claim_count),
         )
         await enforce_level6_exclusive(ctx.guild)
+        if claim_count == 1:
+            await ctx.reply(
+                f"{ctx.author.mention} was the fastest! Boost gained: "
+                f"**+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**."
+            )
+            return
+
         await ctx.reply(
-            f"{ctx.author.mention} was the fastest! Boost gained: "
-            f"**+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**."
+            f"{ctx.author.mention} claimed **{claim_count}** stacked surprise drops at once! "
+            f"Combined boost gained: **+{boost['percent']:.1f}% XP/min** for **{boost['minutes']}m**."
         )
 
     @commands.command(name="claimnow")
@@ -168,11 +204,17 @@ class SurpriseCog(commands.Cog):
     async def claimnow(self, ctx: commands.Context):
         st = _state(ctx.guild.id)
         now = _utcnow()
+        reward = _rand_xp()
+        pending = st.get("pending_rewards")
+        if not isinstance(pending, list):
+            pending = []
+            st["pending_rewards"] = pending
         st["event_id"] = int(now.timestamp())
-        st["reward"] = _rand_xp()
+        pending.append(int(reward))
+        st["reward"] = int(reward)
         st["claimed"] = []
-        st["active"] = True
+        st["active"] = bool(pending)
         st["next_at"] = _iso(now + timedelta(minutes=_rand_minutes()))
         await save_data()
         await self._announce_drop(ctx.guild)
-        await ctx.reply("Triggered a surprise drop and reset the timer.")
+        await ctx.reply("Triggered a surprise drop, stacked it onto any existing drops, and reset the timer.")
