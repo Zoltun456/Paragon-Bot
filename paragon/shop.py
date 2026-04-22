@@ -7,7 +7,24 @@ from typing import Optional
 
 from discord.ext import commands
 
-from .config import SPIN_RESET_HOUR, SPIN_RESET_MINUTE
+from .config import (
+    SHOP_CLEANSE_START_PCT,
+    SHOP_CLEANSE_STEP_GROWTH_PCT,
+    SHOP_CLEANSE_STEP_PCT,
+    SHOP_COST_ROUND_STEP,
+    SHOP_ROULETTE_ACCURACY_BONUS_CHANCE,
+    SHOP_ROULETTE_ACCURACY_START_PCT,
+    SHOP_ROULETTE_ACCURACY_STEP_GROWTH_PCT,
+    SHOP_ROULETTE_ACCURACY_STEP_PCT,
+    SHOP_ROULETTE_SHIELD_START_PCT,
+    SHOP_ROULETTE_SHIELD_STEP_GROWTH_PCT,
+    SHOP_ROULETTE_SHIELD_STEP_PCT,
+    SHOP_WHEEL_SPIN_START_PCT,
+    SHOP_WHEEL_SPIN_STEP_GROWTH_PCT,
+    SHOP_WHEEL_SPIN_STEP_PCT,
+    SPIN_RESET_HOUR,
+    SPIN_RESET_MINUTE,
+)
 from .spin import (
     _add_bonus_spins,
     _available_spins,
@@ -26,14 +43,22 @@ from .storage import _udict, save_data
 from .xp import apply_xp_change, prestige_cost
 
 
+def _fmt_pct(value: float) -> str:
+    pct = float(value)
+    if abs(pct - round(pct)) < 1e-9:
+        return f"{int(round(pct))}%"
+    return f"{pct:.1f}%"
+
+
 SHOP_ITEMS: list[dict[str, object]] = [
     {
         "key": "wheel_spin",
         "name": "Wheel Spin",
         "aliases": ["wheel", "spin", "wheelspin"],
         "description": (
-            "Adds 1 bonus wheel spin. Starts at 40% of your next prestige and "
-            "ramps harder each purchase every reset, rounded to the nearest 10 XP."
+            f"Adds 1 bonus wheel spin. Starts at {_fmt_pct(SHOP_WHEEL_SPIN_START_PCT)} "
+            f"of your next prestige and ramps harder each purchase every reset, "
+            f"rounded to the nearest {max(1, int(SHOP_COST_ROUND_STEP)):,} XP."
         ),
     },
     {
@@ -42,7 +67,8 @@ SHOP_ITEMS: list[dict[str, object]] = [
         "aliases": ["debuff_cleanse", "debuffs", "cleanse_item"],
         "description": (
             "Adds 1 Cleanse charge. Use `!cleanse` to remove all current debuffs. "
-            "Starts at 50% of your next prestige and ramps each purchase every reset."
+            f"Starts at {_fmt_pct(SHOP_CLEANSE_START_PCT)} of your next prestige and "
+            "ramps each purchase every reset."
         ),
     },
     {
@@ -50,8 +76,9 @@ SHOP_ITEMS: list[dict[str, object]] = [
         "name": "Roulette Shield",
         "aliases": ["shield", "roulette_backfire_shield", "backfire_shield"],
         "description": (
-            "Adds 1 roulette backfire shield. Starts at 60% of your next prestige "
-            "and ramps each purchase every reset."
+            "Adds 1 roulette backfire shield. Starts at "
+            f"{_fmt_pct(SHOP_ROULETTE_SHIELD_START_PCT)} of your next prestige and "
+            "ramps each purchase every reset."
         ),
     },
     {
@@ -59,22 +86,42 @@ SHOP_ITEMS: list[dict[str, object]] = [
         "name": "Roulette Accuracy",
         "aliases": ["aim", "roulette_aim", "accuracy"],
         "description": (
-            "Adds 1 roulette aim charge for +20% absolute success chance on your "
-            "next roulette shot. Starts at 70% of your next prestige and ramps each purchase every reset."
+            "Adds 1 roulette aim charge for "
+            f"+{_fmt_pct(SHOP_ROULETTE_ACCURACY_BONUS_CHANCE * 100.0)} absolute "
+            "success chance on your next roulette shot. Starts at "
+            f"{_fmt_pct(SHOP_ROULETTE_ACCURACY_START_PCT)} of your next prestige "
+            "and ramps each purchase every reset."
         ),
     },
 ]
 
 SHOP_ITEM_CURVES: dict[str, dict[str, int]] = {
-    "wheel_spin": {"start_pct": 40, "step_pct": 15, "step_growth_pct": 5},
-    "cleanse": {"start_pct": 50, "step_pct": 20, "step_growth_pct": 5},
-    "roulette_shield": {"start_pct": 60, "step_pct": 25, "step_growth_pct": 5},
-    "roulette_accuracy": {"start_pct": 70, "step_pct": 30, "step_growth_pct": 5},
+    "wheel_spin": {
+        "start_pct": SHOP_WHEEL_SPIN_START_PCT,
+        "step_pct": SHOP_WHEEL_SPIN_STEP_PCT,
+        "step_growth_pct": SHOP_WHEEL_SPIN_STEP_GROWTH_PCT,
+    },
+    "cleanse": {
+        "start_pct": SHOP_CLEANSE_START_PCT,
+        "step_pct": SHOP_CLEANSE_STEP_PCT,
+        "step_growth_pct": SHOP_CLEANSE_STEP_GROWTH_PCT,
+    },
+    "roulette_shield": {
+        "start_pct": SHOP_ROULETTE_SHIELD_START_PCT,
+        "step_pct": SHOP_ROULETTE_SHIELD_STEP_PCT,
+        "step_growth_pct": SHOP_ROULETTE_SHIELD_STEP_GROWTH_PCT,
+    },
+    "roulette_accuracy": {
+        "start_pct": SHOP_ROULETTE_ACCURACY_START_PCT,
+        "step_pct": SHOP_ROULETTE_ACCURACY_STEP_PCT,
+        "step_growth_pct": SHOP_ROULETTE_ACCURACY_STEP_GROWTH_PCT,
+    },
 }
 
 
-def _round_to_nearest_10(value: float) -> int:
-    return int(max(0, 10 * math.floor((float(value) / 10.0) + 0.5)))
+def _round_to_shop_step(value: float) -> int:
+    step = max(1, int(SHOP_COST_ROUND_STEP))
+    return int(max(0, step * math.floor((float(value) / float(step)) + 0.5)))
 
 
 def _shop_cycle(gid: int) -> str:
@@ -146,7 +193,7 @@ def _shop_item_costs(item: dict[str, object], gid: int, uid: int, amount: int = 
     for offset in range(buy_count):
         purchase_number = bought_this_cycle + offset + 1
         pct = _shop_item_cost_percent(item_key, purchase_number) / 100.0
-        costs.append(_round_to_nearest_10(float(base_cost) * pct))
+        costs.append(_round_to_shop_step(float(base_cost) * pct))
     return costs
 
 
@@ -316,7 +363,12 @@ class ShopCog(commands.Cog):
             charges = add_roulette_backfire_shield(ctx.guild.id, ctx.author.id, charges=amount)
             effect_text = f"Roulette shield charges now: **{charges}**."
         elif key == "roulette_accuracy":
-            state = set_roulette_accuracy_bonus(ctx.guild.id, ctx.author.id, bonus=0.20, charges=amount)
+            state = set_roulette_accuracy_bonus(
+                ctx.guild.id,
+                ctx.author.id,
+                bonus=SHOP_ROULETTE_ACCURACY_BONUS_CHANCE,
+                charges=amount,
+            )
             effect_text = (
                 f"Roulette aim bonus queued: **+{state['bonus'] * 100.0:.1f}%** "
                 f"for **{state['charges']}** use(s)."

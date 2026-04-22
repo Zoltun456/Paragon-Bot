@@ -156,6 +156,31 @@ def _game_stats_lines(games: dict) -> list[str]:
             f"boost seed {_fmt_num(sp.get('boost_seed_xp_total', 0))}"
         )
 
+    ct = _as_dict(games.get("contracts"))
+    if ct:
+        out.append(
+            "Contracts: "
+            f"assigned {_fmt_num(ct.get('assigned', 0))} | "
+            f"completed {_fmt_num(ct.get('completed', 0))} | "
+            f"chains {_fmt_num(ct.get('multi_step_completed', 0))} | "
+            f"legendary {_fmt_num(ct.get('legendary_completed', 0))} | "
+            f"objectives {_fmt_num(ct.get('objectives_completed_total', 0))} | "
+            f"boost seed {_fmt_num(ct.get('boost_seed_xp_total', 0))}"
+        )
+
+    boss = _as_dict(games.get("boss"))
+    if boss:
+        out.append(
+            "Boss: "
+            f"attacks {_fmt_num(boss.get('attacks', 0))} | "
+            f"hits {_fmt_num(boss.get('hits', 0))} | "
+            f"misses {_fmt_num(boss.get('misses', 0))} | "
+            f"damage {_fmt_num(boss.get('damage_total', 0))} | "
+            f"resurrections {_fmt_num(boss.get('resurrections', 0))} | "
+            f"victory rewards {_fmt_num(boss.get('victory_rewards', 0))} | "
+            f"failure penalties {_fmt_num(boss.get('failure_penalties', 0))}"
+        )
+
     return out
 
 
@@ -317,7 +342,9 @@ class StatsCog(commands.Cog):
                         "rounds_played", "hands_played", "wins", "losses", "draws",
                         "matches_played", "puzzles_played", "solves", "fails",
                         "tickets_bought", "jackpots_won", "plays", "successes", "backfires",
-                        "claims", "sent", "received", "xp_wagered_total", "xp_profit_total",
+                        "claims", "sent", "received", "assigned", "completed", "multi_step_completed",
+                        "legendary_completed", "objectives_completed_total",
+                        "xp_wagered_total", "xp_profit_total",
                         "xp_spent_total", "boost_seed_xp_total", "boost_percent_total", "boost_minutes_total",
                     }
                 )
