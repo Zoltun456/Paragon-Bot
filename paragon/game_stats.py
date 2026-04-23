@@ -177,6 +177,12 @@ def _game_stats_lines(games: dict) -> list[str]:
             f"misses {_fmt_num(boss.get('misses', 0))} | "
             f"damage {_fmt_num(boss.get('damage_total', 0))} | "
             f"resurrections {_fmt_num(boss.get('resurrections', 0))} | "
+            f"support {_fmt_num(boss.get('support_actions', 0))} | "
+            f"guard {_fmt_num(boss.get('guards', 0))} | "
+            f"interrupt {_fmt_num(boss.get('interrupts', 0))} | "
+            f"purge {_fmt_num(boss.get('cleanses', 0))} | "
+            f"focus {_fmt_num(boss.get('focuses', 0))} | "
+            f"mechanics {_fmt_num(boss.get('mechanics_countered', 0))} | "
             f"victory rewards {_fmt_num(boss.get('victory_rewards', 0))} | "
             f"failure penalties {_fmt_num(boss.get('failure_penalties', 0))}"
         )
