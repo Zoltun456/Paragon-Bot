@@ -42,6 +42,7 @@ HELP_DESCRIPTIONS = {
     "shop": "List the current XP shop items, including your prestige-scaled Wheel Spin price.",
     "buy": "Buy a shop item by index or name.",
     "spawnboss": "Admin: force-spawn a raid boss immediately for testing or events.",
+    "clearboss": "Admin: immediately remove the current raid boss without rewards, penalties, or boss stats.",
     "spintime": "Admin: view or set daily spin reset time (ET).",
     "spinrewards": "Admin: list and toggle spin rewards by key.",
     "spinreset": "Admin: reset current-cycle spin usage for a user.",

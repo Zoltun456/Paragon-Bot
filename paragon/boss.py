@@ -815,6 +815,39 @@ class BossCog(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             pass
 
+    def _rollback_boss_stats(self, guild_id: int, boss: dict) -> None:
+        for uid_s, raw in _as_dict(boss.get("attackers")).items():
+            uid = _as_int(uid_s, 0)
+            if uid <= 0:
+                continue
+            row = _as_dict(raw)
+            deltas: dict[str, int] = {}
+            attacks = _as_int(row.get("attacks", 0), 0)
+            hits = _as_int(row.get("hits", 0), 0)
+            misses = _as_int(row.get("misses", 0), 0)
+            damage = _as_int(row.get("damage", 0), 0)
+            resurrections = _as_int(row.get("resurrections", 0), 0)
+            if attacks > 0:
+                deltas["attacks"] = -attacks
+            if hits > 0:
+                deltas["hits"] = -hits
+            if misses > 0:
+                deltas["misses"] = -misses
+            if damage > 0:
+                deltas["damage_total"] = -damage
+            if resurrections > 0:
+                deltas["resurrections"] = -resurrections
+            if deltas:
+                record_game_fields(guild_id, uid, "boss", **deltas)
+
+    async def _clear_active_boss(self, guild: discord.Guild, boss: dict) -> None:
+        st = _root_state(guild.id)
+        await self._delete_boss_channel(guild, boss)
+        _clear_current_boss(st)
+        if _next_spawn_at(st) is None:
+            _schedule_next_spawn(st, guild.id)
+        await save_data()
+
     async def _resolve_victory(
         self,
         guild: discord.Guild,
@@ -960,11 +993,8 @@ class BossCog(commands.Cog):
         reward_count: int,
         killer: Optional[discord.Member],
     ) -> None:
-        st = _root_state(guild.id)
         lines = self._summary_lines(guild, boss, outcome=outcome, reward_count=reward_count, killer=killer)
-        await self._delete_boss_channel(guild, boss)
-        _clear_current_boss(st)
-        await save_data()
+        await self._clear_active_boss(guild, boss)
         await self._announce_log(guild, "\n".join(lines))
 
     async def _retaliation_debuff(
@@ -1604,3 +1634,41 @@ class BossCog(commands.Cog):
             await ctx.reply(f"Spawned a boss in {channel.mention}.")
             return
         await ctx.reply("Spawned a boss.")
+
+    @commands.command(name="clearboss")
+    @owner_only()
+    async def clearboss(self, ctx: commands.Context):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+        st = _root_state(ctx.guild.id)
+        boss = _current_boss(st)
+        if not boss:
+            await ctx.reply("There is no raid boss active right now.")
+            return
+
+        boss_name = str(boss.get("display_name", "the current boss"))
+        channel = self._live_channel(ctx.guild, boss)
+        same_channel = channel is not None and ctx.channel.id == channel.id
+
+        if same_channel:
+            try:
+                await ctx.reply(
+                    f"Clearing **{boss_name}** now. No rewards, penalties, or boss stats will be applied."
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            self._rollback_boss_stats(ctx.guild.id, boss)
+            await self._clear_active_boss(ctx.guild, boss)
+            return
+
+        self._rollback_boss_stats(ctx.guild.id, boss)
+        await self._clear_active_boss(ctx.guild, boss)
+        if channel is not None:
+            await ctx.reply(
+                f"Cleared **{boss_name}** from {channel.mention}. No rewards, penalties, or boss stats were applied."
+            )
+            return
+        await ctx.reply(
+            f"Cleared **{boss_name}**. No rewards, penalties, or boss stats were applied."
+        )
