@@ -743,11 +743,20 @@ def _guild_snapshot(guild: discord.Guild) -> dict[str, object]:
     }
 
 
-def _spawn_at_local(guild_id: int, spawn_date: date, *, salt: str = "") -> datetime:
+def _spawn_at_local(guild_id: int, base_local: datetime, *, salt: str = "") -> datetime:
     start_hour = max(0, min(23, int(BOSS_SPAWN_START_HOUR)))
     end_hour = max(start_hour + 1, min(24, int(BOSS_SPAWN_END_HOUR)))
+    candidate = base_local.astimezone(LOCAL_TZ).replace(second=0, microsecond=0)
+    if start_hour <= candidate.hour < end_hour:
+        return candidate
+
+    if candidate.hour < start_hour:
+        spawn_date = candidate.date()
+    else:
+        spawn_date = (candidate + timedelta(days=1)).date()
+
     total_minutes = max(1, ((end_hour - start_hour) * 60))
-    seed = hashlib.sha256(f"boss:{guild_id}:{spawn_date.isoformat()}:{salt}".encode("utf-8")).digest()
+    seed = hashlib.sha256(f"boss:{guild_id}:{candidate.isoformat()}:{salt}".encode("utf-8")).digest()
     offset = int.from_bytes(seed[:4], "big") % total_minutes
     hour = start_hour + (offset // 60)
     minute = offset % 60
@@ -763,13 +772,13 @@ def _spawn_at_local(guild_id: int, spawn_date: date, *, salt: str = "") -> datet
 
 def _schedule_next_spawn(st: dict, guild_id: int, *, base_local: Optional[datetime] = None) -> datetime:
     now_local = base_local or datetime.now(LOCAL_TZ)
-    min_days = max(1, int(BOSS_SPAWN_MIN_DAYS))
-    max_days = max(min_days, int(BOSS_SPAWN_MAX_DAYS))
+    min_hours = max(1, int(BOSS_SPAWN_MIN_DAYS))
+    max_hours = max(min_hours, int(BOSS_SPAWN_MAX_DAYS))
     rng = random.SystemRandom()
-    day_offset = rng.randint(min_days, max_days)
-    spawn_date = now_local.date() + timedelta(days=day_offset)
-    salt = f"{now_local.date().isoformat()}:{rng.randint(0, 1_000_000)}"
-    spawn_local = _spawn_at_local(guild_id, spawn_date, salt=salt)
+    minute_offset = rng.randint(min_hours * 60, max_hours * 60)
+    candidate_local = now_local + timedelta(minutes=minute_offset)
+    salt = f"{now_local.isoformat()}:{rng.randint(0, 1_000_000)}"
+    spawn_local = _spawn_at_local(guild_id, candidate_local, salt=salt)
     spawn_utc = spawn_local.astimezone(timezone.utc)
     st["next_spawn_at"] = _iso(spawn_utc)
     return spawn_utc
