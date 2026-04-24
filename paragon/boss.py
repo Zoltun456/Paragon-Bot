@@ -91,28 +91,30 @@ BOSS_REACTION_FOCUS_NAMES = {
 }
 BOSS_ACTIVE_DURATION_MINUTES = 60
 BOSS_TARGET_CLEAR_MINUTES = max(15, BOSS_ACTIVE_DURATION_MINUTES // 4)
+BOSS_TURN_BUFFER_SECONDS = 2
+BOSS_TURN_WINDOW_SECONDS = 6
 BOSS_ATTACK_STAMINA_MAX = 2
-BOSS_ATTACK_STAMINA_REFILL_SECONDS = 90
+BOSS_ATTACK_STAMINA_REFILL_SECONDS = 10
 BOSS_SUPPORT_STAMINA_MAX = 2
-BOSS_SUPPORT_STAMINA_REFILL_SECONDS = 45
-BOSS_RES_COOLDOWN_ACTIVE_SECONDS = 45
-BOSS_SUPPORT_COOLDOWN_SECONDS = 45
-BOSS_SUPPORT_WINDOW_SECONDS = 90
-BOSS_GUARD_DURATION_SECONDS = 45
-BOSS_FOCUS_DURATION_SECONDS = 90
+BOSS_SUPPORT_STAMINA_REFILL_SECONDS = 10
+BOSS_RES_COOLDOWN_ACTIVE_SECONDS = 10
+BOSS_SUPPORT_COOLDOWN_SECONDS = 10
+BOSS_SUPPORT_WINDOW_SECONDS = 10
+BOSS_GUARD_DURATION_SECONDS = 10
+BOSS_FOCUS_DURATION_SECONDS = 10
 BOSS_FOCUS_DAMAGE_BONUS_PCT = 0.30
 BOSS_FOCUS_HIT_BONUS_PCT = 0.15
-BOSS_EXPOSE_DURATION_SECONDS = 35
+BOSS_EXPOSE_DURATION_SECONDS = 10
 BOSS_EXPOSE_DAMAGE_BONUS_PCT = 0.20
-BOSS_STUN_DURATION_SECONDS = 25
-BOSS_MARK_DURATION_SECONDS = 150
+BOSS_STUN_DURATION_SECONDS = 10
+BOSS_MARK_DURATION_SECONDS = 10
 BOSS_MARK_HIT_PENALTY_PCT = 0.15
 BOSS_MARK_DAMAGE_PENALTY_PCT = 0.20
-BOSS_MECHANIC_INTERVAL_MIN_SECONDS = 65
-BOSS_MECHANIC_INTERVAL_MAX_SECONDS = 100
-BOSS_MECHANIC_WARNING_MIN_SECONDS = 20
-BOSS_MECHANIC_WARNING_MAX_SECONDS = 30
-BOSS_PHASE_TRIGGER_DELAY_SECONDS = 25
+BOSS_MECHANIC_INTERVAL_MIN_SECONDS = BOSS_TURN_BUFFER_SECONDS
+BOSS_MECHANIC_INTERVAL_MAX_SECONDS = BOSS_TURN_BUFFER_SECONDS
+BOSS_MECHANIC_WARNING_MIN_SECONDS = BOSS_TURN_WINDOW_SECONDS
+BOSS_MECHANIC_WARNING_MAX_SECONDS = BOSS_TURN_WINDOW_SECONDS
+BOSS_PHASE_TRIGGER_DELAY_SECONDS = BOSS_TURN_BUFFER_SECONDS
 BOSS_PHASE_THRESHOLDS = (75, 50, 25)
 BOSS_BASE_REWARD_PCT = max(1.50, float(BOSS_VICTORY_BOOST_PCT))
 BOSS_BASE_REWARD_MINUTES = max(720, int(BOSS_VICTORY_BOOST_MINUTES))
@@ -124,13 +126,14 @@ BOSS_FAILURE_PENALTY_PCT = max(0.75, float(BOSS_FAILURE_DEBUFF_PCT))
 BOSS_FAILURE_PENALTY_MINUTES = max(480, int(BOSS_FAILURE_DEBUFF_MINUTES))
 BOSS_PANEL_LOG_LIMIT = 10
 BOSS_PANEL_PLAYER_LIMIT = 10
-BOSS_PANEL_TIMER_STEP_SECONDS = 5
+BOSS_PANEL_TIMER_STEP_SECONDS = 2
 BOSS_PANEL_MESSAGE_DELETE_DELAY_SECONDS = 5
 BOSS_STAMINA_READY = "\N{LARGE GREEN CIRCLE}"
 BOSS_STAMINA_EMPTY = "\N{BLACK CIRCLE}"
 BOSS_SUPPORT_READY = "\N{LARGE BLUE CIRCLE}"
 BOSS_SUPPORT_EMPTY = "\N{WHITE CIRCLE}"
 BOSS_PRESTIGE_STRENGTH_MULT = 1.50
+BOSS_HP_BALANCE_ATTACK_REFILL_SECONDS = 90
 
 NAME_PREFIXES = (
     "Ael",
@@ -529,7 +532,7 @@ def _support_score(row: dict) -> int:
 
 
 def _target_attack_budget(window_seconds: int) -> int:
-    refill = max(10, int(BOSS_ATTACK_STAMINA_REFILL_SECONDS))
+    refill = max(10, int(BOSS_HP_BALANCE_ATTACK_REFILL_SECONDS))
     window = max(1, int(window_seconds))
     return max(1, int(BOSS_ATTACK_STAMINA_MAX) + (window // refill))
 
@@ -1578,10 +1581,8 @@ class BossCog(commands.Cog):
         pending = _pending_mechanic(boss)
         key = str(pending.get("key", "")).strip().lower()
         if key:
-            due_at = _parse_iso(pending.get("due_at"))
-            remaining = max(0, int((due_at - now).total_seconds())) if due_at is not None else 0
             return (
-                f"Current attack: **{pending.get('name', 'Unknown Mechanic')}** in **{_fmt_remaining_panel(remaining)}** "
+                f"Current attack: **{pending.get('name', 'Unknown Mechanic')}** "
                 f"| counter with `{COMMAND_PREFIX}{pending.get('counter', 'guard')}` "
                 f"(**{_pending_response_count(boss)} / {_as_int(pending.get('required', 1), 1)}**)"
             )
@@ -1591,11 +1592,7 @@ class BossCog(commands.Cog):
             return f"Current attack: **Staggered** for **{_fmt_remaining_panel(remaining)}**."
         if str(boss.get("status", "idle")).strip().lower() != "active":
             return f"Current attack: **Dormant**. Open with `{COMMAND_PREFIX}attack`."
-        next_mechanic_at = _parse_iso(boss.get("next_mechanic_at"))
-        if next_mechanic_at is not None and next_mechanic_at > now:
-            remaining = max(0, int((next_mechanic_at - now).total_seconds()))
-            return f"Current attack: Building pressure. Next mechanic in **{_fmt_remaining_panel(remaining)}**."
-        return "Current attack: Looking for an opening."
+        return "Current attack: Building pressure."
 
     def _panel_effect_lines(self, boss: dict, now: datetime) -> list[str]:
         lines: list[str] = []
@@ -1659,14 +1656,14 @@ class BossCog(commands.Cog):
         rows = _feed_lines(boss)
         if not rows:
             return ["- Waiting for the first swing."]
-        return [f"- {_clip_text(line, 115)}" for line in rows[:BOSS_PANEL_LOG_LIMIT]]
+        return [f"- {line}" for line in rows[:BOSS_PANEL_LOG_LIMIT]]
 
     def _controls_lines(self, boss: dict) -> list[str]:
         del boss
         return [
             "**Raid Controls**",
             (
-                f"React here: {BOSS_REACTION_ATTACK} attack | {BOSS_REACTION_RES} revive | {BOSS_REACTION_GUARD} guard | "
+                f"{BOSS_REACTION_ATTACK} attack | {BOSS_REACTION_RES} revive | {BOSS_REACTION_GUARD} guard | "
                 f"{BOSS_REACTION_INTERRUPT} interrupt | {BOSS_REACTION_PURGE} purge | {BOSS_REACTION_FOCUS} focus"
             ),
         ]
@@ -1683,8 +1680,7 @@ class BossCog(commands.Cog):
                 f"| Phase **{_phase_name(_as_int(boss.get('phase', 1), 1))}**"
             ),
             (
-                f"Boss prestige **{_fmt_num(boss.get('boss_prestige', 0))}** "
-                f"(guild avg **{_as_float(boss.get('avg_prestige', 0.0), 0.0):.1f}**)"
+                f"Boss prestige **{_fmt_num(boss.get('boss_prestige', 0))}**"
             ),
             self._panel_status_line(boss, now),
             self._panel_current_action_line(boss, now),
@@ -1697,15 +1693,17 @@ class BossCog(commands.Cog):
     def _feed_panel_lines(self, boss: dict) -> list[str]:
         return ["**Battle Feed**", *self._panel_feed_display_lines(boss)]
 
-    def _fit_panel_content(self, lines: list[str]) -> str:
+    def _fit_panel_content(self, lines: list[str], *, clip_long_lines: bool = True) -> str:
         fitted = list(lines)
         content = "\n".join(fitted)
         while len(content) > 1900 and len(fitted) > 8:
             fitted.pop()
             content = "\n".join(fitted)
-        if len(content) > 1900:
+        if len(content) > 1900 and clip_long_lines:
             fitted = [_clip_text(line, 160) for line in fitted]
             content = "\n".join(fitted)
+        if len(content) > 1900:
+            content = content[:1900]
         return content
 
     async def _refresh_boss_panel(
@@ -1724,7 +1722,7 @@ class BossCog(commands.Cog):
         now = _utcnow()
         payloads = {
             "status": self._fit_panel_content(self._status_panel_lines(guild, boss, now)),
-            "feed": self._fit_panel_content(self._feed_panel_lines(boss)),
+            "feed": self._fit_panel_content(self._feed_panel_lines(boss), clip_long_lines=False),
         }
         hash_keys = {
             "status": "status_hash",
@@ -1819,7 +1817,7 @@ class BossCog(commands.Cog):
         affix = _affix_data(boss)
         phase = max(1, _as_int(boss.get("phase", 1), 1))
         mult = max(0.70, float(affix.get("interval_mult", 1.0)) - ((phase - 1) * 0.04))
-        low = max(20, int(round(BOSS_MECHANIC_INTERVAL_MIN_SECONDS * mult)))
+        low = max(1, int(round(BOSS_MECHANIC_INTERVAL_MIN_SECONDS * mult)))
         high = max(low, int(round(BOSS_MECHANIC_INTERVAL_MAX_SECONDS * mult)))
         return random.randint(low, high)
 
@@ -1834,7 +1832,7 @@ class BossCog(commands.Cog):
         if immediate:
             delay = int(BOSS_PHASE_TRIGGER_DELAY_SECONDS)
         elif delay_seconds is not None:
-            delay = max(10, int(delay_seconds))
+            delay = max(1, min(10, int(delay_seconds)))
         else:
             delay = self._mechanic_interval_seconds(boss)
         boss["next_mechanic_at"] = _iso(now + timedelta(seconds=delay))
@@ -1883,9 +1881,8 @@ class BossCog(commands.Cog):
         mechanic = MECHANIC_DEFS.get(key)
         if mechanic is None:
             return ""
-        remaining = max(0, int((due_at - now).total_seconds()))
         return (
-            f"Incoming mechanic: **{mechanic['name']}** in **{_fmt_remaining(remaining)}**. "
+            f"Incoming mechanic: **{mechanic['name']}**. "
             f"Use `{COMMAND_PREFIX}{mechanic['counter']}` "
             f"({max(0, _pending_response_count(boss))}/{_as_int(pending.get('required', 1), 1)})."
         )
@@ -1954,12 +1951,12 @@ class BossCog(commands.Cog):
             f"**Phase Shift: {_phase_name(phase)}**",
         ]
         if phase == 2:
-            boss["exposed_until"] = _iso(now + timedelta(seconds=20))
+            boss["exposed_until"] = _iso(now + timedelta(seconds=BOSS_EXPOSE_DURATION_SECONDS))
             boss["exposed_bonus_pct"] = 0.12 + float(_affix_data(boss).get("expose_bonus_pct", 0.0))
             lines.append("Its shell cracks for a moment. Push damage while the opening is there.")
         elif phase == 3:
             targets = self._mechanic_targets(guild, boss, limit=max(1, min(2, _as_int(boss.get("target_fighters", 1), 1))))
-            duration = int(round(BOSS_MARK_DURATION_SECONDS * float(_affix_data(boss).get("mark_duration_mult", 1.0))))
+            duration = min(10, int(round(BOSS_MARK_DURATION_SECONDS * float(_affix_data(boss).get("mark_duration_mult", 1.0)))))
             for member in targets:
                 _set_mark(
                     boss,
@@ -1980,7 +1977,7 @@ class BossCog(commands.Cog):
                 lines.append("The chamber poisons itself. Expect heavier cleanse pressure.")
         else:
             boss["stunned_until"] = ""
-            boss["exposed_until"] = _iso(now + timedelta(seconds=25))
+            boss["exposed_until"] = _iso(now + timedelta(seconds=BOSS_EXPOSE_DURATION_SECONDS))
             boss["exposed_bonus_pct"] = 0.18 + float(_affix_data(boss).get("expose_bonus_pct", 0.0))
             lines.append("The boss is desperate and unstable. Mechanics will come faster, but every opening matters.")
         self._schedule_next_mechanic(boss, now, immediate=True)
@@ -2035,7 +2032,7 @@ class BossCog(commands.Cog):
         lines = [
             f"**Boss Telegraph: {mechanic['name']}**",
             mechanic["warning"],
-            f"Need **{_as_int(pending.get('required', 1), 1)}** raider(s) to `{COMMAND_PREFIX}{mechanic['counter']}` in **{_fmt_remaining(warning_seconds)}**.",
+            f"Need **{_as_int(pending.get('required', 1), 1)}** raider(s) to `{COMMAND_PREFIX}{mechanic['counter']}` before it lands.",
         ]
         await self._send_boss_message(channel, boss, "\n".join(lines), ping_here=True)
         return True
@@ -2078,19 +2075,19 @@ class BossCog(commands.Cog):
                 boss["exposed_until"] = _iso(now + timedelta(seconds=BOSS_EXPOSE_DURATION_SECONDS))
                 boss["exposed_bonus_pct"] = BOSS_EXPOSE_DAMAGE_BONUS_PCT + float(affix.get("expose_bonus_pct", 0.0))
                 lines.append(
-                    f"The raid braces together and cracks the boss open. Damage is boosted by **{_fmt_pct(boss['exposed_bonus_pct'])}** for **{_fmt_remaining(BOSS_EXPOSE_DURATION_SECONDS)}**."
+                    f"The raid braces together and cracks the boss open. Damage is boosted by **{_fmt_pct(boss['exposed_bonus_pct'])}** for **{_fmt_remaining_panel(BOSS_EXPOSE_DURATION_SECONDS)}**."
                 )
             elif key == "soul_scream":
-                stun_seconds = int(BOSS_STUN_DURATION_SECONDS + _as_int(affix.get("stun_bonus_seconds", 0), 0))
+                stun_seconds = min(10, int(BOSS_STUN_DURATION_SECONDS + _as_int(affix.get("stun_bonus_seconds", 0), 0)))
                 boss["stunned_until"] = _iso(now + timedelta(seconds=stun_seconds))
-                lines.append(f"The scream is cut off. The boss is staggered for **{_fmt_remaining(stun_seconds)}**.")
+                lines.append(f"The scream is cut off. The boss is staggered for **{_fmt_remaining_panel(stun_seconds)}**.")
             elif key == "blight_bloom":
                 cleared = len(_player_marks(boss))
                 boss["marks"] = {}
-                boss["exposed_until"] = _iso(now + timedelta(seconds=20))
+                boss["exposed_until"] = _iso(now + timedelta(seconds=BOSS_EXPOSE_DURATION_SECONDS))
                 boss["exposed_bonus_pct"] = 0.12
                 lines.append(
-                    f"The raid purges the bloom and clears **{cleared}** mark(s). Damage is boosted by **12%** for **20s**."
+                    f"The raid purges the bloom and clears **{cleared}** mark(s). Damage is boosted by **12%** for **{_fmt_remaining_panel(BOSS_EXPOSE_DURATION_SECONDS)}**."
                 )
         else:
             boss["mechanics_failed"] = _as_int(boss.get("mechanics_failed", 0), 0) + 1
@@ -2117,7 +2114,7 @@ class BossCog(commands.Cog):
                     lines.append("The raid barely avoids the full impact, but the boss still slips away from the pressure.")
                 lines.append(f"The boss siphons **{_fmt_num(healed)} HP** back from the shockwave.")
             elif key == "soul_scream":
-                extra = 20 + (_as_int(boss.get("phase", 1), 1) * 5)
+                extra = min(10, 6 + (_as_int(boss.get("phase", 1), 1) * 2))
                 targets = self._mechanic_targets(guild, boss, limit=max(1, min(4, _as_int(boss.get("target_fighters", 1), 1) + 1)))
                 caught: list[str] = []
                 for member in targets:
@@ -2142,11 +2139,11 @@ class BossCog(commands.Cog):
                     lines.append(
                         "The scream lands. "
                         + ", ".join(caught)
-                        + f" are delayed by **{_fmt_remaining(extra)}**."
+                        + f" are delayed by **{_fmt_remaining_panel(extra)}**."
                     )
                 lines.append(f"The boss recovers **{_fmt_num(healed)} HP** during the chaos.")
             elif key == "blight_bloom":
-                duration = int(round(BOSS_MARK_DURATION_SECONDS * float(affix.get("mark_duration_mult", 1.0))))
+                duration = min(10, int(round(BOSS_MARK_DURATION_SECONDS * float(affix.get("mark_duration_mult", 1.0)))))
                 targets = self._mechanic_targets(guild, boss, limit=max(1, min(4, _as_int(boss.get("target_fighters", 1), 1) + 1)))
                 marked: list[str] = []
                 for member in targets:
@@ -2173,10 +2170,11 @@ class BossCog(commands.Cog):
                     lines.append(
                         "Rot spreads across "
                         + ", ".join(marked)
-                        + f" for **{_fmt_remaining(duration)}** unless cleansed."
+                        + f" for **{_fmt_remaining_panel(duration)}** unless cleansed."
                     )
                 lines.append(f"The boss drinks **{_fmt_num(healed)} HP** from the bloom.")
 
+        self._refresh_turn_resources(guild, boss, now)
         boss["pending_mechanic"] = {}
         self._schedule_next_mechanic(boss, now)
         await self._send_boss_message(channel, boss, "\n".join(lines))
@@ -2432,6 +2430,14 @@ class BossCog(commands.Cog):
             row["focus_hit_bonus_pct"] = 0.0
             row["focus_expires_at"] = ""
             row["ward_expires_at"] = ""
+
+    def _refresh_turn_resources(self, guild: discord.Guild, boss: dict, now: datetime) -> None:
+        for member in _human_members(guild):
+            row = _participant_row(boss, member)
+            if _sync_attack_stamina(row, now, boss=boss) < 1:
+                _grant_attack_stamina(row, now, boss=boss, amount=1)
+            if _sync_support_stamina(row, now, boss=boss) < 1:
+                _grant_support_stamina(row, now, boss=boss, amount=1)
 
     async def _maybe_rescue_downed_raid(
         self,
@@ -2772,7 +2778,7 @@ class BossCog(commands.Cog):
         action = rng.choices(list(weights.keys()), weights=list(weights.values()), k=1)[0]
 
         if action == "ashen_claw":
-            extra = rng.randint(10, 18) + (phase * 2)
+            extra = min(10, rng.randint(6, 10) + phase)
             if _consume_ward(row, now):
                 return f"**{RETALIATION_NAMES[action]}** crashes into {attacker.mention}'s guard and splinters harmlessly."
             _set_attack_wait(
@@ -2790,7 +2796,7 @@ class BossCog(commands.Cog):
         if action == "grave_brand":
             if _consume_ward(row, now):
                 return f"**{RETALIATION_NAMES[action]}** tries to brand {attacker.mention}, but their guard holds."
-            duration = int(round(BOSS_MARK_DURATION_SECONDS * float(affix.get("mark_duration_mult", 1.0))))
+            duration = min(10, int(round(BOSS_MARK_DURATION_SECONDS * float(affix.get("mark_duration_mult", 1.0)))))
             _set_mark(
                 boss,
                 attacker.id,
@@ -2807,7 +2813,7 @@ class BossCog(commands.Cog):
             )
 
         if action == "iron_sentence":
-            extra = rng.randint(15, 24) + (phase * 2)
+            extra = min(10, rng.randint(6, 10) + phase)
             if _consume_ward(row, now):
                 return f"**{RETALIATION_NAMES[action]}** catches the guard instead of {attacker.mention}."
             _set_attack_wait(
@@ -2821,7 +2827,7 @@ class BossCog(commands.Cog):
                 row,
                 now,
                 boss=boss,
-                wait_seconds=max(max(10, extra - 5), _support_stamina_wait_seconds(row, now, boss=boss)),
+                wait_seconds=min(10, max(max(2, extra - 4), _support_stamina_wait_seconds(row, now, boss=boss))),
                 charges=0,
             )
             row["cooldown_extensions"] = _as_int(row.get("cooldown_extensions", 0), 0) + 1
@@ -2830,9 +2836,9 @@ class BossCog(commands.Cog):
             )
 
         if action == "sundering_roar":
-            extra = rng.randint(12, 20) + phase
+            extra = min(10, rng.randint(6, 10) + phase)
             if _consume_ward(row, now):
-                self._schedule_next_mechanic(boss, now, delay_seconds=20)
+                self._schedule_next_mechanic(boss, now, delay_seconds=10)
                 return f"**{RETALIATION_NAMES[action]}** is absorbed by the guard, but the chamber still starts to rumble."
             _set_attack_wait(
                 row,
@@ -2842,7 +2848,7 @@ class BossCog(commands.Cog):
                 charges=0,
             )
             row["cooldown_extensions"] = _as_int(row.get("cooldown_extensions", 0), 0) + 1
-            self._schedule_next_mechanic(boss, now, delay_seconds=18)
+            self._schedule_next_mechanic(boss, now, delay_seconds=10)
             return (
                 f"**{RETALIATION_NAMES[action]}** staggers {attacker.mention} and accelerates the next mechanic. Attack delayed **{_fmt_remaining(extra)}**."
             )
@@ -2859,10 +2865,10 @@ class BossCog(commands.Cog):
         if action == "sable_chain":
             ally = _pick_other_recent_attacker(guild, boss, attacker.id)
             if ally is None:
-                self._schedule_next_mechanic(boss, now, delay_seconds=24)
+                self._schedule_next_mechanic(boss, now, delay_seconds=10)
                 return f"**{RETALIATION_NAMES[action]}** scrapes the walls and drags the next mechanic closer."
             ally_row = _participant_row(boss, ally)
-            extra = rng.randint(15, 26)
+            extra = min(10, rng.randint(6, 10))
             if _consume_ward(ally_row, now):
                 return f"**{RETALIATION_NAMES[action]}** lashes toward {ally.mention}, but their guard catches the chain."
             _set_attack_wait(
@@ -2888,7 +2894,7 @@ class BossCog(commands.Cog):
                 f"**{RETALIATION_NAMES[action]}** downs {attacker.mention}. Another raider must use `{COMMAND_PREFIX}res @{attacker.display_name}` before they can act again."
             )
 
-        self._schedule_next_mechanic(boss, now, delay_seconds=18)
+        self._schedule_next_mechanic(boss, now, delay_seconds=10)
         return f"**{RETALIATION_NAMES[action]}** fixes on the raid and hastens the next telegraphed mechanic."
 
     async def _maybe_spawn_scheduled_boss(self, guild: discord.Guild) -> None:
@@ -2948,8 +2954,7 @@ class BossCog(commands.Cog):
             f"**{boss.get('display_name', 'Unknown Boss')}**",
             f"HP: **{_fmt_num(boss.get('hp', 0))} / {_fmt_num(boss.get('max_hp', 0))}**",
             (
-                f"Boss prestige: **{_as_int(boss.get('boss_prestige', 0), 0)}** "
-                f"(guild avg **{_as_float(boss.get('avg_prestige', 0.0), 0.0):.1f}**) | "
+                f"Boss prestige: **{_as_int(boss.get('boss_prestige', 0), 0)}** | "
                 f"Tuned raid size: **{_as_int(boss.get('target_fighters', 1), 1)}** fighter(s)"
             ),
             (
@@ -3081,7 +3086,7 @@ class BossCog(commands.Cog):
             boss["status"] = "active"
             boss["engaged_at"] = _iso(now)
             boss["expires_at"] = _iso(now + timedelta(minutes=int(BOSS_ACTIVE_DURATION_MINUTES)))
-            self._schedule_next_mechanic(boss, now, delay_seconds=random.randint(50, 70))
+            self._schedule_next_mechanic(boss, now)
             _push_feed_line(boss, f"{attacker.mention} engages the boss. The raid timer is now live.", now=now)
 
         prestige = _member_prestige(guild.id, attacker.id)
@@ -3171,12 +3176,6 @@ class BossCog(commands.Cog):
             return
 
         await self._maybe_handle_phase_transition(guild, boss, channel, now=now)
-
-        retaliation_line = "The boss lashes out, but I hit an internal error resolving the retaliation."
-        try:
-            retaliation_line = await self._perform_retaliation(guild, boss, attacker)
-        except Exception:
-            pass
         await self._sync_channel_name(guild, boss)
         await save_data()
 
@@ -3185,11 +3184,7 @@ class BossCog(commands.Cog):
             channel,
             boss,
             "\n".join(
-                [
-                    *attack_lines,
-                    retaliation_line,
-                ]
-                + ([mechanic_line] if mechanic_line else [])
+                attack_lines + ([mechanic_line] if mechanic_line else [])
             ),
             reference=reference,
         )
@@ -3526,7 +3521,7 @@ class BossCog(commands.Cog):
 
         await self._send_boss_message(channel, boss, "That support action is not recognized.", reference=reference)
 
-    @tasks.loop(seconds=5)
+    @tasks.loop(seconds=2)
     async def boss_loop(self):
         for guild in list(self.bot.guilds):
             st = _root_state(guild.id)
