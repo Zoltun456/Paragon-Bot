@@ -1433,6 +1433,61 @@ class BossCog(commands.Cog):
         boss["control_message_ids"] = []
         boss["last_message_id"] = 0
 
+    async def _create_controls_message(
+        self,
+        boss: dict,
+        channel: discord.TextChannel,
+    ) -> Optional[discord.PartialMessage]:
+        try:
+            controls_message = await channel.send("Preparing controls...")
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+        await self._track_control_message(boss, controls_message)
+        return channel.get_partial_message(controls_message.id)
+
+    async def _create_status_and_feed_messages(
+        self,
+        boss: dict,
+        channel: discord.TextChannel,
+    ) -> Optional[dict[str, discord.PartialMessage]]:
+        try:
+            status_message = await channel.send("Preparing boss panel...")
+            boss["status_message_id"] = int(status_message.id)
+            boss["status_hash"] = ""
+
+            feed_message = await channel.send("Preparing battle feed...")
+            boss["feed_message_id"] = int(feed_message.id)
+            boss["feed_hash"] = ""
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+        await save_data()
+        return {
+            "status": channel.get_partial_message(status_message.id),
+            "feed": channel.get_partial_message(feed_message.id),
+        }
+
+    async def _rebuild_noncontrol_messages(
+        self,
+        boss: dict,
+        channel: discord.TextChannel,
+    ) -> Optional[dict[str, discord.PartialMessage]]:
+        for key in ("status_message_id", "feed_message_id"):
+            message_id = _as_int(boss.get(key, 0), 0)
+            if message_id <= 0:
+                continue
+            try:
+                await channel.get_partial_message(message_id).delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+        boss["status_message_id"] = 0
+        boss["status_hash"] = ""
+        boss["feed_message_id"] = 0
+        boss["feed_hash"] = ""
+        rebuilt = await self._create_status_and_feed_messages(boss, channel)
+        if rebuilt is not None:
+            await self._prune_channel_to_panel(channel, boss)
+        return rebuilt
+
     async def _track_control_message(self, boss: dict, message: discord.Message) -> None:
         _register_control_message(boss, message.id)
         boss["controls_message_id"] = int(message.id)
@@ -1450,37 +1505,25 @@ class BossCog(commands.Cog):
         boss: dict,
         channel: discord.TextChannel,
     ) -> Optional[dict[str, discord.PartialMessage]]:
+        del guild
         for message_id in self._panel_message_ids(boss):
             try:
                 await channel.get_partial_message(message_id).delete()
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
         self._clear_panel_message_refs(boss)
-        placeholders = {
-            "controls": "Preparing controls...",
-            "status": "Preparing boss panel...",
-            "feed": "Preparing battle feed...",
-        }
-        messages: dict[str, discord.PartialMessage] = {}
-        try:
-            controls_message = await channel.send(placeholders["controls"])
-            await self._track_control_message(boss, controls_message)
-            messages["controls"] = channel.get_partial_message(controls_message.id)
-
-            status_message = await channel.send(placeholders["status"])
-            boss["status_message_id"] = int(status_message.id)
-            boss["status_hash"] = ""
-            messages["status"] = channel.get_partial_message(status_message.id)
-
-            feed_message = await channel.send(placeholders["feed"])
-            boss["feed_message_id"] = int(feed_message.id)
-            boss["feed_hash"] = ""
-            messages["feed"] = channel.get_partial_message(feed_message.id)
-        except (discord.Forbidden, discord.HTTPException):
+        controls = await self._create_controls_message(boss, channel)
+        if controls is None:
             return None
-        await save_data()
+        noncontrols = await self._create_status_and_feed_messages(boss, channel)
+        if noncontrols is None:
+            return None
         await self._prune_channel_to_panel(channel, boss)
-        return messages
+        return {
+            "controls": controls,
+            "status": noncontrols["status"],
+            "feed": noncontrols["feed"],
+        }
 
     async def _ensure_panel_messages(
         self,
@@ -1488,18 +1531,29 @@ class BossCog(commands.Cog):
         boss: dict,
         channel: discord.TextChannel,
     ) -> Optional[dict[str, discord.PartialMessage]]:
-        required = {
-            "controls": _as_int(boss.get("controls_message_id", 0), 0),
-            "status": _as_int(boss.get("status_message_id", 0), 0),
-            "feed": _as_int(boss.get("feed_message_id", 0), 0),
+        controls_id = _as_int(boss.get("controls_message_id", 0), 0)
+        status_id = _as_int(boss.get("status_message_id", 0), 0)
+        feed_id = _as_int(boss.get("feed_message_id", 0), 0)
+
+        if controls_id <= 0:
+            return await self._rebuild_panel_messages(guild, boss, channel)
+
+        _register_control_message(boss, controls_id)
+        messages: dict[str, discord.PartialMessage] = {
+            "controls": channel.get_partial_message(controls_id),
         }
-        if all(message_id > 0 for message_id in required.values()):
-            _register_control_message(boss, required["controls"])
-            return {
-                key: channel.get_partial_message(message_id)
-                for key, message_id in required.items()
-            }
-        return await self._rebuild_panel_messages(guild, boss, channel)
+
+        if status_id <= 0 or feed_id <= 0:
+            rebuilt = await self._rebuild_noncontrol_messages(boss, channel)
+            if rebuilt is None:
+                return None
+            messages["status"] = rebuilt["status"]
+            messages["feed"] = rebuilt["feed"]
+            return messages
+
+        messages["status"] = channel.get_partial_message(status_id)
+        messages["feed"] = channel.get_partial_message(feed_id)
+        return messages
 
     def _panel_status_line(self, boss: dict, now: datetime) -> str:
         status = str(boss.get("status", "idle")).strip().lower()
