@@ -1450,7 +1450,6 @@ class BossCog(commands.Cog):
         boss: dict,
         channel: discord.TextChannel,
     ) -> Optional[dict[str, discord.PartialMessage]]:
-        del guild
         for message_id in self._panel_message_ids(boss):
             try:
                 await channel.get_partial_message(message_id).delete()
@@ -1479,6 +1478,8 @@ class BossCog(commands.Cog):
             messages["feed"] = channel.get_partial_message(feed_message.id)
         except (discord.Forbidden, discord.HTTPException):
             return None
+        await save_data()
+        await self._prune_channel_to_panel(channel, boss)
         return messages
 
     async def _ensure_panel_messages(
