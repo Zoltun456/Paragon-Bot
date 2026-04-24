@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 import hashlib
 import random
 import re
+import traceback
 from typing import Optional
 
 import discord
@@ -530,6 +531,24 @@ def _support_score(row: dict) -> int:
         + _as_int(row.get("focuses", 0), 0)
         + (_as_int(row.get("mechanics_countered", 0), 0) * 2)
     )
+
+
+def _live_raid_size(boss: dict) -> int:
+    contributors = 0
+    active = 0
+    for uid_s, raw in _as_dict(boss.get("attackers")).items():
+        uid = _as_int(uid_s, 0)
+        row = _as_dict(raw)
+        if uid <= 0 or not _is_contributor_row(row):
+            continue
+        contributors += 1
+        if not _is_downed(boss, uid):
+            active += 1
+    if active > 0:
+        return active
+    if contributors > 0:
+        return contributors
+    return 1
 
 
 def _target_attack_budget(window_seconds: int) -> int:
@@ -1939,7 +1958,7 @@ class BossCog(commands.Cog):
         boss["next_mechanic_at"] = _iso(now + timedelta(seconds=delay))
 
     def _mechanic_requirement(self, boss: dict, counter: str) -> int:
-        size = max(1, _as_int(boss.get("target_fighters", 1), 1))
+        size = max(1, _live_raid_size(boss))
         phase = max(1, _as_int(boss.get("phase", 1), 1))
         if counter == "guard":
             need = max(1, min(3, (size + 1) // 2))
@@ -2436,7 +2455,6 @@ class BossCog(commands.Cog):
         panel = await self._refresh_boss_panel(guild, boss, channel, force=True)
         if panel is not None:
             await self._prune_channel_to_panel(channel, boss)
-            await self._log_boss_ui_event(guild, boss, heading="Boss chamber ready")
 
     async def _announce_log(self, guild: discord.Guild, text: str) -> None:
         log_channel = get_log_channel(guild)
@@ -2563,7 +2581,7 @@ class BossCog(commands.Cog):
 
         affix = _affix_data(boss)
         max_hp = max(1, _as_int(boss.get("max_hp", 1), 1))
-        heal = int(round(max_hp * 0.15 * float(affix.get("heal_mult", 1.0))))
+        heal = max(1, int(round(max_hp * 0.15 * float(affix.get("heal_mult", 1.0)))))
         before = _as_int(boss.get("hp", 0), 0)
         boss["hp"] = min(max_hp, before + heal)
         healed = max(0, _as_int(boss.get("hp", 0), 0) - before)
@@ -2579,10 +2597,19 @@ class BossCog(commands.Cog):
             if _revive_member(boss, uid):
                 revived_mentions.append(label)
 
+        boss["pending_mechanic"] = {}
+        self._refresh_turn_resources(guild, boss, now)
+        self._schedule_next_mechanic(boss, now)
+
         lines = [
             "The raid is wiped out for a moment, and the boss feasts on the opening.",
-            f"The boss surges back for **{_fmt_num(healed)} HP**.",
         ]
+        if healed > 0:
+            lines.append(f"The boss surges back for **{_fmt_num(healed)} HP**.")
+        else:
+            lines.append(
+                f"The boss surges for **{_fmt_num(heal)} HP**, but it is already holding at full health."
+            )
         if drained_mentions:
             lines.append("Support is shaken loose from " + ", ".join(drained_mentions) + ".")
         if revived_mentions:
@@ -3630,12 +3657,16 @@ class BossCog(commands.Cog):
     @tasks.loop(seconds=5)
     async def boss_loop(self):
         for guild in list(self.bot.guilds):
-            st = _root_state(guild.id)
-            boss = _current_boss(st)
-            if boss:
-                await self._maintain_current_boss(guild, boss)
-            else:
-                await self._maybe_spawn_scheduled_boss(guild)
+            try:
+                st = _root_state(guild.id)
+                boss = _current_boss(st)
+                if boss:
+                    await self._maintain_current_boss(guild, boss)
+                else:
+                    await self._maybe_spawn_scheduled_boss(guild)
+            except Exception:
+                traceback.print_exc()
+                continue
 
     @boss_loop.before_loop
     async def _before_boss_loop(self):
@@ -3929,7 +3960,6 @@ class BossCog(commands.Cog):
         boss_name = str(boss.get("display_name", "the current boss"))
         channel = self._live_channel(ctx.guild, boss)
         same_channel = channel is not None and ctx.channel.id == channel.id
-        await self._log_boss_ui_event(ctx.guild, boss, heading="clearboss cleanup")
 
         if same_channel:
             try:
