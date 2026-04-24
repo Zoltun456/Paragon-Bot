@@ -91,23 +91,23 @@ BOSS_REACTION_FOCUS_NAMES = {
 }
 BOSS_ACTIVE_DURATION_MINUTES = 60
 BOSS_TARGET_CLEAR_MINUTES = max(15, BOSS_ACTIVE_DURATION_MINUTES // 4)
-BOSS_TURN_BUFFER_SECONDS = 2
-BOSS_TURN_WINDOW_SECONDS = 6
+BOSS_TURN_BUFFER_SECONDS = 5
+BOSS_TURN_WINDOW_SECONDS = 15
 BOSS_ATTACK_STAMINA_MAX = 2
-BOSS_ATTACK_STAMINA_REFILL_SECONDS = 10
+BOSS_ATTACK_STAMINA_REFILL_SECONDS = 20
 BOSS_SUPPORT_STAMINA_MAX = 2
-BOSS_SUPPORT_STAMINA_REFILL_SECONDS = 10
-BOSS_RES_COOLDOWN_ACTIVE_SECONDS = 10
-BOSS_SUPPORT_COOLDOWN_SECONDS = 10
-BOSS_SUPPORT_WINDOW_SECONDS = 10
-BOSS_GUARD_DURATION_SECONDS = 10
-BOSS_FOCUS_DURATION_SECONDS = 10
+BOSS_SUPPORT_STAMINA_REFILL_SECONDS = 20
+BOSS_RES_COOLDOWN_ACTIVE_SECONDS = 20
+BOSS_SUPPORT_COOLDOWN_SECONDS = 20
+BOSS_SUPPORT_WINDOW_SECONDS = 20
+BOSS_GUARD_DURATION_SECONDS = 20
+BOSS_FOCUS_DURATION_SECONDS = 20
 BOSS_FOCUS_DAMAGE_BONUS_PCT = 0.30
 BOSS_FOCUS_HIT_BONUS_PCT = 0.15
-BOSS_EXPOSE_DURATION_SECONDS = 10
+BOSS_EXPOSE_DURATION_SECONDS = 20
 BOSS_EXPOSE_DAMAGE_BONUS_PCT = 0.20
-BOSS_STUN_DURATION_SECONDS = 10
-BOSS_MARK_DURATION_SECONDS = 10
+BOSS_STUN_DURATION_SECONDS = 20
+BOSS_MARK_DURATION_SECONDS = 20
 BOSS_MARK_HIT_PENALTY_PCT = 0.15
 BOSS_MARK_DAMAGE_PENALTY_PCT = 0.20
 BOSS_MECHANIC_INTERVAL_MIN_SECONDS = BOSS_TURN_BUFFER_SECONDS
@@ -126,7 +126,7 @@ BOSS_FAILURE_PENALTY_PCT = max(0.75, float(BOSS_FAILURE_DEBUFF_PCT))
 BOSS_FAILURE_PENALTY_MINUTES = max(480, int(BOSS_FAILURE_DEBUFF_MINUTES))
 BOSS_PANEL_LOG_LIMIT = 10
 BOSS_PANEL_PLAYER_LIMIT = 10
-BOSS_PANEL_TIMER_STEP_SECONDS = 2
+BOSS_PANEL_TIMER_STEP_SECONDS = 5
 BOSS_PANEL_MESSAGE_DELETE_DELAY_SECONDS = 5
 BOSS_STAMINA_READY = "\N{LARGE GREEN CIRCLE}"
 BOSS_STAMINA_EMPTY = "\N{BLACK CIRCLE}"
@@ -1000,6 +1000,10 @@ def _current_boss(st: dict) -> dict:
     cur.setdefault("status_hash", "")
     cur.setdefault("feed_message_id", 0)
     cur.setdefault("feed_hash", "")
+    cur.setdefault("channel_created_at", "")
+    cur.setdefault("controls_build_count", 0)
+    cur.setdefault("panel_build_count", 0)
+    cur.setdefault("last_panel_build_at", "")
     cur.setdefault("feed_lines", [])
     cur["attackers"] = _as_dict(cur.get("attackers"))
     cur["recent_attackers"] = [int(uid) for uid in _as_list(cur.get("recent_attackers")) if _as_int(uid, 0) > 0]
@@ -1012,6 +1016,8 @@ def _current_boss(st: dict) -> dict:
     cur["controls_message_id"] = _as_int(cur.get("controls_message_id", 0), 0)
     cur["status_message_id"] = _as_int(cur.get("status_message_id", 0), 0)
     cur["feed_message_id"] = _as_int(cur.get("feed_message_id", 0), 0)
+    cur["controls_build_count"] = _as_int(cur.get("controls_build_count", 0), 0)
+    cur["panel_build_count"] = _as_int(cur.get("panel_build_count", 0), 0)
     cur.setdefault("affix_key", "bulwarked")
     cur.setdefault("affix_name", AFFIXES["bulwarked"]["name"])
     cur.setdefault("affix_desc", AFFIXES["bulwarked"]["desc"])
@@ -1351,6 +1357,7 @@ def _roll_damage(rng: random.Random, prestige: int, boss: dict) -> tuple[int, bo
 class BossCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._panel_locks: dict[int, asyncio.Lock] = {}
         if not self.boss_loop.is_running():
             self.boss_loop.start()
 
@@ -1358,16 +1365,69 @@ class BossCog(commands.Cog):
         if self.boss_loop.is_running():
             self.boss_loop.cancel()
 
+    def _panel_lock(self, guild_id: int) -> asyncio.Lock:
+        gid = int(guild_id)
+        lock = self._panel_locks.get(gid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._panel_locks[gid] = lock
+        return lock
+
+    def _mark_controls_build(self, boss: dict, now: datetime) -> None:
+        boss["controls_build_count"] = _as_int(boss.get("controls_build_count", 0), 0) + 1
+        boss["last_panel_build_at"] = _iso(now)
+
+    def _mark_panel_build(self, boss: dict, now: datetime) -> None:
+        boss["panel_build_count"] = _as_int(boss.get("panel_build_count", 0), 0) + 1
+        boss["last_panel_build_at"] = _iso(now)
+
+    def _boss_ui_log_lines(self, guild: discord.Guild, boss: dict, *, heading: str) -> list[str]:
+        boss_name = str(boss.get("display_name", "Unknown Boss")).strip() or "Unknown Boss"
+        channel = self._live_channel(guild, boss)
+        channel_name = str(boss.get("last_channel_name", _channel_name_for_boss(boss))).strip() or _channel_name_for_boss(boss)
+        channel_bits = [channel.mention if isinstance(channel, discord.TextChannel) else f"`#{channel_name}`"]
+        channel_id = _as_int(boss.get("channel_id", 0), 0)
+        if channel_id > 0:
+            channel_bits.append(f"`{channel_id}`")
+        channel_created_at = _parse_iso(boss.get("channel_created_at"))
+        last_panel_build_at = _parse_iso(boss.get("last_panel_build_at"))
+        lines = [
+            f"**{heading}**",
+            f"Boss: **{boss_name}**",
+            f"Channel: {' | '.join(channel_bits)}",
+            (
+                f"UI builds: controls **{_as_int(boss.get('controls_build_count', 0), 0)}** | "
+                f"panel **{_as_int(boss.get('panel_build_count', 0), 0)}**"
+            ),
+            (
+                f"Messages: controls `{_as_int(boss.get('controls_message_id', 0), 0)}` | "
+                f"status `{_as_int(boss.get('status_message_id', 0), 0)}` | "
+                f"feed `{_as_int(boss.get('feed_message_id', 0), 0)}`"
+            ),
+        ]
+        if channel_created_at is not None:
+            lines.append(f"Channel created: **{_fmt_local_spawn(channel_created_at)}**")
+        if last_panel_build_at is not None:
+            lines.append(f"Last UI build: **{_fmt_local_spawn(last_panel_build_at)}**")
+        return lines
+
+    async def _log_boss_ui_event(self, guild: discord.Guild, boss: dict, *, heading: str) -> None:
+        await self._announce_log(guild, "\n".join(self._boss_ui_log_lines(guild, boss, heading=heading)))
+
     async def _ensure_boss_channel(self, guild: discord.Guild, boss: dict) -> Optional[discord.TextChannel]:
         channel_id = _as_int(boss.get("channel_id", 0), 0)
         existing = guild.get_channel(channel_id)
         if isinstance(existing, discord.TextChannel):
+            if not str(boss.get("channel_created_at", "")).strip():
+                boss["channel_created_at"] = _iso(_utcnow())
             await self._sync_channel_name(guild, boss)
             return existing
 
         named = discord.utils.get(guild.text_channels, name=_channel_name_for_boss(boss))
         if isinstance(named, discord.TextChannel):
             boss["channel_id"] = int(named.id)
+            if not str(boss.get("channel_created_at", "")).strip():
+                boss["channel_created_at"] = _iso(_utcnow())
             await self._sync_channel_name(guild, boss)
             boss["last_channel_name"] = str(named.name)
             return named
@@ -1387,6 +1447,7 @@ class BossCog(commands.Cog):
 
         boss["channel_id"] = int(channel.id)
         boss["last_channel_name"] = str(channel.name)
+        boss["channel_created_at"] = _iso(_utcnow())
         return channel
 
     async def _sync_channel_name(self, guild: discord.Guild, boss: dict) -> None:
@@ -1446,6 +1507,7 @@ class BossCog(commands.Cog):
             controls_message = await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
         except (discord.Forbidden, discord.HTTPException):
             return None
+        self._mark_controls_build(boss, _utcnow())
         await self._track_control_message(boss, controls_message)
         boss["controls_hash"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
         return channel.get_partial_message(controls_message.id)
@@ -1465,6 +1527,7 @@ class BossCog(commands.Cog):
             boss["feed_hash"] = ""
         except (discord.Forbidden, discord.HTTPException):
             return None
+        self._mark_panel_build(boss, _utcnow())
         await save_data()
         return {
             "status": channel.get_partial_message(status_message.id),
@@ -1491,6 +1554,7 @@ class BossCog(commands.Cog):
         rebuilt = await self._create_status_and_feed_messages(boss, channel)
         if rebuilt is not None:
             await self._prune_channel_to_panel(channel, boss)
+            await self._log_boss_ui_event(channel.guild, boss, heading="Boss UI rebuilt")
         return rebuilt
 
     async def _track_control_message(self, boss: dict, message: discord.Message) -> None:
@@ -1511,6 +1575,7 @@ class BossCog(commands.Cog):
         channel: discord.TextChannel,
     ) -> Optional[dict[str, discord.PartialMessage]]:
         del guild
+        had_existing_panel = bool(self._panel_message_ids(boss))
         for message_id in self._panel_message_ids(boss):
             try:
                 await channel.get_partial_message(message_id).delete()
@@ -1524,6 +1589,8 @@ class BossCog(commands.Cog):
         if noncontrols is None:
             return None
         await self._prune_channel_to_panel(channel, boss)
+        if had_existing_panel:
+            await self._log_boss_ui_event(channel.guild, boss, heading="Boss UI recreated")
         return {
             "controls": controls,
             "status": noncontrols["status"],
@@ -1716,43 +1783,50 @@ class BossCog(commands.Cog):
     ) -> Optional[discord.Message]:
         if channel is None:
             return None
-        messages = await self._ensure_panel_messages(guild, boss, channel)
-        if messages is None:
-            return None
-        now = _utcnow()
-        payloads = {
-            "status": self._fit_panel_content(self._status_panel_lines(guild, boss, now)),
-            "feed": self._fit_panel_content(self._feed_panel_lines(boss), clip_long_lines=False),
-        }
-        hash_keys = {
-            "status": "status_hash",
-            "feed": "feed_hash",
-        }
-        id_keys = {
-            "status": "status_message_id",
-            "feed": "feed_message_id",
-        }
-        controls_message: Optional[discord.PartialMessage] = messages.get("controls")
-        for key in ("status", "feed"):
-            content = payloads[key]
-            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            message = messages[key]
-            if not force and str(boss.get(hash_keys[key], "")).strip() == digest:
-                continue
-            try:
-                await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
-            except discord.NotFound:
-                rebuilt = await self._rebuild_noncontrol_messages(boss, channel)
-                if rebuilt is None:
+        async with self._panel_lock(guild.id):
+            while True:
+                messages = await self._ensure_panel_messages(guild, boss, channel)
+                if messages is None:
                     return None
-                return await self._refresh_boss_panel(guild, boss, channel, force=True)
-            except (discord.Forbidden, discord.HTTPException):
-                return None
-            boss[hash_keys[key]] = digest
-            boss[id_keys[key]] = int(message.id)
-        if controls_message is not None:
-            _register_control_message(boss, controls_message.id)
-        return controls_message
+                now = _utcnow()
+                payloads = {
+                    "status": self._fit_panel_content(self._status_panel_lines(guild, boss, now)),
+                    "feed": self._fit_panel_content(self._feed_panel_lines(boss), clip_long_lines=False),
+                }
+                hash_keys = {
+                    "status": "status_hash",
+                    "feed": "feed_hash",
+                }
+                id_keys = {
+                    "status": "status_message_id",
+                    "feed": "feed_message_id",
+                }
+                controls_message: Optional[discord.PartialMessage] = messages.get("controls")
+                retry = False
+                for key in ("status", "feed"):
+                    content = payloads[key]
+                    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    message = messages[key]
+                    if not force and str(boss.get(hash_keys[key], "")).strip() == digest:
+                        continue
+                    try:
+                        await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
+                    except discord.NotFound:
+                        rebuilt = await self._rebuild_noncontrol_messages(boss, channel)
+                        if rebuilt is None:
+                            return None
+                        force = True
+                        retry = True
+                        break
+                    except (discord.Forbidden, discord.HTTPException):
+                        return None
+                    boss[hash_keys[key]] = digest
+                    boss[id_keys[key]] = int(message.id)
+                if retry:
+                    continue
+                if controls_message is not None:
+                    _register_control_message(boss, controls_message.id)
+                return controls_message
 
     async def _send_boss_message(
         self,
@@ -1832,7 +1906,7 @@ class BossCog(commands.Cog):
         if immediate:
             delay = int(BOSS_PHASE_TRIGGER_DELAY_SECONDS)
         elif delay_seconds is not None:
-            delay = max(1, min(10, int(delay_seconds)))
+            delay = max(1, min(20, int(delay_seconds)))
         else:
             delay = self._mechanic_interval_seconds(boss)
         boss["next_mechanic_at"] = _iso(now + timedelta(seconds=delay))
@@ -1956,7 +2030,7 @@ class BossCog(commands.Cog):
             lines.append("Its shell cracks for a moment. Push damage while the opening is there.")
         elif phase == 3:
             targets = self._mechanic_targets(guild, boss, limit=max(1, min(2, _as_int(boss.get("target_fighters", 1), 1))))
-            duration = min(10, int(round(BOSS_MARK_DURATION_SECONDS * float(_affix_data(boss).get("mark_duration_mult", 1.0)))))
+            duration = min(20, int(round(BOSS_MARK_DURATION_SECONDS * float(_affix_data(boss).get("mark_duration_mult", 1.0)))))
             for member in targets:
                 _set_mark(
                     boss,
@@ -2078,7 +2152,7 @@ class BossCog(commands.Cog):
                     f"The raid braces together and cracks the boss open. Damage is boosted by **{_fmt_pct(boss['exposed_bonus_pct'])}** for **{_fmt_remaining_panel(BOSS_EXPOSE_DURATION_SECONDS)}**."
                 )
             elif key == "soul_scream":
-                stun_seconds = min(10, int(BOSS_STUN_DURATION_SECONDS + _as_int(affix.get("stun_bonus_seconds", 0), 0)))
+                stun_seconds = min(20, int(BOSS_STUN_DURATION_SECONDS + _as_int(affix.get("stun_bonus_seconds", 0), 0)))
                 boss["stunned_until"] = _iso(now + timedelta(seconds=stun_seconds))
                 lines.append(f"The scream is cut off. The boss is staggered for **{_fmt_remaining_panel(stun_seconds)}**.")
             elif key == "blight_bloom":
@@ -2114,7 +2188,7 @@ class BossCog(commands.Cog):
                     lines.append("The raid barely avoids the full impact, but the boss still slips away from the pressure.")
                 lines.append(f"The boss siphons **{_fmt_num(healed)} HP** back from the shockwave.")
             elif key == "soul_scream":
-                extra = min(10, 6 + (_as_int(boss.get("phase", 1), 1) * 2))
+                extra = min(20, 10 + (_as_int(boss.get("phase", 1), 1) * 3))
                 targets = self._mechanic_targets(guild, boss, limit=max(1, min(4, _as_int(boss.get("target_fighters", 1), 1) + 1)))
                 caught: list[str] = []
                 for member in targets:
@@ -2143,7 +2217,7 @@ class BossCog(commands.Cog):
                     )
                 lines.append(f"The boss recovers **{_fmt_num(healed)} HP** during the chaos.")
             elif key == "blight_bloom":
-                duration = min(10, int(round(BOSS_MARK_DURATION_SECONDS * float(affix.get("mark_duration_mult", 1.0)))))
+                duration = min(20, int(round(BOSS_MARK_DURATION_SECONDS * float(affix.get("mark_duration_mult", 1.0)))))
                 targets = self._mechanic_targets(guild, boss, limit=max(1, min(4, _as_int(boss.get("target_fighters", 1), 1) + 1)))
                 marked: list[str] = []
                 for member in targets:
@@ -2269,6 +2343,10 @@ class BossCog(commands.Cog):
             "status_hash": "",
             "feed_message_id": 0,
             "feed_hash": "",
+            "channel_created_at": "",
+            "controls_build_count": 0,
+            "panel_build_count": 0,
+            "last_panel_build_at": "",
             "feed_lines": [],
         }
 
@@ -2331,6 +2409,7 @@ class BossCog(commands.Cog):
         panel = await self._refresh_boss_panel(guild, boss, channel, force=True)
         if panel is not None:
             await self._prune_channel_to_panel(channel, boss)
+            await self._log_boss_ui_event(guild, boss, heading="Boss chamber ready")
 
     async def _announce_log(self, guild: discord.Guild, text: str) -> None:
         log_channel = get_log_channel(guild)
@@ -2778,7 +2857,7 @@ class BossCog(commands.Cog):
         action = rng.choices(list(weights.keys()), weights=list(weights.values()), k=1)[0]
 
         if action == "ashen_claw":
-            extra = min(10, rng.randint(6, 10) + phase)
+            extra = min(20, rng.randint(10, 16) + phase)
             if _consume_ward(row, now):
                 return f"**{RETALIATION_NAMES[action]}** crashes into {attacker.mention}'s guard and splinters harmlessly."
             _set_attack_wait(
@@ -2796,7 +2875,7 @@ class BossCog(commands.Cog):
         if action == "grave_brand":
             if _consume_ward(row, now):
                 return f"**{RETALIATION_NAMES[action]}** tries to brand {attacker.mention}, but their guard holds."
-            duration = min(10, int(round(BOSS_MARK_DURATION_SECONDS * float(affix.get("mark_duration_mult", 1.0)))))
+            duration = min(20, int(round(BOSS_MARK_DURATION_SECONDS * float(affix.get("mark_duration_mult", 1.0)))))
             _set_mark(
                 boss,
                 attacker.id,
@@ -2813,7 +2892,7 @@ class BossCog(commands.Cog):
             )
 
         if action == "iron_sentence":
-            extra = min(10, rng.randint(6, 10) + phase)
+            extra = min(20, rng.randint(10, 16) + phase)
             if _consume_ward(row, now):
                 return f"**{RETALIATION_NAMES[action]}** catches the guard instead of {attacker.mention}."
             _set_attack_wait(
@@ -2827,7 +2906,7 @@ class BossCog(commands.Cog):
                 row,
                 now,
                 boss=boss,
-                wait_seconds=min(10, max(max(2, extra - 4), _support_stamina_wait_seconds(row, now, boss=boss))),
+                wait_seconds=min(20, max(max(5, extra - 5), _support_stamina_wait_seconds(row, now, boss=boss))),
                 charges=0,
             )
             row["cooldown_extensions"] = _as_int(row.get("cooldown_extensions", 0), 0) + 1
@@ -2836,9 +2915,9 @@ class BossCog(commands.Cog):
             )
 
         if action == "sundering_roar":
-            extra = min(10, rng.randint(6, 10) + phase)
+            extra = min(20, rng.randint(10, 16) + phase)
             if _consume_ward(row, now):
-                self._schedule_next_mechanic(boss, now, delay_seconds=10)
+                self._schedule_next_mechanic(boss, now, delay_seconds=20)
                 return f"**{RETALIATION_NAMES[action]}** is absorbed by the guard, but the chamber still starts to rumble."
             _set_attack_wait(
                 row,
@@ -2848,7 +2927,7 @@ class BossCog(commands.Cog):
                 charges=0,
             )
             row["cooldown_extensions"] = _as_int(row.get("cooldown_extensions", 0), 0) + 1
-            self._schedule_next_mechanic(boss, now, delay_seconds=10)
+            self._schedule_next_mechanic(boss, now, delay_seconds=20)
             return (
                 f"**{RETALIATION_NAMES[action]}** staggers {attacker.mention} and accelerates the next mechanic. Attack delayed **{_fmt_remaining(extra)}**."
             )
@@ -2865,10 +2944,10 @@ class BossCog(commands.Cog):
         if action == "sable_chain":
             ally = _pick_other_recent_attacker(guild, boss, attacker.id)
             if ally is None:
-                self._schedule_next_mechanic(boss, now, delay_seconds=10)
+                self._schedule_next_mechanic(boss, now, delay_seconds=20)
                 return f"**{RETALIATION_NAMES[action]}** scrapes the walls and drags the next mechanic closer."
             ally_row = _participant_row(boss, ally)
-            extra = min(10, rng.randint(6, 10))
+            extra = min(20, rng.randint(10, 16))
             if _consume_ward(ally_row, now):
                 return f"**{RETALIATION_NAMES[action]}** lashes toward {ally.mention}, but their guard catches the chain."
             _set_attack_wait(
@@ -2894,7 +2973,7 @@ class BossCog(commands.Cog):
                 f"**{RETALIATION_NAMES[action]}** downs {attacker.mention}. Another raider must use `{COMMAND_PREFIX}res @{attacker.display_name}` before they can act again."
             )
 
-        self._schedule_next_mechanic(boss, now, delay_seconds=10)
+        self._schedule_next_mechanic(boss, now, delay_seconds=20)
         return f"**{RETALIATION_NAMES[action]}** fixes on the raid and hastens the next telegraphed mechanic."
 
     async def _maybe_spawn_scheduled_boss(self, guild: discord.Guild) -> None:
@@ -3521,7 +3600,7 @@ class BossCog(commands.Cog):
 
         await self._send_boss_message(channel, boss, "That support action is not recognized.", reference=reference)
 
-    @tasks.loop(seconds=2)
+    @tasks.loop(seconds=5)
     async def boss_loop(self):
         for guild in list(self.bot.guilds):
             st = _root_state(guild.id)
@@ -3823,6 +3902,7 @@ class BossCog(commands.Cog):
         boss_name = str(boss.get("display_name", "the current boss"))
         channel = self._live_channel(ctx.guild, boss)
         same_channel = channel is not None and ctx.channel.id == channel.id
+        await self._log_boss_ui_event(ctx.guild, boss, heading="clearboss cleanup")
 
         if same_channel:
             try:
