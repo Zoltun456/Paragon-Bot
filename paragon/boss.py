@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import random
@@ -56,9 +57,13 @@ from .xp import grant_fixed_boost, grant_fixed_debuff
 BOSS_STATE_KEY = "boss"
 BOSS_ATTACKER_LIMIT = 5
 BOSS_CHANNEL_NAME = "active-boss"
-BOSS_CONTROL_MESSAGE_LIMIT = 5
+BOSS_CONTROL_MESSAGE_LIMIT = 1
 BOSS_REACTION_ATTACK = EMOJI_CROSSED_SWORDS
 BOSS_REACTION_RES = EMOJI_HEART
+BOSS_REACTION_GUARD = "\N{SHIELD}\N{VARIATION SELECTOR-16}"
+BOSS_REACTION_INTERRUPT = "\N{NO ENTRY}"
+BOSS_REACTION_PURGE = "\N{SPARKLES}"
+BOSS_REACTION_FOCUS = "\N{DIRECT HIT}"
 BOSS_REACTION_ATTACK_NAMES = {
     BOSS_REACTION_ATTACK.replace("\ufe0f", ""),
     "crossed_swords",
@@ -67,9 +72,27 @@ BOSS_REACTION_RES_NAMES = {
     BOSS_REACTION_RES.replace("\ufe0f", ""),
     "heart",
 }
+BOSS_REACTION_GUARD_NAMES = {
+    BOSS_REACTION_GUARD.replace("\ufe0f", ""),
+    "shield",
+}
+BOSS_REACTION_INTERRUPT_NAMES = {
+    BOSS_REACTION_INTERRUPT.replace("\ufe0f", ""),
+    "no_entry",
+}
+BOSS_REACTION_PURGE_NAMES = {
+    BOSS_REACTION_PURGE.replace("\ufe0f", ""),
+    "sparkles",
+}
+BOSS_REACTION_FOCUS_NAMES = {
+    BOSS_REACTION_FOCUS.replace("\ufe0f", ""),
+    "dart",
+    "direct_hit",
+}
 BOSS_ACTIVE_DURATION_MINUTES = 60
 BOSS_TARGET_CLEAR_MINUTES = max(15, BOSS_ACTIVE_DURATION_MINUTES // 4)
-BOSS_ATTACK_COOLDOWN_ACTIVE_SECONDS = 75
+BOSS_ATTACK_STAMINA_MAX = 2
+BOSS_ATTACK_STAMINA_REFILL_SECONDS = 90
 BOSS_RES_COOLDOWN_ACTIVE_SECONDS = 45
 BOSS_SUPPORT_COOLDOWN_SECONDS = 45
 BOSS_SUPPORT_WINDOW_SECONDS = 90
@@ -89,14 +112,20 @@ BOSS_MECHANIC_WARNING_MIN_SECONDS = 20
 BOSS_MECHANIC_WARNING_MAX_SECONDS = 30
 BOSS_PHASE_TRIGGER_DELAY_SECONDS = 25
 BOSS_PHASE_THRESHOLDS = (75, 50, 25)
-BOSS_BASE_REWARD_PCT = min(0.08, max(0.03, float(BOSS_VICTORY_BOOST_PCT)))
-BOSS_BASE_REWARD_MINUTES = min(240, max(90, int(BOSS_VICTORY_BOOST_MINUTES)))
-BOSS_BONUS_REWARD_PCT = 0.02
-BOSS_BONUS_REWARD_MINUTES = 90
-BOSS_SURVIVOR_REWARD_PCT = 0.01
-BOSS_SURVIVOR_REWARD_MINUTES = 60
-BOSS_FAILURE_PENALTY_PCT = min(0.35, max(0.10, float(BOSS_FAILURE_DEBUFF_PCT)))
-BOSS_FAILURE_PENALTY_MINUTES = min(120, max(30, int(BOSS_FAILURE_DEBUFF_MINUTES)))
+BOSS_BASE_REWARD_PCT = max(1.50, float(BOSS_VICTORY_BOOST_PCT))
+BOSS_BASE_REWARD_MINUTES = max(720, int(BOSS_VICTORY_BOOST_MINUTES))
+BOSS_BONUS_REWARD_PCT = 0.50
+BOSS_BONUS_REWARD_MINUTES = 360
+BOSS_SURVIVOR_REWARD_PCT = 0.25
+BOSS_SURVIVOR_REWARD_MINUTES = 240
+BOSS_FAILURE_PENALTY_PCT = max(0.75, float(BOSS_FAILURE_DEBUFF_PCT))
+BOSS_FAILURE_PENALTY_MINUTES = max(480, int(BOSS_FAILURE_DEBUFF_MINUTES))
+BOSS_PANEL_LOG_LIMIT = 8
+BOSS_PANEL_PLAYER_LIMIT = 10
+BOSS_PANEL_TIMER_STEP_SECONDS = 5
+BOSS_PANEL_MESSAGE_DELETE_DELAY_SECONDS = 5
+BOSS_STAMINA_READY = "\N{LARGE GREEN CIRCLE}"
+BOSS_STAMINA_EMPTY = "\N{BLACK CIRCLE}"
 
 NAME_PREFIXES = (
     "Ael",
@@ -389,6 +418,35 @@ def _fmt_pct(value: int | float) -> str:
     return f"{float(value) * 100.0:.0f}%"
 
 
+def _fmt_remaining_panel(seconds: int) -> str:
+    total = max(0, int(seconds))
+    step = max(1, int(BOSS_PANEL_TIMER_STEP_SECONDS))
+    rounded = ((total + step - 1) // step) * step if total > 0 else 0
+    return _fmt_remaining(rounded)
+
+
+def _progress_bar(current: int, maximum: int, *, width: int = 12) -> str:
+    max_value = max(1, int(maximum))
+    cur_value = max(0, min(max_value, int(current)))
+    filled = int(round((cur_value / float(max_value)) * width))
+    filled = max(0, min(width, filled))
+    return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
+
+
+def _stamina_icons(charges: int, maximum: int) -> str:
+    filled = max(0, min(int(maximum), int(charges)))
+    empty = max(0, int(maximum) - filled)
+    return (BOSS_STAMINA_READY * filled) + (BOSS_STAMINA_EMPTY * empty)
+
+
+def _clip_text(text: object, max_len: int) -> str:
+    raw = str(text or "").strip()
+    limit = max(4, int(max_len))
+    if len(raw) <= limit:
+        return raw
+    return raw[: limit - 3].rstrip() + "..."
+
+
 def _boss_history(st: dict) -> dict:
     hist = st.get("history")
     if not isinstance(hist, dict):
@@ -429,7 +487,7 @@ def _affix_data(boss: dict) -> dict:
 
 
 def _attack_cooldown_seconds(boss: dict) -> int:
-    return int(BOSS_ATTACK_COOLDOWN_ACTIVE_SECONDS)
+    return int(BOSS_ATTACK_STAMINA_REFILL_SECONDS)
 
 
 def _res_cooldown_seconds(boss: dict) -> int:
@@ -457,6 +515,86 @@ def _support_score(row: dict) -> int:
         + _as_int(row.get("focuses", 0), 0)
         + (_as_int(row.get("mechanics_countered", 0), 0) * 2)
     )
+
+
+def _target_attack_budget(window_seconds: int) -> int:
+    refill = max(10, int(BOSS_ATTACK_STAMINA_REFILL_SECONDS))
+    window = max(1, int(window_seconds))
+    return max(1, int(BOSS_ATTACK_STAMINA_MAX) + (window // refill))
+
+
+def _attack_stamina_max(boss: dict) -> int:
+    return int(BOSS_ATTACK_STAMINA_MAX)
+
+
+def _attack_stamina_refill_seconds(boss: dict) -> int:
+    return int(BOSS_ATTACK_STAMINA_REFILL_SECONDS)
+
+
+def _sync_attack_stamina(row: dict, now: datetime, *, boss: Optional[dict] = None) -> int:
+    maximum = max(1, int(BOSS_ATTACK_STAMINA_MAX if boss is None else _attack_stamina_max(boss)))
+    refill = max(10, int(BOSS_ATTACK_STAMINA_REFILL_SECONDS if boss is None else _attack_stamina_refill_seconds(boss)))
+    charges = max(0, min(maximum, _as_int(row.get("attack_charges", maximum), maximum)))
+    started_at = _parse_iso(row.get("attack_stamina_started_at"))
+
+    if charges >= maximum:
+        row["attack_charges"] = maximum
+        row["attack_stamina_started_at"] = ""
+        return maximum
+
+    if started_at is None:
+        started_at = now
+
+    elapsed = max(0, int((now - started_at).total_seconds()))
+    recovered = elapsed // refill
+    if recovered > 0:
+        charges = min(maximum, charges + recovered)
+        if charges >= maximum:
+            row["attack_charges"] = maximum
+            row["attack_stamina_started_at"] = ""
+            return maximum
+        started_at = started_at + timedelta(seconds=recovered * refill)
+
+    row["attack_charges"] = charges
+    row["attack_stamina_started_at"] = _iso(started_at)
+    return charges
+
+
+def _attack_stamina_wait_seconds(row: dict, now: datetime, *, boss: Optional[dict] = None) -> int:
+    maximum = max(1, int(BOSS_ATTACK_STAMINA_MAX if boss is None else _attack_stamina_max(boss)))
+    refill = max(10, int(BOSS_ATTACK_STAMINA_REFILL_SECONDS if boss is None else _attack_stamina_refill_seconds(boss)))
+    charges = _sync_attack_stamina(row, now, boss=boss)
+    if charges >= maximum:
+        return 0
+    started_at = _parse_iso(row.get("attack_stamina_started_at")) or now
+    elapsed = max(0, int((now - started_at).total_seconds()))
+    return max(0, refill - (elapsed % refill))
+
+
+def _consume_attack_stamina(row: dict, now: datetime, *, boss: Optional[dict] = None, amount: int = 1) -> bool:
+    maximum = max(1, int(BOSS_ATTACK_STAMINA_MAX if boss is None else _attack_stamina_max(boss)))
+    charges = _sync_attack_stamina(row, now, boss=boss)
+    cost = max(1, int(amount))
+    if charges < cost:
+        return False
+    row["attack_charges"] = charges - cost
+    if charges >= maximum:
+        row["attack_stamina_started_at"] = _iso(now)
+    return True
+
+
+def _feed_lines(boss: dict) -> list[str]:
+    rows = [str(v).strip() for v in _as_list(boss.get("feed_lines"))]
+    cleaned = [row for row in rows if row]
+    boss["feed_lines"] = cleaned[:BOSS_PANEL_LOG_LIMIT]
+    return boss["feed_lines"]
+
+
+def _push_feed_line(boss: dict, text: str, *, now: Optional[datetime] = None) -> None:
+    stamp = (now or _utcnow()).astimezone(LOCAL_TZ).strftime("%I:%M:%S %p").lstrip("0")
+    rows = [line for line in _feed_lines(boss) if line != text]
+    rows.insert(0, f"[{stamp}] {text}")
+    boss["feed_lines"] = rows[:BOSS_PANEL_LOG_LIMIT]
 
 
 def _phase_triggers(boss: dict) -> list[int]:
@@ -634,6 +772,9 @@ def _current_boss(st: dict) -> dict:
     cur.setdefault("recent_attackers", [])
     cur.setdefault("control_message_ids", [])
     cur.setdefault("last_message_id", 0)
+    cur.setdefault("panel_message_id", 0)
+    cur.setdefault("panel_hash", "")
+    cur.setdefault("feed_lines", [])
     cur["attackers"] = _as_dict(cur.get("attackers"))
     cur["recent_attackers"] = [int(uid) for uid in _as_list(cur.get("recent_attackers")) if _as_int(uid, 0) > 0]
     cur["control_message_ids"] = [
@@ -642,6 +783,7 @@ def _current_boss(st: dict) -> dict:
         if _as_int(mid, 0) > 0
     ][:BOSS_CONTROL_MESSAGE_LIMIT]
     cur["last_message_id"] = _as_int(cur.get("last_message_id", 0), 0)
+    cur["panel_message_id"] = _as_int(cur.get("panel_message_id", 0), 0)
     cur.setdefault("affix_key", "bulwarked")
     cur.setdefault("affix_name", AFFIXES["bulwarked"]["name"])
     cur.setdefault("affix_desc", AFFIXES["bulwarked"]["desc"])
@@ -664,6 +806,7 @@ def _current_boss(st: dict) -> dict:
     cur["phase_triggers"] = _phase_triggers(cur)
     cur["pending_mechanic"] = _pending_mechanic(cur)
     cur["marks"] = _player_marks(cur)
+    cur["feed_lines"] = _feed_lines(cur)
     return cur
 
 
@@ -726,7 +869,7 @@ def _guild_snapshot(guild: discord.Guild) -> dict[str, object]:
     elif int(round(avg_prestige)) >= max(1, int(boss_prestige) // 2):
         crit_chance = 0.12
     expected_damage_per_attack = expected_hit * (avg_roll + avg_bonus + (crit_chance * max(1, int(BOSS_DAMAGE_CRIT_BONUS))))
-    attacks_per_window = max(1, int((BOSS_TARGET_CLEAR_MINUTES * 60) // max(10, int(BOSS_ATTACK_COOLDOWN_ACTIVE_SECONDS))))
+    attacks_per_window = _target_attack_budget(BOSS_TARGET_CLEAR_MINUTES * 60)
     hp = max(40_000, int(round(target_fighters * attacks_per_window * expected_damage_per_attack * 0.80)))
     return {
         "member_count": int(member_count),
@@ -851,6 +994,8 @@ def _participant_row(boss: dict, member: discord.Member) -> dict:
     row.setdefault("next_attack_ts", 0.0)
     row.setdefault("next_res_ts", 0.0)
     row.setdefault("next_support_ts", 0.0)
+    row.setdefault("attack_charges", int(BOSS_ATTACK_STAMINA_MAX))
+    row.setdefault("attack_stamina_started_at", "")
     row.setdefault("first_attack_at", "")
     row.setdefault("last_attack_at", "")
     row.setdefault("guards", 0)
@@ -1036,14 +1181,222 @@ class BossCog(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             pass
 
+    def _panel_reactions(self) -> tuple[str, ...]:
+        return (
+            BOSS_REACTION_ATTACK,
+            BOSS_REACTION_RES,
+            BOSS_REACTION_GUARD,
+            BOSS_REACTION_INTERRUPT,
+            BOSS_REACTION_PURGE,
+            BOSS_REACTION_FOCUS,
+        )
+
     async def _track_control_message(self, boss: dict, message: discord.Message) -> None:
         _register_control_message(boss, message.id)
+        boss["panel_message_id"] = int(message.id)
+        boss["panel_hash"] = ""
         await save_data()
-        for emoji in (BOSS_REACTION_ATTACK, BOSS_REACTION_RES):
+        for emoji in self._panel_reactions():
             try:
                 await message.add_reaction(emoji)
             except (discord.Forbidden, discord.HTTPException):
                 pass
+
+    async def _ensure_panel_message(
+        self,
+        guild: discord.Guild,
+        boss: dict,
+        channel: discord.TextChannel,
+    ) -> Optional[discord.Message]:
+        message_id = _as_int(boss.get("panel_message_id", 0), 0) or _as_int(boss.get("last_message_id", 0), 0)
+        if message_id > 0:
+            boss["panel_message_id"] = int(message_id)
+            _register_control_message(boss, message_id)
+            return channel.get_partial_message(message_id)
+        try:
+            message = await channel.send("Preparing raid panel...")
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+        await self._track_control_message(boss, message)
+        return message
+
+    def _panel_status_line(self, boss: dict, now: datetime) -> str:
+        status = str(boss.get("status", "idle")).strip().lower()
+        if status == "idle":
+            idle_expires_at = _parse_iso(boss.get("idle_expires_at"))
+            if idle_expires_at is None:
+                return f"Status: Idle. First `{COMMAND_PREFIX}attack` starts the timer."
+            remaining = max(0, int((idle_expires_at - now).total_seconds()))
+            return (
+                f"Status: Idle. First `{COMMAND_PREFIX}attack` starts the timer. "
+                f"Idle window: **{_fmt_remaining_panel(remaining)}**."
+            )
+        expires_at = _parse_iso(boss.get("expires_at"))
+        if expires_at is None:
+            return "Status: Active."
+        remaining = max(0, int((expires_at - now).total_seconds()))
+        return f"Status: Active. Time left: **{_fmt_remaining_panel(remaining)}**."
+
+    def _panel_current_action_line(self, boss: dict, now: datetime) -> str:
+        pending = _pending_mechanic(boss)
+        key = str(pending.get("key", "")).strip().lower()
+        if key:
+            due_at = _parse_iso(pending.get("due_at"))
+            remaining = max(0, int((due_at - now).total_seconds())) if due_at is not None else 0
+            return (
+                f"Current attack: **{pending.get('name', 'Unknown Mechanic')}** in **{_fmt_remaining_panel(remaining)}** "
+                f"| counter with `{COMMAND_PREFIX}{pending.get('counter', 'guard')}` "
+                f"(**{_pending_response_count(boss)} / {_as_int(pending.get('required', 1), 1)}**)"
+            )
+        if _boss_is_stunned(boss, now):
+            stunned_until = _parse_iso(boss.get("stunned_until"))
+            remaining = max(0, int((stunned_until - now).total_seconds())) if stunned_until is not None else 0
+            return f"Current attack: **Staggered** for **{_fmt_remaining_panel(remaining)}**."
+        if str(boss.get("status", "idle")).strip().lower() != "active":
+            return f"Current attack: **Dormant**. Open with `{COMMAND_PREFIX}attack`."
+        next_mechanic_at = _parse_iso(boss.get("next_mechanic_at"))
+        if next_mechanic_at is not None and next_mechanic_at > now:
+            remaining = max(0, int((next_mechanic_at - now).total_seconds()))
+            return f"Current attack: Building pressure. Next mechanic in **{_fmt_remaining_panel(remaining)}**."
+        return "Current attack: Looking for an opening."
+
+    def _panel_effect_lines(self, boss: dict, now: datetime) -> list[str]:
+        lines: list[str] = []
+        exposed_bonus = _boss_exposed_bonus(boss, now)
+        if exposed_bonus > 0.0:
+            exposed_until = _parse_iso(boss.get("exposed_until"))
+            remaining = max(0, int((exposed_until - now).total_seconds())) if exposed_until is not None else 0
+            lines.append(
+                f"Boss state: Exposed for **+{_fmt_pct(exposed_bonus)} damage** for **{_fmt_remaining_panel(remaining)}**."
+            )
+        marked_count = len(_player_marks(boss))
+        downed_count = len(_as_dict(boss.get("downed")))
+        if marked_count > 0 or downed_count > 0:
+            bits: list[str] = []
+            if marked_count > 0:
+                bits.append(f"marked **{marked_count}**")
+            if downed_count > 0:
+                bits.append(f"downed **{downed_count}**")
+            lines.append("Raid state: " + " | ".join(bits) + ".")
+        return lines
+
+    def _panel_player_lines(self, guild: discord.Guild, boss: dict, now: datetime) -> list[str]:
+        rows = self._contributor_rows(boss)
+        rows.sort(
+            key=lambda item: (
+                -_as_int(item[1].get("damage", 0), 0),
+                -_support_score(item[1]),
+                -_as_int(item[1].get("attacks", 0), 0),
+                item[0],
+            )
+        )
+        lines: list[str] = []
+        shown_rows = rows[:BOSS_PANEL_PLAYER_LIMIT]
+        for uid, row in shown_rows:
+            member = guild.get_member(uid)
+            name = _clip_text(member.display_name if member is not None else str(row.get("display_name", uid)), 18)
+            charges = _sync_attack_stamina(row, now, boss=boss)
+            wait_seconds = _attack_stamina_wait_seconds(row, now, boss=boss)
+            tags: list[str] = []
+            if _is_downed(boss, uid):
+                tags.append("DOWN")
+            if _has_ward(row, now):
+                tags.append("WARD")
+            if any(_focus_bonus(row, now)):
+                tags.append("FOCUS")
+            if str(uid) in _player_marks(boss):
+                tags.append("BLIGHT")
+            wait_label = f" +{_fmt_remaining_panel(wait_seconds)}" if wait_seconds > 0 and charges < _attack_stamina_max(boss) else ""
+            tag_label = f" [{' '.join(tags)}]" if tags else ""
+            lines.append(
+                f"- `{_stamina_icons(charges, _attack_stamina_max(boss))}` **{name}**{tag_label}{wait_label} "
+                f"| **{_fmt_num(row.get('damage', 0))}** dmg | **{_fmt_num(row.get('hits', 0))}/{_fmt_num(row.get('attacks', 0))}** hit"
+            )
+        if len(rows) > len(shown_rows):
+            lines.append(f"- ...and **{len(rows) - len(shown_rows)}** more raider(s).")
+        if not lines:
+            lines.append("- No raiders committed yet.")
+        return lines
+
+    def _panel_feed_display_lines(self, boss: dict) -> list[str]:
+        rows = _feed_lines(boss)
+        if not rows:
+            return ["- Waiting for the first swing."]
+        return [f"- {_clip_text(line, 115)}" for line in rows[:BOSS_PANEL_LOG_LIMIT]]
+
+    def _boss_panel_lines(self, guild: discord.Guild, boss: dict, now: datetime) -> list[str]:
+        hp = _as_int(boss.get("hp", 0), 0)
+        max_hp = _as_int(boss.get("max_hp", 0), 0)
+        lines = [
+            f"**{boss.get('display_name', 'Unknown Boss')}**",
+            (
+                f"HP: `{_progress_bar(hp, max_hp)}` **{_fmt_num(hp)} / {_fmt_num(max_hp)}** "
+                f"| Phase **{_phase_name(_as_int(boss.get('phase', 1), 1))}**"
+            ),
+            f"Affix: **{boss.get('affix_name', 'Unknown')}** | Boss prestige **{_fmt_num(boss.get('boss_prestige', 0))}**",
+            self._panel_status_line(boss, now),
+            self._panel_current_action_line(boss, now),
+        ]
+        lines.extend(self._panel_effect_lines(boss, now))
+        lines.append(
+            "Controls: "
+            f"{BOSS_REACTION_ATTACK} attack | {BOSS_REACTION_RES} revive | {BOSS_REACTION_GUARD} guard | "
+            f"{BOSS_REACTION_INTERRUPT} interrupt | {BOSS_REACTION_PURGE} purge | {BOSS_REACTION_FOCUS} focus"
+        )
+        lines.append("**Battle Feed**")
+        lines.extend(self._panel_feed_display_lines(boss))
+        lines.append("**Raiders**")
+        lines.extend(self._panel_player_lines(guild, boss, now))
+        return lines
+
+    def _fit_panel_content(self, lines: list[str]) -> str:
+        fitted = list(lines)
+        content = "\n".join(fitted)
+        while len(content) > 1900 and len(fitted) > 8:
+            fitted.pop()
+            content = "\n".join(fitted)
+        if len(content) > 1900:
+            fitted = [_clip_text(line, 160) for line in fitted]
+            content = "\n".join(fitted)
+        return content
+
+    async def _refresh_boss_panel(
+        self,
+        guild: discord.Guild,
+        boss: dict,
+        channel: Optional[discord.TextChannel],
+        *,
+        force: bool = False,
+    ) -> Optional[discord.Message]:
+        if channel is None:
+            return None
+        message = await self._ensure_panel_message(guild, boss, channel)
+        if message is None:
+            return None
+        now = _utcnow()
+        lines = self._boss_panel_lines(guild, boss, now)
+        content = self._fit_panel_content(lines)
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if not force and str(boss.get("panel_hash", "")).strip() == digest:
+            return message
+        try:
+            await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
+        except discord.NotFound:
+            boss["panel_message_id"] = 0
+            boss["panel_hash"] = ""
+            message = await self._ensure_panel_message(guild, boss, channel)
+            if message is None:
+                return None
+            try:
+                await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
+            except (discord.Forbidden, discord.HTTPException):
+                return None
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+        boss["panel_hash"] = digest
+        boss["panel_message_id"] = int(message.id)
+        _register_control_message(boss, message.id)
+        return message
 
     async def _send_boss_message(
         self,
@@ -1054,22 +1407,21 @@ class BossCog(commands.Cog):
         reference: Optional[discord.Message] = None,
         ping_here: bool = False,
     ) -> Optional[discord.Message]:
-        kwargs: dict[str, object] = {}
-        text = str(content or "")
-        if ping_here and channel.permissions_for(channel.guild.default_role).view_channel:
-            text = f"@here {text}"
-            kwargs["allowed_mentions"] = discord.AllowedMentions(everyone=True)
-        if reference is not None:
-            kwargs["reference"] = reference
-            kwargs["mention_author"] = False
-        try:
-            message = await channel.send(text, **kwargs)
-        except TypeError:
-            message = await channel.send(text)
-        except (discord.Forbidden, discord.HTTPException):
-            return None
-        await self._track_control_message(boss, message)
-        return message
+        del reference, ping_here
+        if _as_int(_as_dict(boss).get("event_id", 0), 0) <= 0:
+            try:
+                message = await channel.send(str(content or ""))
+            except (discord.Forbidden, discord.HTTPException):
+                return None
+            asyncio.create_task(
+                self._delete_message_later(message, delay_seconds=BOSS_PANEL_MESSAGE_DELETE_DELAY_SECONDS)
+            )
+            return message
+        now = _utcnow()
+        lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
+        for line in reversed(lines):
+            _push_feed_line(boss, line, now=now)
+        return await self._refresh_boss_panel(channel.guild, boss, channel)
 
     async def _remove_user_reaction(
         self,
@@ -1081,6 +1433,28 @@ class BossCog(commands.Cog):
         try:
             await channel.get_partial_message(int(message_id)).remove_reaction(emoji, member)
         except (discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
+
+    async def _delete_message_later(self, message: discord.Message, *, delay_seconds: int) -> None:
+        await asyncio.sleep(max(1, int(delay_seconds)))
+        try:
+            await message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def _prune_channel_to_panel(self, channel: discord.TextChannel, boss: dict) -> None:
+        keep_id = _as_int(boss.get("panel_message_id", 0), 0)
+        if keep_id <= 0:
+            return
+        try:
+            async for message in channel.history(limit=100):
+                if int(message.id) == keep_id:
+                    continue
+                try:
+                    await message.delete()
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+        except (discord.Forbidden, discord.HTTPException):
             pass
 
     def _mechanic_interval_seconds(self, boss: dict) -> int:
@@ -1523,6 +1897,9 @@ class BossCog(commands.Cog):
             "recent_attackers": [],
             "control_message_ids": [],
             "last_message_id": 0,
+            "panel_message_id": 0,
+            "panel_hash": "",
+            "feed_lines": [],
         }
 
     async def _spawn_boss(self, guild: discord.Guild, *, forced: bool = False) -> bool:
@@ -1564,61 +1941,25 @@ class BossCog(commands.Cog):
         *,
         forced: bool = False,
     ) -> None:
-        prefix = "@everyone " if channel.permissions_for(guild.default_role).view_channel else ""
-        timer_line = (
-            f"This boss is dormant until someone uses `{COMMAND_PREFIX}attack`. "
-            f"Once engaged, the kill timer starts for **{_fmt_duration_minutes(_as_int(boss.get('duration_minutes', 0), 0))}**."
+        _push_feed_line(
+            boss,
+            (
+                f"Raid boss appeared: {boss.get('display_name', 'Unknown Boss')} "
+                f"({boss.get('affix_name', 'Unknown')} | tuned for {_as_int(boss.get('target_fighters', 1), 1)} fighters)."
+            ),
         )
-        affix = _affix_data(boss)
-        lines = [
-            f"{prefix}**Raid Boss Appeared**",
-            f"**{boss.get('display_name', 'Unknown Boss')}**",
-            f"Affix: **{boss.get('affix_name', 'Unknown')}** - {boss.get('affix_desc', '')}",
-            f"HP: **{_fmt_num(boss.get('hp', 0))} / {_fmt_num(boss.get('max_hp', 0))}**",
+        _push_feed_line(
+            boss,
             (
-                f"Tuned for about **{_as_int(boss.get('target_fighters', 1), 1)}** fighters out of "
-                f"**{_as_int(boss.get('member_count', 1), 1)}** eligible prestige member(s)."
+                f"Use `{COMMAND_PREFIX}attack` or react {BOSS_REACTION_ATTACK} to start. "
+                f"Attack stamina refills one charge every {_fmt_remaining(_attack_cooldown_seconds(boss))}."
             ),
-            (
-                f"Target clear pace: about **{_fmt_duration_minutes(_as_int(boss.get('target_clear_minutes', BOSS_TARGET_CLEAR_MINUTES), BOSS_TARGET_CLEAR_MINUTES))}** "
-                "for a raid of that size, leaving solo or duo clears possible if the run goes well."
-            ),
-            (
-                f"Boss prestige: **{_as_int(boss.get('boss_prestige', 0), 0)}** "
-                f"(guild average **{_as_float(boss.get('avg_prestige', 0.0), 0.0):.1f}**). "
-                "Hit chance scales from **50%** at the low end to **100%** at the top end."
-            ),
-            timer_line,
-            f"`{COMMAND_PREFIX}attack` once every **{_fmt_remaining(_attack_cooldown_seconds(boss))}**",
-            f"`{COMMAND_PREFIX}res @user` or `{COMMAND_PREFIX}resurrect @user` to revive a downed raider",
-            f"`{COMMAND_PREFIX}guard`, `{COMMAND_PREFIX}interrupt`, `{COMMAND_PREFIX}purge [@user]`, `{COMMAND_PREFIX}focus [@user]` for raid support and mechanic counters",
-            f"React **{BOSS_REACTION_ATTACK}** to attack or **{BOSS_REACTION_RES}** to revive the oldest downed raider on the newest boss message",
-            f"`{COMMAND_PREFIX}boss` from anywhere to check status",
-            (
-                f"Victory reward: contributors receive **+{_fmt_pct(BOSS_BASE_REWARD_PCT)} XP/min** "
-                f"for **{_fmt_duration_minutes(int(BOSS_BASE_REWARD_MINUTES))}**."
-            ),
-            (
-                f"Failure penalty: contributors take **-{_fmt_pct(BOSS_FAILURE_PENALTY_PCT)} XP/min** "
-                f"for **{_fmt_duration_minutes(int(BOSS_FAILURE_PENALTY_MINUTES))}**."
-            ),
-        ]
-        ignored_count = max(
-            0,
-            _as_int(boss.get("total_member_count", 0), 0) - _as_int(boss.get("member_count", 0), 0),
         )
-        if ignored_count > 0:
-            lines.append(f"*Ignored **{ignored_count}** prestige 0 member(s) for boss tuning.*")
         if forced:
-            lines.append("*Forced spawn for testing/admin use.*")
-        try:
-            message = await channel.send(
-                "\n".join(lines),
-                allowed_mentions=discord.AllowedMentions(everyone=True),
-            )
-        except Exception:
-            return
-        await self._track_control_message(boss, message)
+            _push_feed_line(boss, "Forced spawn active for testing/admin use.")
+        panel = await self._refresh_boss_panel(guild, boss, channel, force=True)
+        if panel is not None:
+            await self._prune_channel_to_panel(channel, boss)
 
     async def _announce_log(self, guild: discord.Guild, text: str) -> None:
         log_channel = get_log_channel(guild)
@@ -2120,14 +2461,18 @@ class BossCog(commands.Cog):
             if idle_expires_at is not None and now >= idle_expires_at:
                 await self._resolve_idle_fade(guild, boss)
                 return
+            await self._refresh_boss_panel(guild, boss, channel)
             return
 
         if status != "active":
+            await self._refresh_boss_panel(guild, boss, channel)
             return
 
         expires_at = _parse_iso(boss.get("expires_at"))
         if expires_at is not None and now >= expires_at:
             await self._resolve_failure(guild, boss)
+            return
+        await self._refresh_boss_panel(guild, boss, channel)
 
     def _live_channel(self, guild: discord.Guild, boss: dict) -> Optional[discord.TextChannel]:
         channel = guild.get_channel(_as_int(boss.get("channel_id", 0), 0))
@@ -2146,6 +2491,10 @@ class BossCog(commands.Cog):
                 f"Affix: **{boss.get('affix_name', 'Unknown')}** | "
                 f"Phase: **{_phase_name(_as_int(boss.get('phase', 1), 1))}** | "
                 f"Target clear pace: **{_fmt_duration_minutes(_as_int(boss.get('target_clear_minutes', BOSS_TARGET_CLEAR_MINUTES), BOSS_TARGET_CLEAR_MINUTES))}**"
+            ),
+            (
+                f"Attack stamina: **{_attack_stamina_max(boss)}** charges max | "
+                f"One charge every **{_fmt_remaining(_attack_cooldown_seconds(boss))}**"
             ),
         ]
         downed_count = len(_as_dict(boss.get("downed")))
@@ -2244,6 +2593,7 @@ class BossCog(commands.Cog):
         row = _participant_row(boss, attacker)
         now = _utcnow()
         now_ts = now.timestamp()
+        _sync_attack_stamina(row, now, boss=boss)
         next_attack_ts = float(row.get("next_attack_ts", 0.0) or 0.0)
         if now_ts < next_attack_ts:
             await self._send_boss_message(
@@ -2253,12 +2603,22 @@ class BossCog(commands.Cog):
                 reference=reference,
             )
             return
+        if not _consume_attack_stamina(row, now, boss=boss):
+            wait_seconds = _attack_stamina_wait_seconds(row, now, boss=boss)
+            await self._send_boss_message(
+                channel,
+                boss,
+                f"Your attack stamina is empty. Next charge in **{_fmt_remaining_panel(wait_seconds)}**.",
+                reference=reference,
+            )
+            return
 
         if str(boss.get("status", "idle")).strip().lower() == "idle":
             boss["status"] = "active"
             boss["engaged_at"] = _iso(now)
             boss["expires_at"] = _iso(now + timedelta(minutes=int(BOSS_ACTIVE_DURATION_MINUTES)))
             self._schedule_next_mechanic(boss, now, delay_seconds=random.randint(50, 70))
+            _push_feed_line(boss, f"{attacker.display_name} engages the boss. The raid timer is now live.", now=now)
 
         prestige = _member_prestige(guild.id, attacker.id)
         chance = _hit_chance(boss, prestige)
@@ -2277,12 +2637,11 @@ class BossCog(commands.Cog):
         row["last_attack_at"] = _iso(now)
         if not str(row.get("first_attack_at", "")).strip():
             row["first_attack_at"] = _iso(now)
-        row["next_attack_ts"] = now_ts + _attack_cooldown_seconds(boss)
         _push_recent_attacker(boss, attacker.id)
 
         boss["attack_count"] = _as_int(boss.get("attack_count", 0), 0) + 1
 
-        attack_lines = [f"**{boss.get('display_name', 'Unknown Boss')}** lashes back at the raid."]
+        attack_lines: list[str] = []
         if landed:
             damage, crit = _roll_damage(rng, prestige, boss)
             damage_mult = 1.0 + float(focus_damage_bonus) + float(_boss_exposed_bonus(boss, now))
@@ -2317,14 +2676,14 @@ class BossCog(commands.Cog):
             if mark_active:
                 rider_bits.append("blighted")
             attack_lines.append(
-                f"{attacker.mention} strikes true at **{chance * 100.0:.1f}%** odds for **{_fmt_num(damage)}** damage"
+                f"{attacker.display_name} hits at **{chance * 100.0:.1f}%** odds for **{_fmt_num(damage)}** damage"
                 + (f" ({', '.join(rider_bits)})." if rider_bits else ".")
             )
         else:
             row["misses"] = _as_int(row.get("misses", 0), 0) + 1
             record_game_fields(guild.id, attacker.id, "boss", attacks=1, misses=1)
             attack_lines.append(
-                f"{attacker.mention} misses at **{chance * 100.0:.1f}%** odds. The boss barely shifts."
+                f"{attacker.display_name} misses at **{chance * 100.0:.1f}%** odds."
             )
         if focus_damage_bonus > 0.0 or focus_hit_bonus > 0.0:
             _consume_focus(row)
@@ -2339,7 +2698,6 @@ class BossCog(commands.Cog):
                 "\n".join(
                     attack_lines
                     + [
-                        f"HP left: **0 / {_fmt_num(boss.get('max_hp', 0))}**.",
                         "The boss collapses. Closing the chamber and posting the summary in `paragon-log`.",
                     ]
                 ),
@@ -2358,10 +2716,6 @@ class BossCog(commands.Cog):
         await self._sync_channel_name(guild, boss)
         await save_data()
 
-        expires_at = _parse_iso(boss.get("expires_at"))
-        remaining_line = ""
-        if expires_at is not None:
-            remaining_line = f" Time left: **{_fmt_remaining(max(0, int((expires_at - _utcnow()).total_seconds())))}**."
         mechanic_line = self._pending_mechanic_line(boss, _utcnow())
         await self._send_boss_message(
             channel,
@@ -2369,7 +2723,6 @@ class BossCog(commands.Cog):
             "\n".join(
                 [
                     *attack_lines,
-                    f"HP left: **{_fmt_num(boss.get('hp', 0))} / {_fmt_num(boss.get('max_hp', 0))}**.{remaining_line}",
                     retaliation_line,
                 ]
                 + ([mechanic_line] if mechanic_line else [])
@@ -2431,7 +2784,8 @@ class BossCog(commands.Cog):
             return
 
         row = _participant_row(boss, member)
-        now_ts = _utcnow().timestamp()
+        now = _utcnow()
+        now_ts = now.timestamp()
         next_res_ts = float(row.get("next_res_ts", 0.0) or 0.0)
         if now_ts < next_res_ts:
             await self._send_boss_message(
@@ -2460,13 +2814,15 @@ class BossCog(commands.Cog):
         row["next_res_ts"] = now_ts + _res_cooldown_seconds(boss)
         target_row = _participant_row(boss, target)
         target_row["next_attack_ts"] = max(float(target_row.get("next_attack_ts", 0.0)), now_ts + 5.0)
+        _sync_attack_stamina(target_row, now, boss=boss)
+        target_row["attack_charges"] = max(1, _as_int(target_row.get("attack_charges", 0), 0))
         record_game_fields(guild.id, member.id, "boss", resurrections=1, support_actions=1)
         await save_data()
         await self._send_boss_message(
             channel,
             boss,
             (
-                f"{member.mention} hauls {target.mention} back into the fight. "
+                f"{member.display_name} hauls {target.display_name} back into the fight. "
                 f"{target.display_name} can attack again in a few seconds."
             ),
             reference=reference,
@@ -2661,7 +3017,7 @@ class BossCog(commands.Cog):
 
         await self._send_boss_message(channel, boss, "That support action is not recognized.", reference=reference)
 
-    @tasks.loop(seconds=10)
+    @tasks.loop(seconds=5)
     async def boss_loop(self):
         for guild in list(self.bot.guilds):
             st = _root_state(guild.id)
@@ -2709,7 +3065,7 @@ class BossCog(commands.Cog):
             channel = self._live_channel(ctx.guild, boss)
         channel = self._live_channel(ctx.guild, boss)
         if channel is not None and ctx.channel.id == channel.id:
-            await self._send_boss_message(channel, boss, "\n".join(self._status_lines(ctx.guild, boss)), reference=ctx.message)
+            await self._refresh_boss_panel(ctx.guild, boss, channel, force=True)
             return
         await ctx.reply("\n".join(self._status_lines(ctx.guild, boss)))
 
@@ -2888,6 +3244,39 @@ class BossCog(commands.Cog):
             return
         if emoji_name in BOSS_REACTION_RES_NAMES or emoji_alias in BOSS_REACTION_RES_NAMES:
             await self._run_resurrection(guild, channel, member)
+            return
+        if emoji_name in BOSS_REACTION_GUARD_NAMES or emoji_alias in BOSS_REACTION_GUARD_NAMES:
+            await self._run_support_action(guild, channel, member, action="guard")
+            return
+        if emoji_name in BOSS_REACTION_INTERRUPT_NAMES or emoji_alias in BOSS_REACTION_INTERRUPT_NAMES:
+            await self._run_support_action(guild, channel, member, action="interrupt")
+            return
+        if emoji_name in BOSS_REACTION_PURGE_NAMES or emoji_alias in BOSS_REACTION_PURGE_NAMES:
+            await self._run_support_action(guild, channel, member, action="purge")
+            return
+        if emoji_name in BOSS_REACTION_FOCUS_NAMES or emoji_alias in BOSS_REACTION_FOCUS_NAMES:
+            await self._run_support_action(guild, channel, member, action="focus")
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.guild is None:
+            return
+        if message.author.bot:
+            return
+        if message.type is not discord.MessageType.default:
+            return
+        st = _root_state(message.guild.id)
+        boss = _current_boss(st)
+        if not boss:
+            return
+        channel = self._live_channel(message.guild, boss)
+        if channel is None or message.channel.id != channel.id:
+            return
+        if _is_active_control_message(boss, message.id):
+            return
+        asyncio.create_task(
+            self._delete_message_later(message, delay_seconds=BOSS_PANEL_MESSAGE_DELETE_DELAY_SECONDS)
+        )
 
     @commands.command(name="spawnboss", aliases=["bossnow"])
     @owner_only()
