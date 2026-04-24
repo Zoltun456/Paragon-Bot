@@ -134,6 +134,7 @@ BOSS_SUPPORT_READY = "\N{LARGE BLUE CIRCLE}"
 BOSS_SUPPORT_EMPTY = "\N{WHITE CIRCLE}"
 BOSS_PRESTIGE_STRENGTH_MULT = 1.50
 BOSS_HP_BALANCE_ATTACK_REFILL_SECONDS = 90
+PanelMessage = discord.Message | discord.PartialMessage
 
 NAME_PREFIXES = (
     "Ael",
@@ -1516,7 +1517,7 @@ class BossCog(commands.Cog):
         self,
         boss: dict,
         channel: discord.TextChannel,
-    ) -> Optional[dict[str, discord.PartialMessage]]:
+    ) -> Optional[dict[str, PanelMessage]]:
         try:
             status_message = await channel.send("Preparing boss panel...")
             boss["status_message_id"] = int(status_message.id)
@@ -1530,15 +1531,15 @@ class BossCog(commands.Cog):
         self._mark_panel_build(boss, _utcnow())
         await save_data()
         return {
-            "status": channel.get_partial_message(status_message.id),
-            "feed": channel.get_partial_message(feed_message.id),
+            "status": status_message,
+            "feed": feed_message,
         }
 
     async def _rebuild_noncontrol_messages(
         self,
         boss: dict,
         channel: discord.TextChannel,
-    ) -> Optional[dict[str, discord.PartialMessage]]:
+    ) -> Optional[dict[str, PanelMessage]]:
         for key in ("status_message_id", "feed_message_id"):
             message_id = _as_int(boss.get(key, 0), 0)
             if message_id <= 0:
@@ -1573,7 +1574,7 @@ class BossCog(commands.Cog):
         guild: discord.Guild,
         boss: dict,
         channel: discord.TextChannel,
-    ) -> Optional[dict[str, discord.PartialMessage]]:
+    ) -> Optional[dict[str, PanelMessage]]:
         del guild
         had_existing_panel = bool(self._panel_message_ids(boss))
         for message_id in self._panel_message_ids(boss):
@@ -1602,7 +1603,7 @@ class BossCog(commands.Cog):
         guild: discord.Guild,
         boss: dict,
         channel: discord.TextChannel,
-    ) -> Optional[dict[str, discord.PartialMessage]]:
+    ) -> Optional[dict[str, PanelMessage]]:
         controls_id = _as_int(boss.get("controls_message_id", 0), 0)
         status_id = _as_int(boss.get("status_message_id", 0), 0)
         feed_id = _as_int(boss.get("feed_message_id", 0), 0)
@@ -1611,7 +1612,7 @@ class BossCog(commands.Cog):
             return await self._rebuild_panel_messages(guild, boss, channel)
 
         _register_control_message(boss, controls_id)
-        messages: dict[str, discord.PartialMessage] = {
+        messages: dict[str, PanelMessage] = {
             "controls": channel.get_partial_message(controls_id),
         }
 
@@ -1773,6 +1774,31 @@ class BossCog(commands.Cog):
             content = content[:1900]
         return content
 
+    async def _edit_panel_message(
+        self,
+        channel: discord.TextChannel,
+        message: PanelMessage,
+        content: str,
+    ) -> Optional[discord.PartialMessage]:
+        try:
+            await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
+            return channel.get_partial_message(int(message.id))
+        except discord.NotFound:
+            message_id = _as_int(getattr(message, "id", 0), 0)
+            if message_id <= 0:
+                return None
+            try:
+                fetched = await channel.fetch_message(message_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return None
+            try:
+                await fetched.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
+            except discord.NotFound:
+                return None
+            except (discord.Forbidden, discord.HTTPException):
+                raise
+            return channel.get_partial_message(message_id)
+
     async def _refresh_boss_panel(
         self,
         guild: discord.Guild,
@@ -1801,7 +1827,7 @@ class BossCog(commands.Cog):
                     "status": "status_message_id",
                     "feed": "feed_message_id",
                 }
-                controls_message: Optional[discord.PartialMessage] = messages.get("controls")
+                controls_message: Optional[PanelMessage] = messages.get("controls")
                 retry = False
                 for key in ("status", "feed"):
                     content = payloads[key]
@@ -1810,23 +1836,24 @@ class BossCog(commands.Cog):
                     if not force and str(boss.get(hash_keys[key], "")).strip() == digest:
                         continue
                     try:
-                        await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
-                    except discord.NotFound:
+                        edited_message = await self._edit_panel_message(channel, message, content)
+                    except (discord.Forbidden, discord.HTTPException):
+                        return None
+                    if edited_message is None:
                         rebuilt = await self._rebuild_noncontrol_messages(boss, channel)
                         if rebuilt is None:
                             return None
                         force = True
                         retry = True
                         break
-                    except (discord.Forbidden, discord.HTTPException):
-                        return None
+                    messages[key] = edited_message
                     boss[hash_keys[key]] = digest
-                    boss[id_keys[key]] = int(message.id)
+                    boss[id_keys[key]] = int(edited_message.id)
                 if retry:
                     continue
                 if controls_message is not None:
-                    _register_control_message(boss, controls_message.id)
-                return controls_message
+                    _register_control_message(boss, int(controls_message.id))
+                return channel.get_partial_message(int(controls_message.id)) if controls_message is not None else None
 
     async def _send_boss_message(
         self,
