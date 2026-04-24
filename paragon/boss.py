@@ -93,6 +93,8 @@ BOSS_ACTIVE_DURATION_MINUTES = 60
 BOSS_TARGET_CLEAR_MINUTES = max(15, BOSS_ACTIVE_DURATION_MINUTES // 4)
 BOSS_ATTACK_STAMINA_MAX = 2
 BOSS_ATTACK_STAMINA_REFILL_SECONDS = 90
+BOSS_SUPPORT_STAMINA_MAX = 2
+BOSS_SUPPORT_STAMINA_REFILL_SECONDS = 45
 BOSS_RES_COOLDOWN_ACTIVE_SECONDS = 45
 BOSS_SUPPORT_COOLDOWN_SECONDS = 45
 BOSS_SUPPORT_WINDOW_SECONDS = 90
@@ -120,12 +122,15 @@ BOSS_SURVIVOR_REWARD_PCT = 0.25
 BOSS_SURVIVOR_REWARD_MINUTES = 240
 BOSS_FAILURE_PENALTY_PCT = max(0.75, float(BOSS_FAILURE_DEBUFF_PCT))
 BOSS_FAILURE_PENALTY_MINUTES = max(480, int(BOSS_FAILURE_DEBUFF_MINUTES))
-BOSS_PANEL_LOG_LIMIT = 8
+BOSS_PANEL_LOG_LIMIT = 10
 BOSS_PANEL_PLAYER_LIMIT = 10
 BOSS_PANEL_TIMER_STEP_SECONDS = 5
 BOSS_PANEL_MESSAGE_DELETE_DELAY_SECONDS = 5
 BOSS_STAMINA_READY = "\N{LARGE GREEN CIRCLE}"
 BOSS_STAMINA_EMPTY = "\N{BLACK CIRCLE}"
+BOSS_SUPPORT_READY = "\N{LARGE BLUE CIRCLE}"
+BOSS_SUPPORT_EMPTY = "\N{WHITE CIRCLE}"
+BOSS_PRESTIGE_STRENGTH_MULT = 1.50
 
 NAME_PREFIXES = (
     "Ael",
@@ -439,6 +444,12 @@ def _stamina_icons(charges: int, maximum: int) -> str:
     return (BOSS_STAMINA_READY * filled) + (BOSS_STAMINA_EMPTY * empty)
 
 
+def _support_icons(charges: int, maximum: int) -> str:
+    filled = max(0, min(int(maximum), int(charges)))
+    empty = max(0, int(maximum) - filled)
+    return (BOSS_SUPPORT_READY * filled) + (BOSS_SUPPORT_EMPTY * empty)
+
+
 def _clip_text(text: object, max_len: int) -> str:
     raw = str(text or "").strip()
     limit = max(4, int(max_len))
@@ -523,6 +534,152 @@ def _target_attack_budget(window_seconds: int) -> int:
     return max(1, int(BOSS_ATTACK_STAMINA_MAX) + (window // refill))
 
 
+def _sync_stamina(
+    row: dict,
+    now: datetime,
+    *,
+    charges_key: str,
+    started_at_key: str,
+    maximum: int,
+    refill: int,
+) -> int:
+    max_charges = max(1, int(maximum))
+    refill_seconds = max(10, int(refill))
+    charges = max(0, min(max_charges, _as_int(row.get(charges_key, max_charges), max_charges)))
+    started_at = _parse_iso(row.get(started_at_key))
+
+    if charges >= max_charges:
+        row[charges_key] = max_charges
+        row[started_at_key] = ""
+        return max_charges
+
+    if started_at is None:
+        started_at = now
+
+    if started_at <= now:
+        elapsed = max(0, int((now - started_at).total_seconds()))
+        recovered = elapsed // refill_seconds
+        if recovered > 0:
+            charges = min(max_charges, charges + recovered)
+            if charges >= max_charges:
+                row[charges_key] = max_charges
+                row[started_at_key] = ""
+                return max_charges
+            started_at = started_at + timedelta(seconds=recovered * refill_seconds)
+
+    row[charges_key] = charges
+    row[started_at_key] = _iso(started_at)
+    return charges
+
+
+def _stamina_wait_seconds(
+    row: dict,
+    now: datetime,
+    *,
+    charges_key: str,
+    started_at_key: str,
+    maximum: int,
+    refill: int,
+) -> int:
+    max_charges = max(1, int(maximum))
+    refill_seconds = max(10, int(refill))
+    charges = _sync_stamina(
+        row,
+        now,
+        charges_key=charges_key,
+        started_at_key=started_at_key,
+        maximum=max_charges,
+        refill=refill_seconds,
+    )
+    if charges >= max_charges:
+        return 0
+    started_at = _parse_iso(row.get(started_at_key)) or now
+    if started_at > now:
+        return int((started_at - now).total_seconds()) + refill_seconds
+    elapsed = max(0, int((now - started_at).total_seconds()))
+    return max(0, refill_seconds - (elapsed % refill_seconds))
+
+
+def _consume_stamina(
+    row: dict,
+    now: datetime,
+    *,
+    charges_key: str,
+    started_at_key: str,
+    maximum: int,
+    refill: int,
+    amount: int = 1,
+) -> bool:
+    max_charges = max(1, int(maximum))
+    charges = _sync_stamina(
+        row,
+        now,
+        charges_key=charges_key,
+        started_at_key=started_at_key,
+        maximum=max_charges,
+        refill=refill,
+    )
+    cost = max(1, int(amount))
+    if charges < cost:
+        return False
+    row[charges_key] = charges - cost
+    if charges >= max_charges:
+        row[started_at_key] = _iso(now)
+    return True
+
+
+def _grant_stamina(
+    row: dict,
+    now: datetime,
+    *,
+    charges_key: str,
+    started_at_key: str,
+    maximum: int,
+    refill: int,
+    amount: int = 1,
+) -> int:
+    max_charges = max(1, int(maximum))
+    charges = _sync_stamina(
+        row,
+        now,
+        charges_key=charges_key,
+        started_at_key=started_at_key,
+        maximum=max_charges,
+        refill=refill,
+    )
+    gained = max(1, int(amount))
+    charges = min(max_charges, charges + gained)
+    row[charges_key] = charges
+    if charges >= max_charges:
+        row[started_at_key] = ""
+    return charges
+
+
+def _set_stamina_wait(
+    row: dict,
+    now: datetime,
+    *,
+    charges_key: str,
+    started_at_key: str,
+    maximum: int,
+    refill: int,
+    wait_seconds: int,
+    charges: int = 0,
+) -> None:
+    max_charges = max(1, int(maximum))
+    refill_seconds = max(10, int(refill))
+    shown_wait = max(0, int(wait_seconds))
+    kept_charges = max(0, min(max_charges, int(charges)))
+    row[charges_key] = kept_charges
+    if kept_charges >= max_charges:
+        row[started_at_key] = ""
+        return
+    if shown_wait <= 0:
+        row[started_at_key] = _iso(now)
+        return
+    row[started_at_key] = _iso(now + timedelta(seconds=shown_wait - refill_seconds))
+
+
 def _attack_stamina_max(boss: dict) -> int:
     return int(BOSS_ATTACK_STAMINA_MAX)
 
@@ -531,56 +688,118 @@ def _attack_stamina_refill_seconds(boss: dict) -> int:
     return int(BOSS_ATTACK_STAMINA_REFILL_SECONDS)
 
 
+def _support_stamina_max(boss: dict) -> int:
+    return int(BOSS_SUPPORT_STAMINA_MAX)
+
+
+def _support_stamina_refill_seconds(boss: dict) -> int:
+    return int(BOSS_SUPPORT_STAMINA_REFILL_SECONDS)
+
+
 def _sync_attack_stamina(row: dict, now: datetime, *, boss: Optional[dict] = None) -> int:
-    maximum = max(1, int(BOSS_ATTACK_STAMINA_MAX if boss is None else _attack_stamina_max(boss)))
-    refill = max(10, int(BOSS_ATTACK_STAMINA_REFILL_SECONDS if boss is None else _attack_stamina_refill_seconds(boss)))
-    charges = max(0, min(maximum, _as_int(row.get("attack_charges", maximum), maximum)))
-    started_at = _parse_iso(row.get("attack_stamina_started_at"))
-
-    if charges >= maximum:
-        row["attack_charges"] = maximum
-        row["attack_stamina_started_at"] = ""
-        return maximum
-
-    if started_at is None:
-        started_at = now
-
-    elapsed = max(0, int((now - started_at).total_seconds()))
-    recovered = elapsed // refill
-    if recovered > 0:
-        charges = min(maximum, charges + recovered)
-        if charges >= maximum:
-            row["attack_charges"] = maximum
-            row["attack_stamina_started_at"] = ""
-            return maximum
-        started_at = started_at + timedelta(seconds=recovered * refill)
-
-    row["attack_charges"] = charges
-    row["attack_stamina_started_at"] = _iso(started_at)
-    return charges
+    return _sync_stamina(
+        row,
+        now,
+        charges_key="attack_charges",
+        started_at_key="attack_stamina_started_at",
+        maximum=BOSS_ATTACK_STAMINA_MAX if boss is None else _attack_stamina_max(boss),
+        refill=BOSS_ATTACK_STAMINA_REFILL_SECONDS if boss is None else _attack_stamina_refill_seconds(boss),
+    )
 
 
 def _attack_stamina_wait_seconds(row: dict, now: datetime, *, boss: Optional[dict] = None) -> int:
-    maximum = max(1, int(BOSS_ATTACK_STAMINA_MAX if boss is None else _attack_stamina_max(boss)))
-    refill = max(10, int(BOSS_ATTACK_STAMINA_REFILL_SECONDS if boss is None else _attack_stamina_refill_seconds(boss)))
-    charges = _sync_attack_stamina(row, now, boss=boss)
-    if charges >= maximum:
-        return 0
-    started_at = _parse_iso(row.get("attack_stamina_started_at")) or now
-    elapsed = max(0, int((now - started_at).total_seconds()))
-    return max(0, refill - (elapsed % refill))
+    return _stamina_wait_seconds(
+        row,
+        now,
+        charges_key="attack_charges",
+        started_at_key="attack_stamina_started_at",
+        maximum=BOSS_ATTACK_STAMINA_MAX if boss is None else _attack_stamina_max(boss),
+        refill=BOSS_ATTACK_STAMINA_REFILL_SECONDS if boss is None else _attack_stamina_refill_seconds(boss),
+    )
 
 
 def _consume_attack_stamina(row: dict, now: datetime, *, boss: Optional[dict] = None, amount: int = 1) -> bool:
-    maximum = max(1, int(BOSS_ATTACK_STAMINA_MAX if boss is None else _attack_stamina_max(boss)))
-    charges = _sync_attack_stamina(row, now, boss=boss)
-    cost = max(1, int(amount))
-    if charges < cost:
-        return False
-    row["attack_charges"] = charges - cost
-    if charges >= maximum:
-        row["attack_stamina_started_at"] = _iso(now)
-    return True
+    return _consume_stamina(
+        row,
+        now,
+        charges_key="attack_charges",
+        started_at_key="attack_stamina_started_at",
+        maximum=BOSS_ATTACK_STAMINA_MAX if boss is None else _attack_stamina_max(boss),
+        refill=BOSS_ATTACK_STAMINA_REFILL_SECONDS if boss is None else _attack_stamina_refill_seconds(boss),
+        amount=amount,
+    )
+
+
+def _grant_attack_stamina(row: dict, now: datetime, *, boss: Optional[dict] = None, amount: int = 1) -> int:
+    return _grant_stamina(
+        row,
+        now,
+        charges_key="attack_charges",
+        started_at_key="attack_stamina_started_at",
+        maximum=BOSS_ATTACK_STAMINA_MAX if boss is None else _attack_stamina_max(boss),
+        refill=BOSS_ATTACK_STAMINA_REFILL_SECONDS if boss is None else _attack_stamina_refill_seconds(boss),
+        amount=amount,
+    )
+
+
+def _set_attack_wait(row: dict, now: datetime, *, boss: Optional[dict] = None, wait_seconds: int, charges: int = 0) -> None:
+    _set_stamina_wait(
+        row,
+        now,
+        charges_key="attack_charges",
+        started_at_key="attack_stamina_started_at",
+        maximum=BOSS_ATTACK_STAMINA_MAX if boss is None else _attack_stamina_max(boss),
+        refill=BOSS_ATTACK_STAMINA_REFILL_SECONDS if boss is None else _attack_stamina_refill_seconds(boss),
+        wait_seconds=wait_seconds,
+        charges=charges,
+    )
+
+
+def _sync_support_stamina(row: dict, now: datetime, *, boss: Optional[dict] = None) -> int:
+    return _sync_stamina(
+        row,
+        now,
+        charges_key="support_charges",
+        started_at_key="support_stamina_started_at",
+        maximum=BOSS_SUPPORT_STAMINA_MAX if boss is None else _support_stamina_max(boss),
+        refill=BOSS_SUPPORT_STAMINA_REFILL_SECONDS if boss is None else _support_stamina_refill_seconds(boss),
+    )
+
+
+def _support_stamina_wait_seconds(row: dict, now: datetime, *, boss: Optional[dict] = None) -> int:
+    return _stamina_wait_seconds(
+        row,
+        now,
+        charges_key="support_charges",
+        started_at_key="support_stamina_started_at",
+        maximum=BOSS_SUPPORT_STAMINA_MAX if boss is None else _support_stamina_max(boss),
+        refill=BOSS_SUPPORT_STAMINA_REFILL_SECONDS if boss is None else _support_stamina_refill_seconds(boss),
+    )
+
+
+def _consume_support_stamina(row: dict, now: datetime, *, boss: Optional[dict] = None, amount: int = 1) -> bool:
+    return _consume_stamina(
+        row,
+        now,
+        charges_key="support_charges",
+        started_at_key="support_stamina_started_at",
+        maximum=BOSS_SUPPORT_STAMINA_MAX if boss is None else _support_stamina_max(boss),
+        refill=BOSS_SUPPORT_STAMINA_REFILL_SECONDS if boss is None else _support_stamina_refill_seconds(boss),
+        amount=amount,
+    )
+
+
+def _set_support_wait(row: dict, now: datetime, *, boss: Optional[dict] = None, wait_seconds: int, charges: int = 0) -> None:
+    _set_stamina_wait(
+        row,
+        now,
+        charges_key="support_charges",
+        started_at_key="support_stamina_started_at",
+        maximum=BOSS_SUPPORT_STAMINA_MAX if boss is None else _support_stamina_max(boss),
+        refill=BOSS_SUPPORT_STAMINA_REFILL_SECONDS if boss is None else _support_stamina_refill_seconds(boss),
+        wait_seconds=wait_seconds,
+        charges=charges,
+    )
 
 
 def _feed_lines(boss: dict) -> list[str]:
@@ -772,8 +991,12 @@ def _current_boss(st: dict) -> dict:
     cur.setdefault("recent_attackers", [])
     cur.setdefault("control_message_ids", [])
     cur.setdefault("last_message_id", 0)
-    cur.setdefault("panel_message_id", 0)
-    cur.setdefault("panel_hash", "")
+    cur.setdefault("controls_message_id", 0)
+    cur.setdefault("controls_hash", "")
+    cur.setdefault("status_message_id", 0)
+    cur.setdefault("status_hash", "")
+    cur.setdefault("feed_message_id", 0)
+    cur.setdefault("feed_hash", "")
     cur.setdefault("feed_lines", [])
     cur["attackers"] = _as_dict(cur.get("attackers"))
     cur["recent_attackers"] = [int(uid) for uid in _as_list(cur.get("recent_attackers")) if _as_int(uid, 0) > 0]
@@ -783,7 +1006,9 @@ def _current_boss(st: dict) -> dict:
         if _as_int(mid, 0) > 0
     ][:BOSS_CONTROL_MESSAGE_LIMIT]
     cur["last_message_id"] = _as_int(cur.get("last_message_id", 0), 0)
-    cur["panel_message_id"] = _as_int(cur.get("panel_message_id", 0), 0)
+    cur["controls_message_id"] = _as_int(cur.get("controls_message_id", 0), 0)
+    cur["status_message_id"] = _as_int(cur.get("status_message_id", 0), 0)
+    cur["feed_message_id"] = _as_int(cur.get("feed_message_id", 0), 0)
     cur.setdefault("affix_key", "bulwarked")
     cur.setdefault("affix_name", AFFIXES["bulwarked"]["name"])
     cur.setdefault("affix_desc", AFFIXES["bulwarked"]["desc"])
@@ -845,11 +1070,8 @@ def _guild_snapshot(guild: discord.Guild) -> dict[str, object]:
     min_prestige = min(prestiges)
     max_prestige = max(prestiges)
     avg_prestige = sum(prestiges) / float(len(prestiges))
-    if max_prestige <= min_prestige:
-        boss_prestige = max_prestige
-    else:
-        offset_target = int(round(avg_prestige + float(BOSS_AVG_PRESTIGE_OFFSET)))
-        boss_prestige = max(min_prestige, min(max_prestige, offset_target))
+    scaled_target = int(round((avg_prestige * float(BOSS_PRESTIGE_STRENGTH_MULT)) + float(BOSS_AVG_PRESTIGE_OFFSET)))
+    boss_prestige = max(min_prestige, scaled_target)
 
     expected_hit = _hit_chance(
         {
@@ -996,6 +1218,8 @@ def _participant_row(boss: dict, member: discord.Member) -> dict:
     row.setdefault("next_support_ts", 0.0)
     row.setdefault("attack_charges", int(BOSS_ATTACK_STAMINA_MAX))
     row.setdefault("attack_stamina_started_at", "")
+    row.setdefault("support_charges", int(BOSS_SUPPORT_STAMINA_MAX))
+    row.setdefault("support_stamina_started_at", "")
     row.setdefault("first_attack_at", "")
     row.setdefault("last_attack_at", "")
     row.setdefault("guards", 0)
@@ -1191,10 +1415,28 @@ class BossCog(commands.Cog):
             BOSS_REACTION_FOCUS,
         )
 
+    def _panel_message_ids(self, boss: dict) -> list[int]:
+        ids = [
+            _as_int(boss.get("controls_message_id", 0), 0),
+            _as_int(boss.get("status_message_id", 0), 0),
+            _as_int(boss.get("feed_message_id", 0), 0),
+        ]
+        return [mid for mid in ids if mid > 0]
+
+    def _clear_panel_message_refs(self, boss: dict) -> None:
+        boss["controls_message_id"] = 0
+        boss["controls_hash"] = ""
+        boss["status_message_id"] = 0
+        boss["status_hash"] = ""
+        boss["feed_message_id"] = 0
+        boss["feed_hash"] = ""
+        boss["control_message_ids"] = []
+        boss["last_message_id"] = 0
+
     async def _track_control_message(self, boss: dict, message: discord.Message) -> None:
         _register_control_message(boss, message.id)
-        boss["panel_message_id"] = int(message.id)
-        boss["panel_hash"] = ""
+        boss["controls_message_id"] = int(message.id)
+        boss["controls_hash"] = ""
         await save_data()
         for emoji in self._panel_reactions():
             try:
@@ -1202,23 +1444,61 @@ class BossCog(commands.Cog):
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
-    async def _ensure_panel_message(
+    async def _rebuild_panel_messages(
         self,
         guild: discord.Guild,
         boss: dict,
         channel: discord.TextChannel,
-    ) -> Optional[discord.Message]:
-        message_id = _as_int(boss.get("panel_message_id", 0), 0) or _as_int(boss.get("last_message_id", 0), 0)
-        if message_id > 0:
-            boss["panel_message_id"] = int(message_id)
-            _register_control_message(boss, message_id)
-            return channel.get_partial_message(message_id)
+    ) -> Optional[dict[str, discord.PartialMessage]]:
+        del guild
+        for message_id in self._panel_message_ids(boss):
+            try:
+                await channel.get_partial_message(message_id).delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+        self._clear_panel_message_refs(boss)
+        placeholders = {
+            "controls": "Preparing controls...",
+            "status": "Preparing boss panel...",
+            "feed": "Preparing battle feed...",
+        }
+        messages: dict[str, discord.PartialMessage] = {}
         try:
-            message = await channel.send("Preparing raid panel...")
+            controls_message = await channel.send(placeholders["controls"])
+            await self._track_control_message(boss, controls_message)
+            messages["controls"] = channel.get_partial_message(controls_message.id)
+
+            status_message = await channel.send(placeholders["status"])
+            boss["status_message_id"] = int(status_message.id)
+            boss["status_hash"] = ""
+            messages["status"] = channel.get_partial_message(status_message.id)
+
+            feed_message = await channel.send(placeholders["feed"])
+            boss["feed_message_id"] = int(feed_message.id)
+            boss["feed_hash"] = ""
+            messages["feed"] = channel.get_partial_message(feed_message.id)
         except (discord.Forbidden, discord.HTTPException):
             return None
-        await self._track_control_message(boss, message)
-        return message
+        return messages
+
+    async def _ensure_panel_messages(
+        self,
+        guild: discord.Guild,
+        boss: dict,
+        channel: discord.TextChannel,
+    ) -> Optional[dict[str, discord.PartialMessage]]:
+        required = {
+            "controls": _as_int(boss.get("controls_message_id", 0), 0),
+            "status": _as_int(boss.get("status_message_id", 0), 0),
+            "feed": _as_int(boss.get("feed_message_id", 0), 0),
+        }
+        if all(message_id > 0 for message_id in required.values()):
+            _register_control_message(boss, required["controls"])
+            return {
+                key: channel.get_partial_message(message_id)
+                for key, message_id in required.items()
+            }
+        return await self._rebuild_panel_messages(guild, boss, channel)
 
     def _panel_status_line(self, boss: dict, now: datetime) -> str:
         status = str(boss.get("status", "idle")).strip().lower()
@@ -1280,6 +1560,31 @@ class BossCog(commands.Cog):
             lines.append("Raid state: " + " | ".join(bits) + ".")
         return lines
 
+    def _visible_attack_state(self, row: dict, now: datetime, boss: dict) -> tuple[int, int]:
+        charges = _sync_attack_stamina(row, now, boss=boss)
+        wait_seconds = _attack_stamina_wait_seconds(row, now, boss=boss)
+        legacy_lock = max(0, int(float(row.get("next_attack_ts", 0.0) or 0.0) - now.timestamp()))
+        if legacy_lock > 0:
+            return 0, max(legacy_lock, wait_seconds if charges < _attack_stamina_max(boss) else 0)
+        return charges, wait_seconds
+
+    def _visible_support_state(self, row: dict, now: datetime, boss: dict) -> tuple[int, int]:
+        charges = _sync_support_stamina(row, now, boss=boss)
+        wait_seconds = _support_stamina_wait_seconds(row, now, boss=boss)
+        legacy_lock = max(
+            0,
+            int(
+                max(
+                    float(row.get("next_support_ts", 0.0) or 0.0),
+                    float(row.get("next_res_ts", 0.0) or 0.0),
+                )
+                - now.timestamp()
+            ),
+        )
+        if legacy_lock > 0:
+            return 0, max(legacy_lock, wait_seconds if charges < _support_stamina_max(boss) else 0)
+        return charges, wait_seconds
+
     def _panel_player_lines(self, guild: discord.Guild, boss: dict, now: datetime) -> list[str]:
         rows = self._contributor_rows(boss)
         rows.sort(
@@ -1295,8 +1600,8 @@ class BossCog(commands.Cog):
         for uid, row in shown_rows:
             member = guild.get_member(uid)
             name = _clip_text(member.display_name if member is not None else str(row.get("display_name", uid)), 18)
-            charges = _sync_attack_stamina(row, now, boss=boss)
-            wait_seconds = _attack_stamina_wait_seconds(row, now, boss=boss)
+            attack_charges, attack_wait = self._visible_attack_state(row, now, boss)
+            support_charges, support_wait = self._visible_support_state(row, now, boss)
             tags: list[str] = []
             if _is_downed(boss, uid):
                 tags.append("DOWN")
@@ -1306,10 +1611,21 @@ class BossCog(commands.Cog):
                 tags.append("FOCUS")
             if str(uid) in _player_marks(boss):
                 tags.append("BLIGHT")
-            wait_label = f" +{_fmt_remaining_panel(wait_seconds)}" if wait_seconds > 0 and charges < _attack_stamina_max(boss) else ""
+            attack_wait_label = (
+                f" atk+{_fmt_remaining_panel(attack_wait)}"
+                if attack_wait > 0 and attack_charges < _attack_stamina_max(boss)
+                else ""
+            )
+            support_wait_label = (
+                f" sup+{_fmt_remaining_panel(support_wait)}"
+                if support_wait > 0 and support_charges < _support_stamina_max(boss)
+                else ""
+            )
             tag_label = f" [{' '.join(tags)}]" if tags else ""
             lines.append(
-                f"- `{_stamina_icons(charges, _attack_stamina_max(boss))}` **{name}**{tag_label}{wait_label} "
+                f"- `{_stamina_icons(attack_charges, _attack_stamina_max(boss))}` "
+                f"`{_support_icons(support_charges, _support_stamina_max(boss))}` "
+                f"**{name}**{tag_label}{attack_wait_label}{support_wait_label} "
                 f"| **{_fmt_num(row.get('damage', 0))}** dmg | **{_fmt_num(row.get('hits', 0))}/{_fmt_num(row.get('attacks', 0))}** hit"
             )
         if len(rows) > len(shown_rows):
@@ -1324,7 +1640,21 @@ class BossCog(commands.Cog):
             return ["- Waiting for the first swing."]
         return [f"- {_clip_text(line, 115)}" for line in rows[:BOSS_PANEL_LOG_LIMIT]]
 
-    def _boss_panel_lines(self, guild: discord.Guild, boss: dict, now: datetime) -> list[str]:
+    def _controls_lines(self, boss: dict) -> list[str]:
+        del boss
+        return [
+            "**Raid Controls**",
+            (
+                f"React here: {BOSS_REACTION_ATTACK} attack | {BOSS_REACTION_RES} revive | {BOSS_REACTION_GUARD} guard | "
+                f"{BOSS_REACTION_INTERRUPT} interrupt | {BOSS_REACTION_PURGE} purge | {BOSS_REACTION_FOCUS} focus"
+            ),
+            (
+                f"`{BOSS_STAMINA_READY}` attack charges refill every **{_fmt_remaining(BOSS_ATTACK_STAMINA_REFILL_SECONDS)}** | "
+                f"`{BOSS_SUPPORT_READY}` support charges refill every **{_fmt_remaining(BOSS_SUPPORT_STAMINA_REFILL_SECONDS)}**"
+            ),
+        ]
+
+    def _status_panel_lines(self, guild: discord.Guild, boss: dict, now: datetime) -> list[str]:
         hp = _as_int(boss.get("hp", 0), 0)
         max_hp = _as_int(boss.get("max_hp", 0), 0)
         lines = [
@@ -1333,21 +1663,21 @@ class BossCog(commands.Cog):
                 f"HP: `{_progress_bar(hp, max_hp)}` **{_fmt_num(hp)} / {_fmt_num(max_hp)}** "
                 f"| Phase **{_phase_name(_as_int(boss.get('phase', 1), 1))}**"
             ),
-            f"Affix: **{boss.get('affix_name', 'Unknown')}** | Boss prestige **{_fmt_num(boss.get('boss_prestige', 0))}**",
+            (
+                f"Affix: **{boss.get('affix_name', 'Unknown')}** | "
+                f"Boss prestige **{_fmt_num(boss.get('boss_prestige', 0))}** "
+                f"(guild avg **{_as_float(boss.get('avg_prestige', 0.0), 0.0):.1f}**)"
+            ),
             self._panel_status_line(boss, now),
             self._panel_current_action_line(boss, now),
         ]
         lines.extend(self._panel_effect_lines(boss, now))
-        lines.append(
-            "Controls: "
-            f"{BOSS_REACTION_ATTACK} attack | {BOSS_REACTION_RES} revive | {BOSS_REACTION_GUARD} guard | "
-            f"{BOSS_REACTION_INTERRUPT} interrupt | {BOSS_REACTION_PURGE} purge | {BOSS_REACTION_FOCUS} focus"
-        )
-        lines.append("**Battle Feed**")
-        lines.extend(self._panel_feed_display_lines(boss))
         lines.append("**Raiders**")
         lines.extend(self._panel_player_lines(guild, boss, now))
         return lines
+
+    def _feed_panel_lines(self, boss: dict) -> list[str]:
+        return ["**Battle Feed**", *self._panel_feed_display_lines(boss)]
 
     def _fit_panel_content(self, lines: list[str]) -> str:
         fitted = list(lines)
@@ -1370,33 +1700,48 @@ class BossCog(commands.Cog):
     ) -> Optional[discord.Message]:
         if channel is None:
             return None
-        message = await self._ensure_panel_message(guild, boss, channel)
-        if message is None:
+        messages = await self._ensure_panel_messages(guild, boss, channel)
+        if messages is None:
             return None
         now = _utcnow()
-        lines = self._boss_panel_lines(guild, boss, now)
-        content = self._fit_panel_content(lines)
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        if not force and str(boss.get("panel_hash", "")).strip() == digest:
-            return message
-        try:
-            await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
-        except discord.NotFound:
-            boss["panel_message_id"] = 0
-            boss["panel_hash"] = ""
-            message = await self._ensure_panel_message(guild, boss, channel)
-            if message is None:
-                return None
+        payloads = {
+            "controls": self._fit_panel_content(self._controls_lines(boss)),
+            "status": self._fit_panel_content(self._status_panel_lines(guild, boss, now)),
+            "feed": self._fit_panel_content(self._feed_panel_lines(boss)),
+        }
+        hash_keys = {
+            "controls": "controls_hash",
+            "status": "status_hash",
+            "feed": "feed_hash",
+        }
+        id_keys = {
+            "controls": "controls_message_id",
+            "status": "status_message_id",
+            "feed": "feed_message_id",
+        }
+        controls_message: Optional[discord.PartialMessage] = None
+        for key in ("controls", "status", "feed"):
+            content = payloads[key]
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            message = messages[key]
+            if key == "controls":
+                controls_message = message
+            if not force and str(boss.get(hash_keys[key], "")).strip() == digest:
+                continue
             try:
                 await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
+            except discord.NotFound:
+                rebuilt = await self._rebuild_panel_messages(guild, boss, channel)
+                if rebuilt is None:
+                    return None
+                return await self._refresh_boss_panel(guild, boss, channel, force=True)
             except (discord.Forbidden, discord.HTTPException):
                 return None
-        except (discord.Forbidden, discord.HTTPException):
-            return None
-        boss["panel_hash"] = digest
-        boss["panel_message_id"] = int(message.id)
-        _register_control_message(boss, message.id)
-        return message
+            boss[hash_keys[key]] = digest
+            boss[id_keys[key]] = int(message.id)
+        if controls_message is not None:
+            _register_control_message(boss, controls_message.id)
+        return controls_message
 
     async def _send_boss_message(
         self,
@@ -1443,12 +1788,12 @@ class BossCog(commands.Cog):
             pass
 
     async def _prune_channel_to_panel(self, channel: discord.TextChannel, boss: dict) -> None:
-        keep_id = _as_int(boss.get("panel_message_id", 0), 0)
-        if keep_id <= 0:
+        keep_ids = set(self._panel_message_ids(boss))
+        if not keep_ids:
             return
         try:
             async for message in channel.history(limit=100):
-                if int(message.id) == keep_id:
+                if int(message.id) in keep_ids:
                     continue
                 try:
                     await message.delete()
@@ -1766,7 +2111,13 @@ class BossCog(commands.Cog):
                     row = _participant_row(boss, member)
                     if _consume_ward(row, now):
                         continue
-                    row["next_attack_ts"] = max(float(row.get("next_attack_ts", 0.0)), now.timestamp()) + extra
+                    _set_attack_wait(
+                        row,
+                        now,
+                        boss=boss,
+                        wait_seconds=max(extra, _attack_stamina_wait_seconds(row, now, boss=boss)),
+                        charges=0,
+                    )
                     row["cooldown_extensions"] = _as_int(row.get("cooldown_extensions", 0), 0) + 1
                     caught.append(member.mention)
                 heal = int(round(max_hp * 0.03 * float(affix.get("heal_mult", 1.0))))
@@ -1897,8 +2248,12 @@ class BossCog(commands.Cog):
             "recent_attackers": [],
             "control_message_ids": [],
             "last_message_id": 0,
-            "panel_message_id": 0,
-            "panel_hash": "",
+            "controls_message_id": 0,
+            "controls_hash": "",
+            "status_message_id": 0,
+            "status_hash": "",
+            "feed_message_id": 0,
+            "feed_hash": "",
             "feed_lines": [],
         }
 
@@ -2308,7 +2663,6 @@ class BossCog(commands.Cog):
     ) -> str:
         rng = random.Random()
         now = _utcnow()
-        now_ts = now.timestamp()
         row = _participant_row(boss, attacker)
         affix = _affix_data(boss)
         phase = max(1, _as_int(boss.get("phase", 1), 1))
@@ -2341,7 +2695,13 @@ class BossCog(commands.Cog):
             extra = rng.randint(10, 18) + (phase * 2)
             if _consume_ward(row, now):
                 return f"**{RETALIATION_NAMES[action]}** crashes into {attacker.mention}'s guard and splinters harmlessly."
-            row["next_attack_ts"] = max(float(row.get("next_attack_ts", 0.0)), now_ts) + extra
+            _set_attack_wait(
+                row,
+                now,
+                boss=boss,
+                wait_seconds=max(extra, _attack_stamina_wait_seconds(row, now, boss=boss)),
+                charges=0,
+            )
             row["cooldown_extensions"] = _as_int(row.get("cooldown_extensions", 0), 0) + 1
             return (
                 f"**{RETALIATION_NAMES[action]}** clips {attacker.mention}. Their next attack is delayed by **{_fmt_remaining(extra)}**."
@@ -2370,8 +2730,20 @@ class BossCog(commands.Cog):
             extra = rng.randint(15, 24) + (phase * 2)
             if _consume_ward(row, now):
                 return f"**{RETALIATION_NAMES[action]}** catches the guard instead of {attacker.mention}."
-            row["next_attack_ts"] = max(float(row.get("next_attack_ts", 0.0)), now_ts) + extra
-            row["next_support_ts"] = max(float(row.get("next_support_ts", 0.0)), now_ts) + max(10, extra - 5)
+            _set_attack_wait(
+                row,
+                now,
+                boss=boss,
+                wait_seconds=max(extra, _attack_stamina_wait_seconds(row, now, boss=boss)),
+                charges=0,
+            )
+            _set_support_wait(
+                row,
+                now,
+                boss=boss,
+                wait_seconds=max(max(10, extra - 5), _support_stamina_wait_seconds(row, now, boss=boss)),
+                charges=0,
+            )
             row["cooldown_extensions"] = _as_int(row.get("cooldown_extensions", 0), 0) + 1
             return (
                 f"**{RETALIATION_NAMES[action]}** pins {attacker.mention} in place. Attack and support actions are slowed for **{_fmt_remaining(extra)}**."
@@ -2382,7 +2754,13 @@ class BossCog(commands.Cog):
             if _consume_ward(row, now):
                 self._schedule_next_mechanic(boss, now, delay_seconds=20)
                 return f"**{RETALIATION_NAMES[action]}** is absorbed by the guard, but the chamber still starts to rumble."
-            row["next_attack_ts"] = max(float(row.get("next_attack_ts", 0.0)), now_ts) + extra
+            _set_attack_wait(
+                row,
+                now,
+                boss=boss,
+                wait_seconds=max(extra, _attack_stamina_wait_seconds(row, now, boss=boss)),
+                charges=0,
+            )
             row["cooldown_extensions"] = _as_int(row.get("cooldown_extensions", 0), 0) + 1
             self._schedule_next_mechanic(boss, now, delay_seconds=18)
             return (
@@ -2407,7 +2785,13 @@ class BossCog(commands.Cog):
             extra = rng.randint(15, 26)
             if _consume_ward(ally_row, now):
                 return f"**{RETALIATION_NAMES[action]}** lashes toward {ally.mention}, but their guard catches the chain."
-            ally_row["next_attack_ts"] = max(float(ally_row.get("next_attack_ts", 0.0)), now_ts) + extra
+            _set_attack_wait(
+                ally_row,
+                now,
+                boss=boss,
+                wait_seconds=max(extra, _attack_stamina_wait_seconds(ally_row, now, boss=boss)),
+                charges=0,
+            )
             ally_row["cooldown_extensions"] = _as_int(ally_row.get("cooldown_extensions", 0), 0) + 1
             return f"**{RETALIATION_NAMES[action]}** catches {ally.mention}. Their next attack is delayed by **{_fmt_remaining(extra)}**."
 
@@ -2484,7 +2868,8 @@ class BossCog(commands.Cog):
             f"**{boss.get('display_name', 'Unknown Boss')}**",
             f"HP: **{_fmt_num(boss.get('hp', 0))} / {_fmt_num(boss.get('max_hp', 0))}**",
             (
-                f"Boss prestige: **{_as_int(boss.get('boss_prestige', 0), 0)}** | "
+                f"Boss prestige: **{_as_int(boss.get('boss_prestige', 0), 0)}** "
+                f"(guild avg **{_as_float(boss.get('avg_prestige', 0.0), 0.0):.1f}**) | "
                 f"Tuned raid size: **{_as_int(boss.get('target_fighters', 1), 1)}** fighter(s)"
             ),
             (
@@ -2494,7 +2879,8 @@ class BossCog(commands.Cog):
             ),
             (
                 f"Attack stamina: **{_attack_stamina_max(boss)}** charges max | "
-                f"One charge every **{_fmt_remaining(_attack_cooldown_seconds(boss))}**"
+                f"One charge every **{_fmt_remaining(_attack_cooldown_seconds(boss))}** | "
+                f"Support charges: **{_support_stamina_max(boss)}** every **{_fmt_remaining(_support_stamina_refill_seconds(boss))}**"
             ),
         ]
         downed_count = len(_as_dict(boss.get("downed")))
@@ -2592,19 +2978,17 @@ class BossCog(commands.Cog):
 
         row = _participant_row(boss, attacker)
         now = _utcnow()
-        now_ts = now.timestamp()
-        _sync_attack_stamina(row, now, boss=boss)
-        next_attack_ts = float(row.get("next_attack_ts", 0.0) or 0.0)
-        if now_ts < next_attack_ts:
+        visible_attack_charges, visible_attack_wait = self._visible_attack_state(row, now, boss)
+        if visible_attack_charges <= 0:
             await self._send_boss_message(
                 channel,
                 boss,
-                f"You are recovering. Attack again in **{_fmt_remaining(int(next_attack_ts - now_ts))}**.",
+                f"Your attack stamina is empty. Next charge in **{_fmt_remaining_panel(visible_attack_wait)}**.",
                 reference=reference,
             )
             return
         if not _consume_attack_stamina(row, now, boss=boss):
-            wait_seconds = _attack_stamina_wait_seconds(row, now, boss=boss)
+            wait_seconds = max(visible_attack_wait, _attack_stamina_wait_seconds(row, now, boss=boss))
             await self._send_boss_message(
                 channel,
                 boss,
@@ -2785,16 +3169,12 @@ class BossCog(commands.Cog):
 
         row = _participant_row(boss, member)
         now = _utcnow()
-        now_ts = now.timestamp()
-        next_res_ts = float(row.get("next_res_ts", 0.0) or 0.0)
-        if now_ts < next_res_ts:
+        visible_support_charges, visible_support_wait = self._visible_support_state(row, now, boss)
+        if visible_support_charges <= 0:
             await self._send_boss_message(
                 channel,
                 boss,
-                (
-                    "You are still recovering from your last rescue. "
-                    f"Try again in **{_fmt_remaining(int(next_res_ts - now_ts))}**."
-                ),
+                f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(visible_support_wait)}**.",
                 reference=reference,
             )
             return
@@ -2809,13 +3189,20 @@ class BossCog(commands.Cog):
             )
             return
 
+        if not _consume_support_stamina(row, now, boss=boss):
+            await self._send_boss_message(
+                channel,
+                boss,
+                f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
+                reference=reference,
+            )
+            return
+
         row["resurrections"] = _as_int(row.get("resurrections", 0), 0) + 1
         row["support_actions"] = _as_int(row.get("support_actions", 0), 0) + 1
-        row["next_res_ts"] = now_ts + _res_cooldown_seconds(boss)
         target_row = _participant_row(boss, target)
-        target_row["next_attack_ts"] = max(float(target_row.get("next_attack_ts", 0.0)), now_ts + 5.0)
-        _sync_attack_stamina(target_row, now, boss=boss)
-        target_row["attack_charges"] = max(1, _as_int(target_row.get("attack_charges", 0), 0))
+        _grant_attack_stamina(row, now, boss=boss, amount=1)
+        _set_attack_wait(target_row, now, boss=boss, wait_seconds=5, charges=0)
         record_game_fields(guild.id, member.id, "boss", resurrections=1, support_actions=1)
         await save_data()
         await self._send_boss_message(
@@ -2889,13 +3276,12 @@ class BossCog(commands.Cog):
         action = str(action or "").strip().lower()
         row = _participant_row(boss, member)
         now = _utcnow()
-        now_ts = now.timestamp()
-        next_support_ts = float(row.get("next_support_ts", 0.0) or 0.0)
-        if now_ts < next_support_ts:
+        visible_support_charges, visible_support_wait = self._visible_support_state(row, now, boss)
+        if visible_support_charges <= 0:
             await self._send_boss_message(
                 channel,
                 boss,
-                f"You are still recovering. Support again in **{_fmt_remaining(int(next_support_ts - now_ts))}**.",
+                f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(visible_support_wait)}**.",
                 reference=reference,
             )
             return
@@ -2904,11 +3290,19 @@ class BossCog(commands.Cog):
         pending_counter = str(pending.get("counter", "")).strip().lower()
 
         if action == "guard":
+            if not _consume_support_stamina(row, now, boss=boss):
+                await self._send_boss_message(
+                    channel,
+                    boss,
+                    f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
+                    reference=reference,
+                )
+                return
             counted = self._register_mechanic_response(boss, member, "guard")
             _grant_ward(row, now)
             row["guards"] = _as_int(row.get("guards", 0), 0) + 1
             row["support_actions"] = _as_int(row.get("support_actions", 0), 0) + 1
-            row["next_support_ts"] = now_ts + _support_cooldown_seconds(boss)
+            _grant_attack_stamina(row, now, boss=boss, amount=1)
             record_game_fields(guild.id, member.id, "boss", guards=1, support_actions=1)
             await save_data()
             msg = (
@@ -2930,9 +3324,17 @@ class BossCog(commands.Cog):
             if not counted:
                 await self._send_boss_message(channel, boss, "You have already committed your interrupt to this cast.", reference=reference)
                 return
+            if not _consume_support_stamina(row, now, boss=boss):
+                await self._send_boss_message(
+                    channel,
+                    boss,
+                    f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
+                    reference=reference,
+                )
+                return
             row["interrupts"] = _as_int(row.get("interrupts", 0), 0) + 1
             row["support_actions"] = _as_int(row.get("support_actions", 0), 0) + 1
-            row["next_support_ts"] = now_ts + _support_cooldown_seconds(boss)
+            _grant_attack_stamina(row, now, boss=boss, amount=1)
             record_game_fields(guild.id, member.id, "boss", interrupts=1, support_actions=1)
             await save_data()
             await self._send_boss_message(
@@ -2961,9 +3363,17 @@ class BossCog(commands.Cog):
             if not cleared and not counted:
                 await self._send_boss_message(channel, boss, "No blight is active right now, and there is no purge mechanic to answer.", reference=reference)
                 return
+            if not _consume_support_stamina(row, now, boss=boss):
+                await self._send_boss_message(
+                    channel,
+                    boss,
+                    f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
+                    reference=reference,
+                )
+                return
             row["cleanses"] = _as_int(row.get("cleanses", 0), 0) + 1
             row["support_actions"] = _as_int(row.get("support_actions", 0), 0) + 1
-            row["next_support_ts"] = now_ts + _support_cooldown_seconds(boss)
+            _grant_attack_stamina(row, now, boss=boss, amount=1)
             fields: dict[str, int] = {"cleanses": 1, "support_actions": 1}
             if cleared:
                 row["marks_cleansed"] = _as_int(row.get("marks_cleansed", 0), 0) + 1
@@ -2990,6 +3400,14 @@ class BossCog(commands.Cog):
             if _is_downed(boss, target.id):
                 await self._send_boss_message(channel, boss, f"{target.display_name} is downed and cannot be focused right now.", reference=reference)
                 return
+            if not _consume_support_stamina(row, now, boss=boss):
+                await self._send_boss_message(
+                    channel,
+                    boss,
+                    f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
+                    reference=reference,
+                )
+                return
             target_row = _participant_row(boss, target)
             damage_bonus = float(BOSS_FOCUS_DAMAGE_BONUS_PCT) + float(_affix_data(boss).get("focus_bonus_pct", 0.0))
             _grant_focus(
@@ -3000,7 +3418,6 @@ class BossCog(commands.Cog):
             )
             row["focuses"] = _as_int(row.get("focuses", 0), 0) + 1
             row["support_actions"] = _as_int(row.get("support_actions", 0), 0) + 1
-            row["next_support_ts"] = now_ts + _support_cooldown_seconds(boss)
             record_game_fields(guild.id, member.id, "boss", focuses=1, support_actions=1)
             await save_data()
             await self._send_boss_message(
@@ -3272,7 +3689,7 @@ class BossCog(commands.Cog):
         channel = self._live_channel(message.guild, boss)
         if channel is None or message.channel.id != channel.id:
             return
-        if _is_active_control_message(boss, message.id):
+        if int(message.id) in set(self._panel_message_ids(boss)):
             return
         asyncio.create_task(
             self._delete_message_later(message, delay_seconds=BOSS_PANEL_MESSAGE_DELETE_DELAY_SECONDS)
