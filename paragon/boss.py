@@ -1438,11 +1438,13 @@ class BossCog(commands.Cog):
         boss: dict,
         channel: discord.TextChannel,
     ) -> Optional[discord.PartialMessage]:
+        content = self._fit_panel_content(self._controls_lines(boss))
         try:
-            controls_message = await channel.send("Preparing controls...")
+            controls_message = await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
         except (discord.Forbidden, discord.HTTPException):
             return None
         await self._track_control_message(boss, controls_message)
+        boss["controls_hash"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
         return channel.get_partial_message(controls_message.id)
 
     async def _create_status_and_feed_messages(
@@ -1618,26 +1620,11 @@ class BossCog(commands.Cog):
     def _visible_attack_state(self, row: dict, now: datetime, boss: dict) -> tuple[int, int]:
         charges = _sync_attack_stamina(row, now, boss=boss)
         wait_seconds = _attack_stamina_wait_seconds(row, now, boss=boss)
-        legacy_lock = max(0, int(float(row.get("next_attack_ts", 0.0) or 0.0) - now.timestamp()))
-        if legacy_lock > 0:
-            return 0, max(legacy_lock, wait_seconds if charges < _attack_stamina_max(boss) else 0)
         return charges, wait_seconds
 
     def _visible_support_state(self, row: dict, now: datetime, boss: dict) -> tuple[int, int]:
         charges = _sync_support_stamina(row, now, boss=boss)
         wait_seconds = _support_stamina_wait_seconds(row, now, boss=boss)
-        legacy_lock = max(
-            0,
-            int(
-                max(
-                    float(row.get("next_support_ts", 0.0) or 0.0),
-                    float(row.get("next_res_ts", 0.0) or 0.0),
-                )
-                - now.timestamp()
-            ),
-        )
-        if legacy_lock > 0:
-            return 0, max(legacy_lock, wait_seconds if charges < _support_stamina_max(boss) else 0)
         return charges, wait_seconds
 
     def _panel_player_lines(self, guild: discord.Guild, boss: dict, now: datetime) -> list[str]:
@@ -1655,33 +1642,12 @@ class BossCog(commands.Cog):
         for uid, row in shown_rows:
             member = guild.get_member(uid)
             name = _clip_text(member.display_name if member is not None else str(row.get("display_name", uid)), 18)
-            attack_charges, attack_wait = self._visible_attack_state(row, now, boss)
-            support_charges, support_wait = self._visible_support_state(row, now, boss)
-            tags: list[str] = []
-            if _is_downed(boss, uid):
-                tags.append("DOWN")
-            if _has_ward(row, now):
-                tags.append("WARD")
-            if any(_focus_bonus(row, now)):
-                tags.append("FOCUS")
-            if str(uid) in _player_marks(boss):
-                tags.append("BLIGHT")
-            attack_wait_label = (
-                f" atk+{_fmt_remaining_panel(attack_wait)}"
-                if attack_wait > 0 and attack_charges < _attack_stamina_max(boss)
-                else ""
-            )
-            support_wait_label = (
-                f" sup+{_fmt_remaining_panel(support_wait)}"
-                if support_wait > 0 and support_charges < _support_stamina_max(boss)
-                else ""
-            )
-            tag_label = f" [{' '.join(tags)}]" if tags else ""
+            attack_charges, _ = self._visible_attack_state(row, now, boss)
+            support_charges, _ = self._visible_support_state(row, now, boss)
             lines.append(
                 f"- `{_stamina_icons(attack_charges, _attack_stamina_max(boss))}` "
                 f"`{_support_icons(support_charges, _support_stamina_max(boss))}` "
-                f"**{name}**{tag_label}{attack_wait_label}{support_wait_label} "
-                f"| **{_fmt_num(row.get('damage', 0))}** dmg | **{_fmt_num(row.get('hits', 0))}/{_fmt_num(row.get('attacks', 0))}** hit"
+                f"**{name}**"
             )
         if len(rows) > len(shown_rows):
             lines.append(f"- ...and **{len(rows) - len(shown_rows)}** more raider(s).")
@@ -1703,23 +1669,20 @@ class BossCog(commands.Cog):
                 f"React here: {BOSS_REACTION_ATTACK} attack | {BOSS_REACTION_RES} revive | {BOSS_REACTION_GUARD} guard | "
                 f"{BOSS_REACTION_INTERRUPT} interrupt | {BOSS_REACTION_PURGE} purge | {BOSS_REACTION_FOCUS} focus"
             ),
-            (
-                f"`{BOSS_STAMINA_READY}` attack charges refill every **{_fmt_remaining(BOSS_ATTACK_STAMINA_REFILL_SECONDS)}** | "
-                f"`{BOSS_SUPPORT_READY}` support charges refill every **{_fmt_remaining(BOSS_SUPPORT_STAMINA_REFILL_SECONDS)}**"
-            ),
         ]
 
     def _status_panel_lines(self, guild: discord.Guild, boss: dict, now: datetime) -> list[str]:
         hp = _as_int(boss.get("hp", 0), 0)
         max_hp = _as_int(boss.get("max_hp", 0), 0)
+        affix_name = str(boss.get("affix_name", "Unknown")).strip() or "Unknown"
+        display_name = str(boss.get("display_name", "Unknown Boss")).strip() or "Unknown Boss"
         lines = [
-            f"**{boss.get('display_name', 'Unknown Boss')}**",
+            f"**{affix_name}: {display_name}**",
             (
                 f"HP: `{_progress_bar(hp, max_hp)}` **{_fmt_num(hp)} / {_fmt_num(max_hp)}** "
                 f"| Phase **{_phase_name(_as_int(boss.get('phase', 1), 1))}**"
             ),
             (
-                f"Affix: **{boss.get('affix_name', 'Unknown')}** | "
                 f"Boss prestige **{_fmt_num(boss.get('boss_prestige', 0))}** "
                 f"(guild avg **{_as_float(boss.get('avg_prestige', 0.0), 0.0):.1f}**)"
             ),
@@ -1760,33 +1723,28 @@ class BossCog(commands.Cog):
             return None
         now = _utcnow()
         payloads = {
-            "controls": self._fit_panel_content(self._controls_lines(boss)),
             "status": self._fit_panel_content(self._status_panel_lines(guild, boss, now)),
             "feed": self._fit_panel_content(self._feed_panel_lines(boss)),
         }
         hash_keys = {
-            "controls": "controls_hash",
             "status": "status_hash",
             "feed": "feed_hash",
         }
         id_keys = {
-            "controls": "controls_message_id",
             "status": "status_message_id",
             "feed": "feed_message_id",
         }
-        controls_message: Optional[discord.PartialMessage] = None
-        for key in ("controls", "status", "feed"):
+        controls_message: Optional[discord.PartialMessage] = messages.get("controls")
+        for key in ("status", "feed"):
             content = payloads[key]
             digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
             message = messages[key]
-            if key == "controls":
-                controls_message = message
             if not force and str(boss.get(hash_keys[key], "")).strip() == digest:
                 continue
             try:
                 await message.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
             except discord.NotFound:
-                rebuilt = await self._rebuild_panel_messages(guild, boss, channel)
+                rebuilt = await self._rebuild_noncontrol_messages(boss, channel)
                 if rebuilt is None:
                     return None
                 return await self._refresh_boss_panel(guild, boss, channel, force=True)
@@ -2237,7 +2195,11 @@ class BossCog(commands.Cog):
         changed = _clear_expired_player_effects(boss, now) or changed
         if str(boss.get("status", "idle")).strip().lower() != "active":
             return changed
+        if await self._maybe_rescue_downed_raid(guild, boss, channel, now=now):
+            changed = True
         if await self._maybe_resolve_due_mechanic(guild, boss, channel, now=now):
+            changed = True
+        if await self._maybe_rescue_downed_raid(guild, boss, channel, now=now):
             changed = True
         if await self._maybe_start_pending_mechanic(guild, boss, channel, now=now):
             changed = True
@@ -2327,6 +2289,7 @@ class BossCog(commands.Cog):
         await ensure_guild_setup(guild)
         seed_value = f"boss:{now.date().isoformat()}:{'forced' if forced else 'daily'}:{now.hour}:{now.minute}"
         boss = self._make_new_boss(guild, now, seed_value=seed_value)
+        self._reset_all_raider_resources(guild, boss, now)
         channel = await self._ensure_boss_channel(guild, boss)
         if channel is None:
             return False
@@ -2452,6 +2415,68 @@ class BossCog(commands.Cog):
                 continue
             rows.append((uid, row))
         return rows
+
+    def _reset_all_raider_resources(self, guild: discord.Guild, boss: dict, now: datetime) -> None:
+        del now
+        for member in _human_members(guild):
+            row = _participant_row(boss, member)
+            row["display_name"] = member.display_name
+            row["attack_charges"] = _attack_stamina_max(boss)
+            row["attack_stamina_started_at"] = ""
+            row["support_charges"] = _support_stamina_max(boss)
+            row["support_stamina_started_at"] = ""
+            row["next_attack_ts"] = 0.0
+            row["next_support_ts"] = 0.0
+            row["next_res_ts"] = 0.0
+            row["focus_damage_bonus_pct"] = 0.0
+            row["focus_hit_bonus_pct"] = 0.0
+            row["focus_expires_at"] = ""
+            row["ward_expires_at"] = ""
+
+    async def _maybe_rescue_downed_raid(
+        self,
+        guild: discord.Guild,
+        boss: dict,
+        channel: Optional[discord.TextChannel],
+        *,
+        now: datetime,
+    ) -> bool:
+        if channel is None:
+            return False
+        rows = self._contributor_rows(boss)
+        if not rows:
+            return False
+        if any(not _is_downed(boss, uid) for uid, _ in rows):
+            return False
+
+        affix = _affix_data(boss)
+        max_hp = max(1, _as_int(boss.get("max_hp", 1), 1))
+        heal = int(round(max_hp * 0.15 * float(affix.get("heal_mult", 1.0))))
+        before = _as_int(boss.get("hp", 0), 0)
+        boss["hp"] = min(max_hp, before + heal)
+        healed = max(0, _as_int(boss.get("hp", 0), 0) - before)
+        boss["heal_total"] = _as_int(boss.get("heal_total", 0), 0) + healed
+
+        revived_mentions: list[str] = []
+        drained_mentions: list[str] = []
+        for uid, row in rows:
+            member = guild.get_member(uid)
+            label = member.mention if member is not None else f"**{row.get('display_name', uid)}**"
+            if _sync_support_stamina(row, now, boss=boss) > 0 and _consume_support_stamina(row, now, boss=boss):
+                drained_mentions.append(label)
+            if _revive_member(boss, uid):
+                revived_mentions.append(label)
+
+        lines = [
+            "The raid is wiped out for a moment, and the boss feasts on the opening.",
+            f"The boss surges back for **{_fmt_num(healed)} HP**.",
+        ]
+        if drained_mentions:
+            lines.append("Support is shaken loose from " + ", ".join(drained_mentions) + ".")
+        if revived_mentions:
+            lines.append("The raid staggers back to its feet: " + ", ".join(revived_mentions) + ".")
+        await self._send_boss_message(channel, boss, "\n".join(lines))
+        return True
 
     def _top_damage_row(self, boss: dict) -> Optional[tuple[int, dict]]:
         rows = self._contributor_rows(boss)
@@ -3024,7 +3049,7 @@ class BossCog(commands.Cog):
                 channel,
                 boss,
                 (
-                    f"You are downed. Another raider must use `{COMMAND_PREFIX}res {attacker.mention}` "
+                    f"{attacker.mention} is downed. Another raider must use `{COMMAND_PREFIX}res {attacker.mention}` "
                     "before you can attack again."
                 ),
                 reference=reference,
@@ -3038,7 +3063,7 @@ class BossCog(commands.Cog):
             await self._send_boss_message(
                 channel,
                 boss,
-                f"Your attack stamina is empty. Next charge in **{_fmt_remaining_panel(visible_attack_wait)}**.",
+                f"{attacker.mention}, your attack stamina is empty. Next charge in **{_fmt_remaining_panel(visible_attack_wait)}**.",
                 reference=reference,
             )
             return
@@ -3047,7 +3072,7 @@ class BossCog(commands.Cog):
             await self._send_boss_message(
                 channel,
                 boss,
-                f"Your attack stamina is empty. Next charge in **{_fmt_remaining_panel(wait_seconds)}**.",
+                f"{attacker.mention}, your attack stamina is empty. Next charge in **{_fmt_remaining_panel(wait_seconds)}**.",
                 reference=reference,
             )
             return
@@ -3057,7 +3082,7 @@ class BossCog(commands.Cog):
             boss["engaged_at"] = _iso(now)
             boss["expires_at"] = _iso(now + timedelta(minutes=int(BOSS_ACTIVE_DURATION_MINUTES)))
             self._schedule_next_mechanic(boss, now, delay_seconds=random.randint(50, 70))
-            _push_feed_line(boss, f"{attacker.display_name} engages the boss. The raid timer is now live.", now=now)
+            _push_feed_line(boss, f"{attacker.mention} engages the boss. The raid timer is now live.", now=now)
 
         prestige = _member_prestige(guild.id, attacker.id)
         chance = _hit_chance(boss, prestige)
@@ -3115,14 +3140,14 @@ class BossCog(commands.Cog):
             if mark_active:
                 rider_bits.append("blighted")
             attack_lines.append(
-                f"{attacker.display_name} hits at **{chance * 100.0:.1f}%** odds for **{_fmt_num(damage)}** damage"
+                f"{attacker.mention} hits at **{chance * 100.0:.1f}%** odds for **{_fmt_num(damage)}** damage"
                 + (f" ({', '.join(rider_bits)})." if rider_bits else ".")
             )
         else:
             row["misses"] = _as_int(row.get("misses", 0), 0) + 1
             record_game_fields(guild.id, attacker.id, "boss", attacks=1, misses=1)
             attack_lines.append(
-                f"{attacker.display_name} misses at **{chance * 100.0:.1f}%** odds."
+                f"{attacker.mention} misses at **{chance * 100.0:.1f}%** odds."
             )
         if focus_damage_bonus > 0.0 or focus_hit_bonus > 0.0:
             _consume_focus(row)
@@ -3168,6 +3193,8 @@ class BossCog(commands.Cog):
             ),
             reference=reference,
         )
+        if await self._maybe_rescue_downed_raid(guild, boss, channel, now=_utcnow()):
+            await save_data()
 
     async def _run_resurrection(
         self,
@@ -3196,7 +3223,7 @@ class BossCog(commands.Cog):
             await self._send_boss_message(
                 channel,
                 boss,
-                "You are downed and cannot resurrect anyone until another raider revives you.",
+                f"{member.mention} is downed and cannot resurrect anyone until another raider revives them.",
                 reference=reference,
             )
             return
@@ -3211,13 +3238,13 @@ class BossCog(commands.Cog):
             await self._send_boss_message(channel, boss, "Bots do not need resurrection.", reference=reference)
             return
         if target.id == member.id:
-            await self._send_boss_message(channel, boss, "You cannot resurrect yourself.", reference=reference)
+            await self._send_boss_message(channel, boss, f"{member.mention} cannot resurrect themselves.", reference=reference)
             return
         if not _is_downed(boss, target.id):
             await self._send_boss_message(
                 channel,
                 boss,
-                f"{target.display_name} is not downed.",
+                f"{target.mention} is not downed.",
                 reference=reference,
             )
             return
@@ -3229,7 +3256,7 @@ class BossCog(commands.Cog):
             await self._send_boss_message(
                 channel,
                 boss,
-                f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(visible_support_wait)}**.",
+                f"{member.mention}, your support stamina is empty. Next support charge in **{_fmt_remaining_panel(visible_support_wait)}**.",
                 reference=reference,
             )
             return
@@ -3239,7 +3266,7 @@ class BossCog(commands.Cog):
             await self._send_boss_message(
                 channel,
                 boss,
-                f"{target.display_name} is no longer downed.",
+                f"{target.mention} is no longer downed.",
                 reference=reference,
             )
             return
@@ -3248,7 +3275,7 @@ class BossCog(commands.Cog):
             await self._send_boss_message(
                 channel,
                 boss,
-                f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
+                f"{member.mention}, your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
                 reference=reference,
             )
             return
@@ -3264,8 +3291,8 @@ class BossCog(commands.Cog):
             channel,
             boss,
             (
-                f"{member.display_name} hauls {target.display_name} back into the fight. "
-                f"{target.display_name} can attack again in a few seconds."
+                f"{member.mention} hauls {target.mention} back into the fight. "
+                f"{target.mention} can attack again in a few seconds."
             ),
             reference=reference,
         )
@@ -3314,7 +3341,7 @@ class BossCog(commands.Cog):
             await self._send_boss_message(
                 channel,
                 boss,
-                "You are downed. Another raider must revive you before you can use support actions.",
+                f"{member.mention} is downed. Another raider must revive them before they can use support actions.",
                 reference=reference,
             )
             return
@@ -3336,7 +3363,7 @@ class BossCog(commands.Cog):
             await self._send_boss_message(
                 channel,
                 boss,
-                f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(visible_support_wait)}**.",
+                f"{member.mention}, your support stamina is empty. Next support charge in **{_fmt_remaining_panel(visible_support_wait)}**.",
                 reference=reference,
             )
             return
@@ -3349,7 +3376,7 @@ class BossCog(commands.Cog):
                 await self._send_boss_message(
                     channel,
                     boss,
-                    f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
+                    f"{member.mention}, your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
                     reference=reference,
                 )
                 return
@@ -3373,17 +3400,27 @@ class BossCog(commands.Cog):
 
         if action == "interrupt":
             if pending_counter != "interrupt":
-                await self._send_boss_message(channel, boss, "Nothing is channeling right now. Save `!interrupt` for a telegraphed cast.", reference=reference)
+                await self._send_boss_message(
+                    channel,
+                    boss,
+                    f"{member.mention}, nothing is channeling right now. Save `{COMMAND_PREFIX}interrupt` for a telegraphed cast.",
+                    reference=reference,
+                )
                 return
             counted = self._register_mechanic_response(boss, member, "interrupt")
             if not counted:
-                await self._send_boss_message(channel, boss, "You have already committed your interrupt to this cast.", reference=reference)
+                await self._send_boss_message(
+                    channel,
+                    boss,
+                    f"{member.mention} has already committed an interrupt to this cast.",
+                    reference=reference,
+                )
                 return
             if not _consume_support_stamina(row, now, boss=boss):
                 await self._send_boss_message(
                     channel,
                     boss,
-                    f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
+                    f"{member.mention}, your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
                     reference=reference,
                 )
                 return
@@ -3422,7 +3459,7 @@ class BossCog(commands.Cog):
                 await self._send_boss_message(
                     channel,
                     boss,
-                    f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
+                    f"{member.mention}, your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
                     reference=reference,
                 )
                 return
@@ -3453,13 +3490,13 @@ class BossCog(commands.Cog):
                 await self._send_boss_message(channel, boss, "Bots cannot be focused.", reference=reference)
                 return
             if _is_downed(boss, target.id):
-                await self._send_boss_message(channel, boss, f"{target.display_name} is downed and cannot be focused right now.", reference=reference)
+                await self._send_boss_message(channel, boss, f"{target.mention} is downed and cannot be focused right now.", reference=reference)
                 return
             if not _consume_support_stamina(row, now, boss=boss):
                 await self._send_boss_message(
                     channel,
                     boss,
-                    f"Your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
+                    f"{member.mention}, your support stamina is empty. Next support charge in **{_fmt_remaining_panel(_support_stamina_wait_seconds(row, now, boss=boss))}**.",
                     reference=reference,
                 )
                 return
