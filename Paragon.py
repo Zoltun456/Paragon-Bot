@@ -57,7 +57,7 @@ def _build_cogs() -> list[commands.Cog]:
         SurpriseCog(bot),
         AnagramCog(bot),
         ContractsCog(bot),
-        BossCog(bot),
+        #BossCog(bot),
         ThanksCog(bot),
         LottoCog(bot),
         SpinCog(bot),
