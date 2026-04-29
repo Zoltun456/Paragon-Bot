@@ -1007,7 +1007,13 @@ class FishCog(commands.Cog):
             return [LIFT_EMOJI, GIVE_EMOJI, SET_EMOJI, SESSION_STOP_EMOJI]
         return []
 
-    async def _refresh_session_message(self, guild: discord.Guild, member: discord.Member) -> bool:
+    async def _refresh_session_message(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        *,
+        move_to_latest: bool = False,
+    ) -> bool:
         channel = get_fishing_channel(guild)
         if channel is None:
             return False
@@ -1015,6 +1021,20 @@ class FishCog(commands.Cog):
         content = self._render_session_message(guild, member, session)
         msg = await self._fetch_message(channel, _as_int(session.get("session_message_id", 0), 0))
         created = False
+        if move_to_latest:
+            try:
+                new_msg = await channel.send(content)
+            except Exception:
+                return False
+            session["session_message_id"] = int(new_msg.id)
+            await self._set_reactions(new_msg, self._session_reactions(session))
+            if msg is not None:
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+            return True
+
         if msg is None:
             try:
                 msg = await channel.send(content)
@@ -1051,7 +1071,7 @@ class FishCog(commands.Cog):
             return
         if started_new_session:
             record_game_fields(guild.id, member.id, "fishing", sessions_started=1)
-        await self._refresh_session_message(guild, member)
+        await self._refresh_session_message(guild, member, move_to_latest=True)
         await self._ensure_dock_message(guild, force_refresh=True)
         await save_data()
 
