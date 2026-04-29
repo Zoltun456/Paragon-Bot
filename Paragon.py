@@ -12,6 +12,7 @@ from paragon.coinflip import CoinFlipCog
 from paragon.config import AUTHOR_USER_ID, COMMAND_PREFIX, TOKEN
 from paragon.contracts import ContractsCog
 from paragon.core import CoreCog
+from paragon.fish import FishCog
 from paragon.game_stats import StatsCog
 from paragon.lotto import LottoCog
 from paragon.playback import PlaybackCog
@@ -58,6 +59,7 @@ def _build_cogs() -> list[commands.Cog]:
         SurpriseCog(bot),
         AnagramCog(bot),
         ContractsCog(bot),
+        FishCog(bot),
         #BossCog(bot),
         ThanksCog(bot),
         LottoCog(bot),

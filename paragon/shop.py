@@ -8,10 +8,10 @@ from typing import Optional
 from discord.ext import commands
 
 from .config import (
+    SHOP_COST_ROUND_STEP,
     SHOP_CLEANSE_START_PCT,
     SHOP_CLEANSE_STEP_GROWTH_PCT,
     SHOP_CLEANSE_STEP_PCT,
-    SHOP_COST_ROUND_STEP,
     SHOP_ROULETTE_ACCURACY_BONUS_CHANCE,
     SHOP_ROULETTE_ACCURACY_START_PCT,
     SHOP_ROULETTE_ACCURACY_STEP_GROWTH_PCT,
@@ -25,6 +25,7 @@ from .config import (
     SPIN_RESET_HOUR,
     SPIN_RESET_MINUTE,
 )
+from .fish_support import add_bait
 from .spin import (
     _add_bonus_spins,
     _available_spins,
@@ -60,6 +61,15 @@ SHOP_ITEMS: list[dict[str, object]] = [
             f"Adds 1 bonus wheel spin. Starts at {_fmt_pct(SHOP_WHEEL_SPIN_START_PCT)} "
             f"of your next prestige and ramps harder each purchase every reset, "
             f"rounded to the nearest {max(1, int(SHOP_COST_ROUND_STEP)):,} XP."
+        ),
+    },
+    {
+        "key": "bait_crate",
+        "name": "Bait Crate x25",
+        "aliases": ["bait", "baitcrate", "worms", "crate"],
+        "description": (
+            "Adds **25** bait for fishing. First buy each reset is free, then scales "
+            "from 5% to 10% to 15% of your next prestige and keeps climbing."
         ),
     },
     {
@@ -101,6 +111,11 @@ SHOP_ITEM_CURVES: dict[str, dict[str, int]] = {
         "start_pct": SHOP_WHEEL_SPIN_START_PCT,
         "step_pct": SHOP_WHEEL_SPIN_STEP_PCT,
         "step_growth_pct": SHOP_WHEEL_SPIN_STEP_GROWTH_PCT,
+    },
+    "bait_crate": {
+        "start_pct": 0,
+        "step_pct": 5,
+        "step_growth_pct": 0,
     },
     "cleanse": {
         "start_pct": SHOP_CLEANSE_START_PCT,
@@ -357,6 +372,9 @@ class ShopCog(commands.Cog):
             effect_text = (
                 f"Bonus spin bank: **{bonus_total}** | Total spins available now: **{_available_spins(ust)}**."
             )
+        elif key == "bait_crate":
+            total_bait = add_bait(ctx.guild.id, ctx.author.id, amount=25 * amount)
+            effect_text = f"Fishing bait now: **{total_bait}**."
         elif key == "cleanse":
             charges = add_cleanse_charges(ctx.guild.id, ctx.author.id, charges=amount)
             effect_text = f"Cleanse charges now: **{charges}**."

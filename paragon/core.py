@@ -48,6 +48,7 @@ HELP_DESCRIPTIONS = {
     "drain": "Use a stored Drain item to debuff everyone else in your voice call and boost yourself.",
     "shop": "List the current XP shop items, including your prestige-scaled Wheel Spin price.",
     "buy": "Buy a shop item by index or name.",
+    "fish": "Fish from the dock channel with bait, reel in bites, and keep casting until you stop.",
     "spawnboss": "Admin: force-spawn a raid boss immediately for testing or events.",
     "clearboss": "Admin: immediately remove the current raid boss without rewards, penalties, or boss stats.",
     "spintime": "Admin: view or set daily spin reset time (ET).",
@@ -81,6 +82,7 @@ HELP_DESCRIPTIONS = {
     "setxp": "Admin: set total XP for users or roles.",
     "adjust": "Admin: add or subtract XP from a user.",
     "softreset": "Admin: reset a user's current XP, prestige, and wheel rewards without deleting stats.",
+    "fishreroll": "Owner: reroll the current fishing water state immediately.",
 }
 
 def _settings(gid: int) -> dict:

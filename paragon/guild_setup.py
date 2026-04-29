@@ -12,10 +12,12 @@ from .storage import _gdict, save_data
 CHANNELS_KEY = "channels"
 LOG_CHANNEL_KEY = "log_channel_id"
 BLACKJACK_CHANNEL_KEY = "blackjack_channel_id"
+FISHING_CHANNEL_KEY = "fishing_channel_id"
 OWNER_CHANNEL_KEY = "owner_channel_id"
 
 LOG_CHANNEL_NAME = "paragon-log"
 BLACKJACK_CHANNEL_NAME = "paragon-blackjack"
+FISHING_CHANNEL_NAME = "paragon-fishing"
 OWNER_CHANNEL_NAME = "paragon-owner"
 
 
@@ -63,6 +65,11 @@ def get_owner_channel_id(guild_id: int) -> int:
     return _as_int(channels.get(OWNER_CHANNEL_KEY), 0)
 
 
+def get_fishing_channel_id(guild_id: int) -> int:
+    channels = _channels_dict(guild_id)
+    return _as_int(channels.get(FISHING_CHANNEL_KEY), 0)
+
+
 def get_log_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
     ch = guild.get_channel(get_log_channel_id(guild.id))
     return ch if isinstance(ch, discord.TextChannel) else None
@@ -70,6 +77,11 @@ def get_log_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
 
 def get_blackjack_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
     ch = guild.get_channel(get_blackjack_channel_id(guild.id))
+    return ch if isinstance(ch, discord.TextChannel) else None
+
+
+def get_fishing_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    ch = guild.get_channel(get_fishing_channel_id(guild.id))
     return ch if isinstance(ch, discord.TextChannel) else None
 
 
@@ -173,6 +185,17 @@ async def ensure_guild_setup(guild: discord.Guild) -> bool:
         blackjack_channel = _find_text_channel_by_name(guild, BLACKJACK_CHANNEL_NAME)
     if blackjack_channel and _as_int(channels.get(BLACKJACK_CHANNEL_KEY), 0) != blackjack_channel.id:
         channels[BLACKJACK_CHANNEL_KEY] = int(blackjack_channel.id)
+        changed = True
+
+    fishing_channel = await _get_or_create_text_channel(
+        guild,
+        stored_id=get_fishing_channel_id(guild.id),
+        name=FISHING_CHANNEL_NAME,
+    )
+    if fishing_channel is None:
+        fishing_channel = _find_text_channel_by_name(guild, FISHING_CHANNEL_NAME)
+    if fishing_channel and _as_int(channels.get(FISHING_CHANNEL_KEY), 0) != fishing_channel.id:
+        channels[FISHING_CHANNEL_KEY] = int(fishing_channel.id)
         changed = True
 
     owner_channel = await _get_or_create_text_channel(

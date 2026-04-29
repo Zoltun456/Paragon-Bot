@@ -168,6 +168,29 @@ def _game_stats_lines(games: dict) -> list[str]:
             f"boost seed {_fmt_num(ct.get('boost_seed_xp_total', 0))}"
         )
 
+    fs = _as_dict(games.get("fishing"))
+    if fs:
+        out.append(
+            "Fishing: "
+            f"sessions {_fmt_num(fs.get('sessions_started', 0))} | "
+            f"casts {_fmt_num(fs.get('casts_started', 0))} | "
+            f"bites {_fmt_num(fs.get('bites', 0))} | "
+            f"catches {_fmt_num(fs.get('catches', 0))} | "
+            f"escapes {_fmt_num(fs.get('escapes', 0))} | "
+            f"perfect reels {_fmt_num(fs.get('perfect_reels', 0))} | "
+            f"chests {_fmt_num(fs.get('chests_found', 0))} | "
+            f"xp {_fmt_num(fs.get('xp_awarded_total', 0))}"
+        )
+
+    shop = _as_dict(games.get("shop"))
+    if shop:
+        out.append(
+            "Shop: "
+            f"purchases {_fmt_num(shop.get('purchases', 0))} | "
+            f"commands {_fmt_num(shop.get('buy_commands', 0))} | "
+            f"spent {_fmt_num(shop.get('spent_total', 0))}"
+        )
+
     boss = _as_dict(games.get("boss"))
     if boss:
         out.append(
@@ -350,8 +373,11 @@ class StatsCog(commands.Cog):
                         "tickets_bought", "jackpots_won", "plays", "successes", "backfires",
                         "claims", "sent", "received", "assigned", "completed", "multi_step_completed",
                         "legendary_completed", "objectives_completed_total",
+                        "sessions_started", "casts_started", "bites", "catches", "escapes",
+                        "perfect_reels", "chests_found", "purchases", "buy_commands",
                         "xp_wagered_total", "xp_profit_total",
-                        "xp_spent_total", "boost_seed_xp_total", "boost_percent_total", "boost_minutes_total",
+                        "xp_spent_total", "spent_total", "xp_awarded_total",
+                        "boost_seed_xp_total", "boost_percent_total", "boost_minutes_total",
                     }
                 )
                 lines.append(f"- {game}: {summary if summary else 'tracked'}")
