@@ -16,6 +16,7 @@ from paragon.game_stats import StatsCog
 from paragon.lotto import LottoCog
 from paragon.playback import PlaybackCog
 from paragon.prestige import PrestigeCog
+from paragon.quiet import QuietCog
 from paragon.roulette import RouletteCog
 from paragon.shop import ShopCog
 from paragon.storage import load_data
@@ -63,6 +64,7 @@ def _build_cogs() -> list[commands.Cog]:
         SpinCog(bot),
         ShopCog(bot),
         PrestigeCog(bot),
+        QuietCog(bot),
         BlackjackCog(bot),
         PlaybackCog(bot),
         VoiceCog(bot),

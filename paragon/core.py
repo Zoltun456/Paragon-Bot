@@ -73,6 +73,7 @@ HELP_DESCRIPTIONS = {
     "say": "Join a mentioned user's voice channel, speak a TTS message, then leave.",
     "rerollvoice": "Reroll your TTS voice profile. Admins can pass @user to reroll someone else.",
     "setvoice": "Set your TTS voice by Eleven voice ID with optional profile settings.",
+    "shh": "Server mute a mentioned user for 30 seconds. 30 minute personal cooldown.",
     "gamestats": "Show per-user game stats and XP ledger.",
     "guildgamestats": "Admin: show aggregated server game stats.",
     "role": "Admin: toggle a Discord role on a member.",
