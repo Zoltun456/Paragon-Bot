@@ -7,6 +7,7 @@ from typing import Optional
 import discord
 from discord.ext import commands, tasks
 
+from .emojis import EMOJI_HOOK
 from .fish_support import add_bait, consume_bait, get_bait, refund_bait
 from .guild_setup import ensure_guild_setup, get_fishing_channel, get_fishing_channel_id
 from .ownership import owner_only
@@ -38,7 +39,7 @@ DOCK_STOP_EMOJI = "\N{OCTAGONAL SIGN}"
 REEL_EMOJI = "\N{FISHING POLE AND FISH}"
 LIFT_EMOJI = "\N{UPWARDS BLACK ARROW}"
 GIVE_EMOJI = "\N{DOWNWARDS BLACK ARROW}"
-SET_EMOJI = "🪝"
+SET_EMOJI = EMOJI_HOOK
 SESSION_STOP_EMOJI = DOCK_STOP_EMOJI
 
 BASE_CHEST_CHANCE = 0.05
