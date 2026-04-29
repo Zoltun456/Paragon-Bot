@@ -959,12 +959,10 @@ class FishCog(commands.Cog):
             return _join_lines(lines)
 
         state_name = str(session.get("cast_state_name", "Unknown Water")).strip() or "Unknown Water"
-        state_flavor = str(session.get("cast_state_flavor", "")).strip()
         if phase == "waiting":
             lines.extend(
                 [
                     f"{DOCK_CAST_EMOJI} {member.mention} is fishing the **{state_name}**.",
-                    state_flavor or "The line settles and the water watches back.",
                     "Line status: **Waiting on a bite**.",
                     f"Bait still on the line: **1** | Spare bait in tackle box: **{bait}**",
                     f"Use {_command_text('fish stop')} or react {SESSION_STOP_EMOJI} to pack it up and recover this bait.",
