@@ -1,5 +1,6 @@
 # paragon/core.py
 # core v2
+from datetime import datetime, timezone
 from typing import Optional
 import discord
 from discord.ext import commands, tasks
@@ -7,7 +8,9 @@ from discord.ext import commands, tasks
 from .config import resolve_afk_channel_id
 from .emojis import EMOJI_FIRST_PLACE_MEDAL, EMOJI_SECOND_PLACE_MEDAL, EMOJI_THIRD_PLACE_MEDAL
 from .guild_setup import ensure_guild_setup
+from .stats_store import record_game_fields
 from .storage import load_data, _gdict, _udict, save_data
+from .time_windows import _date_key, _today_local
 from .xp import apply_delta, get_gain_state, grant_fixed_boost, grant_fixed_debuff
 from .roles import enforce_level6_exclusive
 from .ownership import owner_only, is_control_user_id
@@ -123,9 +126,292 @@ def is_inactive_state(vstate: discord.VoiceState) -> bool:
     if not is_in_countable_vc(vstate.channel): return False
     return bool(vstate.mute or vstate.deaf or vstate.self_mute or vstate.self_deaf)
 
+
+PING_PONG_TARGET = 10
+NEIGHBORHOOD_WATCH_TARGET = 5
+REGULAR_CUSTOMER_TARGET = 5
+WINGMAN_TARGET_MINUTES = 45
+PARTY_BUS_MIN_HUMANS = 3
+TOUCH_GRASS_MIN_SECONDS = 30 * 60
+
+
+def _as_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _as_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _utcnow_ts() -> int:
+    return int(discord.utils.utcnow().timestamp())
+
+
+def _parse_iso_ts(value) -> int:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0
+    try:
+        dt = datetime.fromisoformat(raw)
+    except Exception:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def _activity_state(gid: int, uid: int) -> dict:
+    u = _udict(gid, uid)
+    st = u.get("activity_quests")
+    if not isinstance(st, dict):
+        st = {}
+        u["activity_quests"] = st
+
+    today = _date_key(_today_local())
+    if str(st.get("date", "")) != today:
+        last_activity_ts = _as_int(st.get("last_activity_ts", 0))
+        last_text_channel_id = _as_int(st.get("last_text_channel_id", 0))
+        touch_grass_completed_seen_at = str(st.get("touch_grass_completed_seen_at", ""))
+        st.clear()
+        st["date"] = today
+        st["last_activity_ts"] = last_activity_ts
+        st["last_text_channel_id"] = last_text_channel_id
+        st["touch_grass_completed_seen_at"] = touch_grass_completed_seen_at
+
+    st.setdefault("date", today)
+    st.setdefault("last_activity_ts", 0)
+    st.setdefault("last_text_channel_id", 0)
+    st.setdefault("touch_grass_completed_seen_at", "")
+    st["mentions_by_target"] = _as_dict(st.get("mentions_by_target"))
+    st["ping_pong_awarded_targets"] = [str(v) for v in _as_list(st.get("ping_pong_awarded_targets"))]
+    st["neighborhood_watch_awarded"] = bool(st.get("neighborhood_watch_awarded", False))
+    st["commands_used"] = [str(v).strip().lower() for v in _as_list(st.get("commands_used")) if str(v).strip()]
+    st["regular_customer_awarded"] = bool(st.get("regular_customer_awarded", False))
+    st["wingman_by_target"] = _as_dict(st.get("wingman_by_target"))
+    st["wingman_awarded_targets"] = [str(v) for v in _as_list(st.get("wingman_awarded_targets"))]
+    return st
+
 class CoreCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    def _last_contract_channel(self, guild: discord.Guild, uid: int):
+        state = _activity_state(guild.id, uid)
+        channel_id = _as_int(state.get("last_text_channel_id", 0))
+        if channel_id <= 0:
+            return None
+        getter = getattr(guild, "get_channel_or_thread", None)
+        if callable(getter):
+            return getter(channel_id)
+        return guild.get_channel(channel_id)
+
+    async def _maybe_auto_complete_contract(self, member: discord.Member, *, channel=None) -> bool:
+        if member.bot or member.guild is None:
+            return False
+        contracts_cog = self.bot.get_cog("ContractsCog")
+        if contracts_cog is None or not hasattr(contracts_cog, "maybe_auto_complete_contract_for_member"):
+            return False
+        try:
+            return await contracts_cog.maybe_auto_complete_contract_for_member(
+                member.guild,
+                member,
+                channel=channel,
+            )
+        except Exception:
+            return False
+
+    def _record_touch_grass_progress(
+        self,
+        member: discord.Member,
+        *,
+        state: dict,
+        previous_activity_ts: int,
+        now_ts: int,
+    ) -> bool:
+        u = _udict(member.guild.id, member.id)
+        contract_state = _as_dict(u.get("contracts"))
+        if bool(contract_state.get("claimed", False)):
+            return False
+
+        quest = _as_dict(contract_state.get("quest"))
+        if str(quest.get("key", "")).strip().lower() != "touch_grass":
+            return False
+
+        seen_at = str(contract_state.get("seen_at", "")).strip()
+        seen_ts = _parse_iso_ts(seen_at)
+        if seen_ts <= 0:
+            return False
+        if str(state.get("touch_grass_completed_seen_at", "")) == seen_at:
+            return False
+
+        quiet_start_ts = max(seen_ts, max(0, previous_activity_ts))
+        if (now_ts - quiet_start_ts) < TOUCH_GRASS_MIN_SECONDS:
+            return False
+
+        state["touch_grass_completed_seen_at"] = seen_at
+        record_game_fields(member.guild.id, member.id, "social", touch_grass_returns=1)
+        return True
+
+    async def _register_activity(self, member: discord.Member, *, channel=None) -> bool:
+        state = _activity_state(member.guild.id, member.id)
+        previous_activity_ts = _as_int(state.get("last_activity_ts", 0))
+        now_ts = _utcnow_ts()
+        changed = False
+
+        if channel is not None:
+            channel_id = _as_int(getattr(channel, "id", 0))
+            if channel_id > 0 and channel_id != _as_int(state.get("last_text_channel_id", 0)):
+                state["last_text_channel_id"] = channel_id
+                changed = True
+
+        if self._record_touch_grass_progress(
+            member,
+            state=state,
+            previous_activity_ts=previous_activity_ts,
+            now_ts=now_ts,
+        ):
+            changed = True
+
+        if now_ts != previous_activity_ts:
+            state["last_activity_ts"] = now_ts
+            changed = True
+
+        return changed
+
+    async def _looks_like_command(self, message: discord.Message) -> bool:
+        content = str(message.content or "")
+        if not content:
+            return False
+        try:
+            prefixes = await self.bot.get_prefix(message)
+        except Exception:
+            return False
+        if isinstance(prefixes, str):
+            prefixes = [prefixes]
+        return any(content.startswith(str(prefix)) for prefix in prefixes if str(prefix))
+
+    def _record_social_message(self, message: discord.Message) -> bool:
+        if message.guild is None:
+            return False
+
+        member = message.author
+        if not isinstance(member, discord.Member) or member.bot:
+            return False
+
+        record_game_fields(message.guild.id, member.id, "social", messages_sent=1)
+        state = _activity_state(message.guild.id, member.id)
+        changed = True
+
+        mentions = {
+            int(target.id)
+            for target in message.mentions
+            if isinstance(target, discord.Member) and not target.bot and target.id != member.id
+        }
+        if not mentions:
+            return changed
+
+        record_game_fields(
+            message.guild.id,
+            member.id,
+            "social",
+            mention_messages=1,
+            mentions_total=len(mentions),
+        )
+
+        counts = _as_dict(state.get("mentions_by_target"))
+        state["mentions_by_target"] = counts
+        awarded = {str(v) for v in _as_list(state.get("ping_pong_awarded_targets"))}
+        newly_awarded = 0
+
+        for target_id in mentions:
+            key = str(target_id)
+            counts[key] = _as_int(counts.get(key, 0)) + 1
+            if _as_int(counts.get(key, 0)) >= PING_PONG_TARGET and key not in awarded:
+                awarded.add(key)
+                newly_awarded += 1
+
+        state["ping_pong_awarded_targets"] = sorted(awarded)
+        if newly_awarded > 0:
+            record_game_fields(message.guild.id, member.id, "social", ping_pong_targets=newly_awarded)
+
+        if (
+            not bool(state.get("neighborhood_watch_awarded", False))
+            and len(counts) >= NEIGHBORHOOD_WATCH_TARGET
+        ):
+            state["neighborhood_watch_awarded"] = True
+            record_game_fields(message.guild.id, member.id, "social", neighborhood_watch_days=1)
+
+        return changed
+
+    def _record_command_usage(self, ctx: commands.Context) -> bool:
+        if ctx.guild is None or ctx.author.bot or ctx.command is None:
+            return False
+
+        cmd_name = str(getattr(ctx.command, "qualified_name", "") or getattr(ctx.command, "name", "")).strip().lower()
+        if not cmd_name:
+            return False
+
+        state = _activity_state(ctx.guild.id, ctx.author.id)
+        used = {name for name in _as_list(state.get("commands_used")) if str(name).strip()}
+        changed = False
+
+        if cmd_name not in used:
+            used.add(cmd_name)
+            state["commands_used"] = sorted(used)
+            changed = True
+
+            if (
+                not bool(state.get("regular_customer_awarded", False))
+                and len(used) >= REGULAR_CUSTOMER_TARGET
+            ):
+                state["regular_customer_awarded"] = True
+                record_game_fields(ctx.guild.id, ctx.author.id, "social", regular_customer_days=1)
+
+        if cmd_name != "quest":
+            record_game_fields(ctx.guild.id, ctx.author.id, "social", non_quest_commands_used=1)
+            changed = True
+
+        return changed
+
+    def _record_voice_presence_minute(self, member: discord.Member) -> bool:
+        voice_state = getattr(member, "voice", None)
+        channel = getattr(voice_state, "channel", None)
+        if not is_in_countable_vc(channel):
+            return False
+
+        record_game_fields(member.guild.id, member.id, "voice", minutes_in_call=1)
+        state = _activity_state(member.guild.id, member.id)
+        state["last_activity_ts"] = _utcnow_ts()
+        human_members = [m for m in channel.members if isinstance(m, discord.Member) and not m.bot]
+        if len(human_members) >= PARTY_BUS_MIN_HUMANS:
+            record_game_fields(member.guild.id, member.id, "voice", party_bus_minutes=1)
+
+        counts = _as_dict(state.get("wingman_by_target"))
+        state["wingman_by_target"] = counts
+        awarded = {str(v) for v in _as_list(state.get("wingman_awarded_targets"))}
+        newly_awarded = 0
+
+        for other in human_members:
+            if other.id == member.id:
+                continue
+            key = str(other.id)
+            counts[key] = _as_int(counts.get(key, 0)) + 1
+            if _as_int(counts.get(key, 0)) >= WINGMAN_TARGET_MINUTES and key not in awarded:
+                awarded.add(key)
+                newly_awarded += 1
+
+        state["wingman_awarded_targets"] = sorted(awarded)
+        if newly_awarded > 0:
+            record_game_fields(member.guild.id, member.id, "voice", wingman_targets=newly_awarded)
+
+        return True
 
     def _can_manage_boosts(self, ctx: commands.Context) -> bool:
         if is_control_user_id(ctx.guild, ctx.author.id):
@@ -291,9 +577,66 @@ class CoreCog(commands.Cog):
             for member in guild.members:
                 if member.bot:
                     continue
+                voice_metrics_changed = self._record_voice_presence_minute(member)
                 await apply_delta(member, minutes=1, inactive_minutes=0, source="voice minute")
+                if voice_metrics_changed:
+                    await self._maybe_auto_complete_contract(
+                        member,
+                        channel=self._last_contract_channel(guild, member.id),
+                    )
             # Repurposed function now syncs Gold/Silver/Bronze podium roles.
             await enforce_level6_exclusive(guild)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.guild is None or message.author.bot:
+            return
+        member = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
+        if member is None or member.bot:
+            return
+
+        changed = await self._register_activity(member, channel=message.channel)
+        if not await self._looks_like_command(message):
+            changed = self._record_social_message(message) or changed
+
+        if not changed:
+            return
+
+        await save_data()
+        await self._maybe_auto_complete_contract(member, channel=message.channel)
+
+    @commands.Cog.listener()
+    async def on_command_completion(self, ctx: commands.Context):
+        if ctx.guild is None or ctx.author.bot:
+            return
+
+        changed = await self._register_activity(ctx.author, channel=ctx.channel)
+        changed = self._record_command_usage(ctx) or changed
+        if changed:
+            await save_data()
+        await self._maybe_auto_complete_contract(ctx.author, channel=ctx.channel)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ):
+        if member.bot or member.guild is None:
+            return
+        if before.channel == after.channel and before.self_mute == after.self_mute and before.self_deaf == after.self_deaf and before.mute == after.mute and before.deaf == after.deaf:
+            return
+
+        changed = await self._register_activity(member)
+        if not changed:
+            return
+
+        await save_data()
+        await self._maybe_auto_complete_contract(
+            member,
+            channel=self._last_contract_channel(member.guild, member.id),
+        )
 
 
     # Simple ping & public commands

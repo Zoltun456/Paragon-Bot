@@ -168,6 +168,18 @@ class CoinFlipCog(commands.Cog):
                 f"**Loser:** {loser.mention} lost **{amount} XP**"
                 f"{edge_note}"
             )
+            contracts_cog = self.bot.get_cog("ContractsCog")
+            if contracts_cog is not None:
+                await contracts_cog.maybe_auto_complete_contract_for_member(
+                    ctx.guild,
+                    challenger,
+                    channel=ctx.channel,
+                )
+                await contracts_cog.maybe_auto_complete_contract_for_member(
+                    ctx.guild,
+                    acceptor,
+                    channel=ctx.channel,
+                )
             return
 
         # Create

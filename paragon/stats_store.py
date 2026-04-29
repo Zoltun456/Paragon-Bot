@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .source_keys import canonical_boost_source, normalize_boosts_by_source_map
 from .storage import _gdict, _udict
 
 
@@ -52,7 +53,7 @@ def ensure_user_stats(gid: int, uid: int) -> dict:
     xp.setdefault("by_source", {})
     xp.setdefault("boosts_by_source", {})
     xp["by_source"] = _as_dict(xp.get("by_source"))
-    xp["boosts_by_source"] = _as_dict(xp.get("boosts_by_source"))
+    xp["boosts_by_source"] = normalize_boosts_by_source_map(xp.get("boosts_by_source"))[0]
 
     games = _as_dict(stats.get("games"))
     stats["games"] = games
@@ -134,7 +135,7 @@ def record_xp_boost(
 ) -> None:
     stats = ensure_user_stats(gid, uid)
     xp = stats["xp"]
-    src = (source or "activity").strip().lower()
+    src = canonical_boost_source(source, default="activity")
 
     boosts_by_source = _as_dict(xp.get("boosts_by_source"))
     xp["boosts_by_source"] = boosts_by_source

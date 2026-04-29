@@ -26,6 +26,7 @@ from .spin_support import (
 )
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
+from .time_windows import _date_key, _today_local
 
 ROULETTE_CENTER_TIMEOUT_SECONDS = 60
 
@@ -33,6 +34,21 @@ ROULETTE_CENTER_TIMEOUT_SECONDS = 60
 def _get_user_prestige(member: discord.Member) -> int:
     u = _udict(member.guild.id, member.id)
     return max(0, int(u.get("prestige", 0)))
+
+
+def _roulette_daily_state(gid: int, uid: int) -> dict:
+    u = _udict(gid, uid)
+    st = u.get("roulette_daily")
+    if not isinstance(st, dict):
+        st = {}
+        u["roulette_daily"] = st
+    today = _date_key(_today_local())
+    if str(st.get("date", "")) != today:
+        st["date"] = today
+        st["backfired"] = False
+    else:
+        st["backfired"] = bool(st.get("backfired", False))
+    return st
 
 
 def _roulette_success_chance(shooter_prestige: int, target_prestige: int) -> float:
@@ -134,6 +150,7 @@ class RouletteCog(commands.Cog):
             return
 
         user_state = _udict(ctx.guild.id, author.id)
+        daily_state = _roulette_daily_state(ctx.guild.id, author.id)
         now_ts = time.time()
         next_ts = float(user_state.get("roulette_next_ts", 0.0) or 0.0)
         if now_ts < next_ts:
@@ -176,7 +193,12 @@ class RouletteCog(commands.Cog):
                 final_timeout_seconds,
                 f"Roulette by {author} (success, chance {chance_pct:.2f}%)",
             )
-            record_game_fields(ctx.guild.id, author.id, "roulette", successes=1)
+            success_fields: dict[str, int] = {"successes": 1}
+            if wheel_aim_bonus > 0.0:
+                success_fields["successes_with_aim_bonus"] = 1
+            if bool(daily_state.get("backfired", False)):
+                success_fields["successes_after_backfire"] = 1
+            record_game_fields(ctx.guild.id, author.id, "roulette", **success_fields)
             if applied:
                 if timeout_bonus_seconds > 0:
                     consume_roulette_timeout_bonus_seconds(ctx.guild.id, author.id)
@@ -216,6 +238,7 @@ class RouletteCog(commands.Cog):
             return
 
         shielded = consume_roulette_backfire_shield(ctx.guild.id, author.id)
+        daily_state["backfired"] = True
         if shielded:
             record_game_fields(ctx.guild.id, author.id, "roulette", backfires=1, shield_saves=1)
             await save_data()

@@ -17,6 +17,8 @@ from discord.ext import commands
 
 from .config import PLAYBACK_VOLUME, YTDLP_COOKIE_FILE, YTDLP_COOKIES_FROM_BROWSER
 from .ownership import is_control_user_id
+from .stats_store import record_game_fields
+from .storage import save_data
 from .voice_runtime import cleanup_voice_client, ensure_voice_client
 from .voice_support import dave_support_status
 
@@ -925,6 +927,8 @@ class PlaybackCog(commands.Cog):
 
         queue = self._queue_for(ctx.guild.id)
         await queue.put(req)
+        record_game_fields(ctx.guild.id, ctx.author.id, "playback", tracks_queued=1)
+        await save_data()
         self._ensure_worker(ctx.guild.id)
         position = queue.qsize() + (1 if ctx.guild.id in self._guild_processing else 0)
         effective_duration = _effective_playback_duration(duration, playback_speed)

@@ -333,15 +333,15 @@ class WordleCog(commands.Cog):
                 source="wordle clear",
                 reward_seed_xp=int(round(base_pct * 100.0)),
             )
-            record_game_fields(
-                ctx.guild.id,
-                ctx.author.id,
-                "wordle",
-                wins=1,
-                boost_seed_xp_total=int(round(base_pct * 100.0)),
-                boost_percent_total=boost["percent"],
-                boost_minutes_total=boost["minutes"],
-            )
+            win_fields: dict[str, int | float] = {
+                "wins": 1,
+                "boost_seed_xp_total": int(round(base_pct * 100.0)),
+                "boost_percent_total": boost["percent"],
+                "boost_minutes_total": boost["minutes"],
+            }
+            for threshold in range(attempts, WORDLE_MAX_GUESSES + 1):
+                win_fields[f"wins_within_{threshold}"] = 1
+            record_game_fields(ctx.guild.id, ctx.author.id, "wordle", **win_fields)
             await enforce_level6_exclusive(ctx.guild)
             wheel_line = ""
             if wheel_mult > 1.0:

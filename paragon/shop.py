@@ -39,6 +39,7 @@ from .spin_support import (
     add_roulette_backfire_shield,
     set_roulette_accuracy_bonus,
 )
+from .stats_store import record_game_fields
 from .storage import _udict, save_data
 from .xp import apply_xp_change, prestige_cost
 
@@ -376,6 +377,14 @@ class ShopCog(commands.Cog):
 
         counter_key = _shop_buy_counter_key(key)
         shop_state[counter_key] = max(0, int(shop_state.get(counter_key, 0))) + amount
+        record_game_fields(
+            ctx.guild.id,
+            ctx.author.id,
+            "shop",
+            purchases=amount,
+            spent_total=total_cost,
+            buy_commands=1,
+        )
         await save_data()
 
         first_cost = per_item_costs[0] if per_item_costs else 0

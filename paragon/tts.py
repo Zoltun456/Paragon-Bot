@@ -23,6 +23,7 @@ from .config import (
     ELEVEN_VOICE_ID,
 )
 from .ownership import is_control_user_id
+from .stats_store import record_game_fields
 from .storage import _gdict, save_data
 from .user_settings import get_user_tts_profile, set_user_tts_profile
 from .voice_runtime import cleanup_voice_client, ensure_voice_client
@@ -861,6 +862,8 @@ class TTSCog(commands.Cog):
                 enqueued_at=time.monotonic(),
             )
         )
+        record_game_fields(ctx.guild.id, ctx.author.id, "tts", say_commands=1)
+        await save_data()
         self._ensure_worker(ctx.guild.id)
 
         position = queue.qsize() + (1 if ctx.guild.id in self._guild_processing else 0)

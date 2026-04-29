@@ -19,6 +19,7 @@ from .config import (
     PRESTIGE_RATE_K,
     PRESTIGE_STACK_SOFTCAP,
 )
+from .source_keys import canonical_boost_source
 from .spin_support import consume_mulligan_charge
 from .storage import _udict, save_data
 from .stats_store import record_xp_boost, record_xp_change
@@ -81,7 +82,7 @@ def _coerce_boosts(u: dict) -> list[dict]:
             continue
         if pct <= 0.0 or until <= 0:
             continue
-        source = str(b.get("source", "activity")).strip() or "activity"
+        source = canonical_boost_source(b.get("source", "activity"), default="activity")
         out.append({"pct": pct, "until": until, "source": source})
     u["xp_boosts"] = out
     return out
@@ -102,7 +103,7 @@ def _coerce_debuffs(u: dict) -> list[dict]:
             continue
         if pct <= 0.0 or until <= 0:
             continue
-        source = str(b.get("source", "activity")).strip() or "activity"
+        source = canonical_boost_source(b.get("source", "activity"), default="activity")
         out.append({"pct": pct, "until": until, "source": source})
     u["xp_debuffs"] = out
     return out
@@ -275,16 +276,17 @@ async def grant_fixed_boost(
     pct = max(0.0, float(pct))
     minutes = max(1, int(minutes))
     until = now + (minutes * 60)
+    source_key = canonical_boost_source(source, default="activity")
     boosts.append({
         "pct": float(pct),
         "until": int(until),
-        "source": str(source).strip() or "activity",
+        "source": source_key,
     })
     u["xp_boosts"] = boosts
     record_xp_boost(
         member.guild.id,
         member.id,
-        source=str(source).strip() or "activity",
+        source=source_key,
         reward_seed_xp=float(reward_seed_xp),
         pct=float(pct),
         minutes=int(minutes),
@@ -300,7 +302,7 @@ async def grant_fixed_boost(
         "minutes": int(minutes),
         "until": int(until),
         "rate_per_min": float(rate_per_min),
-        "source": str(source).strip() or "activity",
+        "source": source_key,
         "pruned": bool(changed),
     }
 
@@ -345,13 +347,14 @@ def _blocked_debuff_result(member, *, source: str, now: int, changed: bool) -> d
     u = _udict(member.guild.id, member.id)
     prestige = int(u.get("prestige", 0))
     rate_per_min = prestige_passive_rate(prestige, boost_multiplier=_actual_boost_multiplier(u, now=now))
+    source_key = canonical_boost_source(source, default="activity")
     return {
         "pct": 0.0,
         "percent": 0.0,
         "minutes": 0,
         "until": int(now),
         "rate_per_min": float(rate_per_min),
-        "source": str(source).strip() or "activity",
+        "source": source_key,
         "pruned": bool(changed),
         "blocked": True,
         "blocked_reason": "mulligan",
@@ -428,16 +431,17 @@ async def grant_fixed_debuff(
     pct = max(0.0, min(1.0, float(pct)))
     minutes = max(1, int(minutes))
     until = now + (minutes * 60)
+    source_key = canonical_boost_source(source, default="activity")
     debuffs.append({
         "pct": float(pct),
         "until": int(until),
-        "source": str(source).strip() or "activity",
+        "source": source_key,
     })
     u["xp_debuffs"] = debuffs
     record_xp_boost(
         member.guild.id,
         member.id,
-        source=str(source).strip() or "activity",
+        source=source_key,
         reward_seed_xp=float(reward_seed_xp),
         pct=float(-pct),
         minutes=int(minutes),
@@ -453,7 +457,7 @@ async def grant_fixed_debuff(
         "minutes": int(minutes),
         "until": int(until),
         "rate_per_min": float(rate_per_min),
-        "source": str(source).strip() or "activity",
+        "source": source_key,
         "pruned": bool(changed),
         "blocked": False,
     }

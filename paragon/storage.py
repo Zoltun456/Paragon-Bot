@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from .config import GUILD_DB_DIR
+from .source_keys import migrate_user_boost_sources
 
 SAVE_LOCK = asyncio.Lock()
 data: Dict[str, Any] = {"guilds": {}}
@@ -76,6 +77,17 @@ def _normalize_guild_state(payload: Any) -> Dict[str, Any]:
     if "inactive_loss_enabled" not in settings:
         settings["inactive_loss_enabled"] = True
     return payload
+
+
+def _migrate_guild_state(payload: Dict[str, Any]) -> bool:
+    users = payload.get("users")
+    if not isinstance(users, dict):
+        return False
+
+    changed = False
+    for user in users.values():
+        changed = migrate_user_boost_sources(user) or changed
+    return changed
 
 
 def load_data() -> None:
@@ -168,7 +180,10 @@ def _load_guild_state(guild_id: int) -> Dict[str, Any]:
         except Exception:
             loaded = _default_guild_state()
             _persist_snapshot_locked(conn, loaded)
-        return _normalize_guild_state(loaded)
+        loaded = _normalize_guild_state(loaded)
+        if _migrate_guild_state(loaded):
+            _persist_snapshot_locked(conn, loaded)
+        return loaded
 
 
 def _persist_all_guilds_snapshot(guilds_snapshot: Dict[str, Dict[str, Any]]) -> None:
@@ -177,4 +192,6 @@ def _persist_all_guilds_snapshot(guilds_snapshot: Dict[str, Dict[str, Any]]) -> 
             gid = int(gid_str)
         except (TypeError, ValueError):
             continue
-        _persist_snapshot({"guild_id": gid, "payload": _normalize_guild_state(payload)})
+        normalized = _normalize_guild_state(payload)
+        _migrate_guild_state(normalized)
+        _persist_snapshot({"guild_id": gid, "payload": normalized})

@@ -2676,7 +2676,7 @@ class BossCog(commands.Cog):
                 member,
                 pct=BOSS_BASE_REWARD_PCT,
                 minutes=BOSS_BASE_REWARD_MINUTES,
-                source=f"boss victory: {boss.get('display_name', 'raid boss')}",
+                source="boss victory",
                 reward_seed_xp=(BOSS_BASE_REWARD_PCT * 100.0) * max(1, int(BOSS_BASE_REWARD_MINUTES)),
                 persist=False,
             )
@@ -2687,7 +2687,7 @@ class BossCog(commands.Cog):
                     member,
                     pct=BOSS_BONUS_REWARD_PCT,
                     minutes=BOSS_BONUS_REWARD_MINUTES,
-                    source=f"boss commendation: {boss.get('display_name', 'raid boss')}",
+                    source="boss victory",
                     reward_seed_xp=(BOSS_BONUS_REWARD_PCT * 100.0) * max(1, int(BOSS_BONUS_REWARD_MINUTES)),
                     persist=False,
                 )
@@ -2702,7 +2702,7 @@ class BossCog(commands.Cog):
                     member,
                     pct=BOSS_SURVIVOR_REWARD_PCT,
                     minutes=BOSS_SURVIVOR_REWARD_MINUTES,
-                    source=f"boss survivor: {boss.get('display_name', 'raid boss')}",
+                    source="boss victory",
                     reward_seed_xp=(BOSS_SURVIVOR_REWARD_PCT * 100.0) * max(1, int(BOSS_SURVIVOR_REWARD_MINUTES)),
                     persist=False,
                 )
@@ -2720,7 +2720,7 @@ class BossCog(commands.Cog):
                 member,
                 pct=BOSS_FAILURE_PENALTY_PCT,
                 minutes=BOSS_FAILURE_PENALTY_MINUTES,
-                source=f"boss failure: {boss.get('display_name', 'raid boss')}",
+                source="boss retaliation",
                 reward_seed_xp=(BOSS_FAILURE_PENALTY_PCT * 100.0) * max(1, int(BOSS_FAILURE_PENALTY_MINUTES)),
                 persist=False,
             )
