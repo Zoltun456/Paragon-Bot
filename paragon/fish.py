@@ -7,6 +7,7 @@ from typing import Optional
 import discord
 from discord.ext import commands, tasks
 
+from .config import COMMAND_PREFIX
 from .emojis import EMOJI_HOOK
 from .fish_support import add_bait, consume_bait, get_bait, refund_bait
 from .guild_setup import ensure_guild_setup, get_fishing_channel, get_fishing_channel_id
@@ -44,6 +45,7 @@ SESSION_STOP_EMOJI = DOCK_STOP_EMOJI
 
 BASE_CHEST_CHANCE = 0.05
 FISH_LOOP_SECONDS = 5
+DOCK_TIMER_STEP_MINUTES = 5
 FISHING_SOURCE = "fishing catch"
 CHEST_SOURCE = "fishing chest"
 
@@ -525,6 +527,36 @@ def _fmt_remaining(seconds: int | float) -> str:
     return f"{hours}h {mins:02d}m"
 
 
+def _command_text(command: str, *, prefix: str = COMMAND_PREFIX) -> str:
+    return f"`{prefix}{command}`"
+
+
+def _join_lines(lines: list[str]) -> str:
+    return "\n".join(line for line in lines if str(line).strip())
+
+
+def _dock_timer_minutes(expires_at: int, *, now_ts: Optional[int] = None) -> int:
+    now = _now_ts() if now_ts is None else int(now_ts)
+    remaining = max(0, int(expires_at) - now)
+    if remaining <= 0:
+        return 0
+    whole_minutes = max(1, (remaining + 59) // 60)
+    step = max(1, int(DOCK_TIMER_STEP_MINUTES))
+    return max(step, ((whole_minutes + step - 1) // step) * step)
+
+
+def _fmt_dock_timer(minutes: int) -> str:
+    rounded = max(0, int(minutes))
+    if rounded <= 0:
+        return "0m"
+    hours, mins = divmod(rounded, 60)
+    if hours <= 0:
+        return f"{mins}m"
+    if mins <= 0:
+        return f"{hours}h"
+    return f"{hours}h {mins:02d}m"
+
+
 def _weighted_choice(rng: random.Random, rows: list[tuple[str, float]]) -> str:
     keys = [key for key, _ in rows]
     weights = [max(0.0, float(weight)) for _, weight in rows]
@@ -538,6 +570,8 @@ def _state_root(gid: int) -> dict:
         st = {}
         g["fishing"] = st
     st.setdefault("dock_message_id", 0)
+    st.setdefault("controls_message_id", 0)
+    st.setdefault("dock_timer_minutes", -1)
     st.setdefault("state_key", "")
     st.setdefault("state_flavor", "")
     st.setdefault("state_expires_at", 0)
@@ -724,29 +758,74 @@ class FishCog(commands.Cog):
             except Exception:
                 continue
 
+    def _render_controls_message(self) -> str:
+        return _join_lines(
+            [
+                "**Fishing Controls**",
+                f"Start a cast: react {DOCK_CAST_EMOJI} on the dock or use {_command_text('fish cast')}.",
+                f"Stop fishing: react {DOCK_STOP_EMOJI} on the dock or your fishing message, or use {_command_text('fish stop')}.",
+                f"Reel when a bite hits: react {REEL_EMOJI} or use {_command_text('fish reel')}.",
+                "",
+                "**Fight Mechanics**",
+                "Each fish needs enough clean reads before it hits the escape limit.",
+                f"Soft hesitation -> `lift` {LIFT_EMOJI}",
+                f"Screaming run -> `give` {GIVE_EMOJI}",
+                f"Sharp strike -> `set` {SET_EMOJI}",
+                "",
+                "**Bait**",
+                f"Buy **Bait Crate x25** in {_command_text('shop')}.",
+                "Casting loads 1 bait, and stopping early recovers the bait still on the line.",
+            ]
+        )
+
+    async def _ensure_controls_message(self, guild: discord.Guild) -> bool:
+        channel = get_fishing_channel(guild)
+        if channel is None:
+            return False
+
+        st = _state_root(guild.id)
+        content = self._render_controls_message()
+        msg = await self._fetch_message(channel, _as_int(st.get("controls_message_id", 0), 0))
+
+        if msg is None:
+            msg = await channel.send(content)
+            st["controls_message_id"] = int(msg.id)
+            return True
+
+        if msg.content != content:
+            try:
+                await msg.edit(content=content)
+            except Exception:
+                return False
+            return True
+
+        return False
+
     def _render_dock(self, guild: discord.Guild) -> str:
         st = _state_root(guild.id)
-        if not str(st.get("state_key", "")).strip():
-            _roll_water_state(guild.id)
+        state_changed = _roll_water_state(guild.id)
+        if state_changed or not str(st.get("state_key", "")).strip():
             st = _state_root(guild.id)
         water = _water_state(st)
         active_lines = sum(1 for _, sess in _active_sessions(guild.id) if bool(sess.get("active", False)))
-        remaining = max(0, _as_int(st.get("state_expires_at", 0), 0) - _now_ts())
-        return "\n".join(
+        timer_minutes = _dock_timer_minutes(_as_int(st.get("state_expires_at", 0), 0))
+        return _join_lines(
             [
                 "**Paragon Fishing Dock**",
                 f"Water now: **{water.get('name', 'Unknown Water')}**",
                 f"{str(st.get('state_flavor', water.get('read', 'The water shifts.')))}",
-                f"Read: {water.get('read', '')}",
-                f"Water turns again in about **{_fmt_remaining(remaining)}**.",
+                f"Next turn: **{_fmt_dock_timer(timer_minutes)}**",
                 f"Active lines: **{active_lines}**",
-                f"Controls: react {DOCK_CAST_EMOJI} or use `!fish cast` to start. React {DOCK_STOP_EMOJI} or use `!fish stop` to pack it up.",
-                f"Fight rule: sharp strike = `set` {SET_EMOJI} | screaming run = `give` {GIVE_EMOJI} | soft hesitation = `lift` {LIFT_EMOJI}",
-                f"Bait: buy **Bait Crate x25** in `!shop`.",
             ]
         )
 
-    async def _ensure_dock_message(self, guild: discord.Guild, *, force_refresh: bool = False) -> bool:
+    async def _ensure_dock_message(
+        self,
+        guild: discord.Guild,
+        *,
+        force_refresh: bool = False,
+        move_to_latest: bool = False,
+    ) -> bool:
         channel = get_fishing_channel(guild)
         if channel is None:
             return False
@@ -754,20 +833,39 @@ class FishCog(commands.Cog):
         st = _state_root(guild.id)
         msg = await self._fetch_message(channel, _as_int(st.get("dock_message_id", 0), 0))
         content = self._render_dock(guild)
+        st = _state_root(guild.id)
+        timer_minutes = _dock_timer_minutes(_as_int(st.get("state_expires_at", 0), 0))
         changed = False
 
         if msg is None:
             msg = await channel.send(content)
             st["dock_message_id"] = int(msg.id)
+            st["dock_timer_minutes"] = int(timer_minutes)
             await self._set_reactions(msg, [DOCK_CAST_EMOJI, DOCK_STOP_EMOJI])
             return True
 
-        if force_refresh:
+        if move_to_latest:
             try:
-                await msg.edit(content=content)
+                new_msg = await channel.send(content)
+            except Exception:
+                return False
+            st["dock_message_id"] = int(new_msg.id)
+            st["dock_timer_minutes"] = int(timer_minutes)
+            await self._set_reactions(new_msg, [DOCK_CAST_EMOJI, DOCK_STOP_EMOJI])
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            return True
+
+        if force_refresh or msg.content != content or _as_int(st.get("dock_timer_minutes", -1), -1) != timer_minutes:
+            try:
+                if msg.content != content:
+                    await msg.edit(content=content)
                 changed = True
             except Exception:
                 return False
+            st["dock_timer_minutes"] = int(timer_minutes)
             await self._set_reactions(msg, [DOCK_CAST_EMOJI, DOCK_STOP_EMOJI])
 
         return changed
@@ -781,8 +879,8 @@ class FishCog(commands.Cog):
         gid = guild.id
         uid = member.id
         state_root = _state_root(gid)
-        if not str(state_root.get("state_key", "")).strip():
-            _roll_water_state(gid)
+        state_changed = _roll_water_state(gid)
+        if state_changed or not str(state_root.get("state_key", "")).strip():
             state_root = _state_root(gid)
         state_key = str(state_root.get("state_key", "empty_reach")).strip().lower() or "empty_reach"
         if not consume_bait(gid, uid, amount=1):
@@ -832,7 +930,7 @@ class FishCog(commands.Cog):
             if phase == "waiting":
                 lines.append("Line status: **Waiting for a bite**.")
             elif phase == "bite":
-                lines.append("Line status: **Bite up**. Use `!fish reel`.")
+                lines.append(f"Line status: **Bite up**. Use {_command_text('fish reel')}.")
             elif phase == "fight":
                 lines.append(
                     f"Line status: **Reeling** (**{_as_int(session.get('successes', 0), 0)}/{_as_int(session.get('required', 0), 0)}** clean reads, "
@@ -856,10 +954,9 @@ class FishCog(commands.Cog):
                 [
                     f"{DOCK_CAST_EMOJI} {member.mention} has their line out of the water.",
                     f"Bait in tackle box: **{bait}**",
-                    f"Use `!fish cast` or react {DOCK_CAST_EMOJI} on the dock to start again.",
                 ]
             )
-            return "\n".join(lines)
+            return _join_lines(lines)
 
         state_name = str(session.get("cast_state_name", "Unknown Water")).strip() or "Unknown Water"
         state_flavor = str(session.get("cast_state_flavor", "")).strip()
@@ -870,21 +967,21 @@ class FishCog(commands.Cog):
                     state_flavor or "The line settles and the water watches back.",
                     "Line status: **Waiting on a bite**.",
                     f"Bait still on the line: **1** | Spare bait in tackle box: **{bait}**",
-                    f"Use `!fish stop` or react {SESSION_STOP_EMOJI} to pack it up and recover this bait.",
+                    f"Use {_command_text('fish stop')} or react {SESSION_STOP_EMOJI} to pack it up and recover this bait.",
                 ]
             )
-            return "\n".join(lines)
+            return _join_lines(lines)
 
         if phase == "bite":
             lines.extend(
                 [
                     f"{DOCK_CAST_EMOJI} {member.mention} just got a bite in the **{state_name}**.",
                     "The float snaps under and the line jumps tight for a moment.",
-                    f"React {REEL_EMOJI} or use `!fish reel` to lean into it.",
-                    f"You can still `!fish stop` or react {SESSION_STOP_EMOJI} to recover your bait and call it here.",
+                    f"React {REEL_EMOJI} or use {_command_text('fish reel')} to lean into it.",
+                    f"You can still {_command_text('fish stop')} or react {SESSION_STOP_EMOJI} to recover your bait and call it here.",
                 ]
             )
-            return "\n".join(lines)
+            return _join_lines(lines)
 
         if phase == "fight":
             lines.extend(
@@ -892,15 +989,13 @@ class FishCog(commands.Cog):
                     f"{DOCK_CAST_EMOJI} {member.mention} is fighting something on the line.",
                     f"Catch progress: **{_as_int(session.get('successes', 0), 0)}/{_as_int(session.get('required', 0), 0)}**",
                     f"Escape pressure: **{_as_int(session.get('mistakes', 0), 0)}/{_as_int(session.get('max_mistakes', 0), 0)}**",
-                    f"Cue: {session.get('current_cue', 'Read the line carefully.')}",
-                    f"Choose `!fish lift` {LIFT_EMOJI}, `!fish give` {GIVE_EMOJI}, or `!fish set` {SET_EMOJI}.",
-                    "Rule of thumb: sharp strike = set, screaming run = give, soft hesitation = lift.",
+                    f"{session.get('current_cue', 'Read the line carefully.')}",
                 ]
             )
-            return "\n".join(lines)
+            return _join_lines(lines)
 
         lines.append(f"{member.mention} has a line in the water.")
-        return "\n".join(lines)
+        return _join_lines(lines)
 
     def _session_reactions(self, session: dict) -> list[str]:
         phase = str(session.get("phase", "idle")).strip().lower()
@@ -939,19 +1034,19 @@ class FishCog(commands.Cog):
         session = _session_state(guild.id, member.id)
         phase = str(session.get("phase", "idle")).strip().lower()
         if bool(session.get("active", False)) and phase in {"waiting", "bite", "fight"}:
-            await channel.send(f"{member.mention} already has a line out. Use `!fish stop` if you want to pack it in.")
+            await channel.send(f"{member.mention} already has a line out. Use {_command_text('fish stop')} if you want to pack it in.")
             return
         bait = get_bait(guild.id, member.id)
         if bait <= 0:
             await channel.send(
-                f"{member.mention} is out of bait. Grab **Bait Crate x25** from `!shop` first."
+                f"{member.mention} is out of bait. Grab **Bait Crate x25** from {_command_text('shop')} first."
             )
             return
 
         started_new_session = not bool(session.get("active", False))
         if not self._begin_cast(guild, member, session):
             await channel.send(
-                f"{member.mention} is out of bait. Grab **Bait Crate x25** from `!shop` first."
+                f"{member.mention} is out of bait. Grab **Bait Crate x25** from {_command_text('shop')} first."
             )
             return
         if started_new_session:
@@ -1013,7 +1108,14 @@ class FishCog(commands.Cog):
         await self._refresh_session_message(guild, member)
         await save_data()
 
-    async def _continue_fishing(self, guild: discord.Guild, member: discord.Member, *, result_text: str) -> None:
+    async def _continue_fishing(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        *,
+        result_text: str,
+        persist_result: bool = True,
+    ) -> None:
         session = _session_state(guild.id, member.id)
         session["loaded_bait"] = 0
         session["fish"] = {}
@@ -1023,15 +1125,16 @@ class FishCog(commands.Cog):
         session["max_mistakes"] = 0
         session["current_action"] = ""
         session["current_cue"] = ""
+        carry_text = str(result_text or "").strip() if persist_result else ""
 
         if not bool(session.get("active", False)):
             session["phase"] = "idle"
-            session["last_result_text"] = result_text
+            session["last_result_text"] = carry_text
             await self._refresh_session_message(guild, member)
             await save_data()
             return
 
-        if self._begin_cast(guild, member, session, carry_text=result_text):
+        if self._begin_cast(guild, member, session, carry_text=carry_text):
             await self._refresh_session_message(guild, member)
             await self._ensure_dock_message(guild, force_refresh=True)
             await save_data()
@@ -1039,8 +1142,11 @@ class FishCog(commands.Cog):
 
         session["active"] = False
         session["phase"] = "idle"
-        session["last_result_text"] = (
-            f"{result_text}\nOut of bait. Grab another **Bait Crate x25** from `!shop` to keep fishing."
+        session["last_result_text"] = _join_lines(
+            [
+                carry_text,
+                f"Out of bait. Grab another **Bait Crate x25** from {_command_text('shop')} to keep fishing.",
+            ]
         )
         await self._refresh_session_message(guild, member)
         await self._ensure_dock_message(guild, force_refresh=True)
@@ -1121,7 +1227,6 @@ class FishCog(commands.Cog):
             return
 
         reward_xp = max(1, _as_int(fish.get("reward_xp", 1), 1))
-        reward_pct = max(0.1, _as_float(fish.get("reward_pct", 0.0), 0.0))
         await apply_xp_change(member, reward_xp, source=FISHING_SOURCE)
 
         rarity = str(fish.get("rarity", "common")).strip().lower()
@@ -1145,7 +1250,7 @@ class FishCog(commands.Cog):
                 f"({fish.get('size_label', 'Solid')}) at **{_as_float(fish.get('length_in', 0.0), 0.0):.1f} in** "
                 f"and **{_as_float(fish.get('weight_lb', 0.0), 0.0):.1f} lb**."
             ),
-            f"Reward: **+{_fmt_num(reward_xp)} XP** (~**{_fmt_pct(reward_pct)}** of next prestige).",
+            f"Reward: **+{_fmt_num(reward_xp)} XP**.",
         ]
 
         water = WATER_STATES.get(str(session.get("cast_state_key", "")).strip().lower(), WATER_STATES["empty_reach"])
@@ -1155,7 +1260,14 @@ class FishCog(commands.Cog):
             record_game_fields(guild.id, member.id, "fishing", chests_found=1)
             result_bits.append(chest_text)
 
-        await self._continue_fishing(guild, member, result_text="\n".join(result_bits))
+        channel = get_fishing_channel(guild)
+        if channel is not None:
+            try:
+                await channel.send(_join_lines(result_bits))
+            except Exception:
+                pass
+
+        await self._continue_fishing(guild, member, result_text="", persist_result=False)
 
     async def _resolve_escape(self, guild: discord.Guild, member: discord.Member) -> None:
         session = _session_state(guild.id, member.id)
@@ -1206,14 +1318,23 @@ class FishCog(commands.Cog):
         session = _session_state(ctx.guild.id, ctx.author.id)
         lines = [f"**Fishing Status for {ctx.author.display_name}**"]
         lines.extend(self._status_summary(ctx.guild, ctx.author, session))
-        lines.append("Use `!fish cast`, `!fish reel`, `!fish lift`, `!fish give`, `!fish set`, or `!fish stop`.")
+        lines.append(
+            "Use "
+            f"{_command_text('fish cast', prefix=ctx.clean_prefix)}, "
+            f"{_command_text('fish reel', prefix=ctx.clean_prefix)}, "
+            f"{_command_text('fish lift', prefix=ctx.clean_prefix)}, "
+            f"{_command_text('fish give', prefix=ctx.clean_prefix)}, "
+            f"{_command_text('fish set', prefix=ctx.clean_prefix)}, "
+            f"or {_command_text('fish stop', prefix=ctx.clean_prefix)}."
+        )
         await ctx.reply("\n".join(lines))
 
     async def _ensure_guild_runtime(self, guild: discord.Guild, *, refresh_dock: bool = False) -> None:
         await ensure_guild_setup(guild)
+        controls_changed = await self._ensure_controls_message(guild)
         state_changed = _roll_water_state(guild.id)
         dock_changed = await self._ensure_dock_message(guild, force_refresh=refresh_dock or state_changed)
-        if state_changed or dock_changed:
+        if controls_changed or state_changed or dock_changed:
             await save_data()
 
     @commands.Cog.listener()
@@ -1234,9 +1355,17 @@ class FishCog(commands.Cog):
     async def fishing_loop(self):
         for guild in list(self.bot.guilds):
             try:
+                st = _state_root(guild.id)
                 state_changed = _roll_water_state(guild.id)
+                guild_changed = state_changed
+                timer_minutes = _dock_timer_minutes(_as_int(st.get("state_expires_at", 0), 0))
+                timer_changed = timer_minutes != _as_int(st.get("dock_timer_minutes", -1), -1)
                 if state_changed:
-                    await self._ensure_dock_message(guild, force_refresh=True)
+                    guild_changed = bool(await self._ensure_dock_message(guild, force_refresh=True)) or guild_changed
+                elif timer_changed:
+                    guild_changed = bool(
+                        await self._ensure_dock_message(guild, force_refresh=True, move_to_latest=True)
+                    ) or guild_changed
 
                 for uid, session in _active_sessions(guild.id):
                     if not bool(session.get("active", False)):
@@ -1254,9 +1383,9 @@ class FishCog(commands.Cog):
                     session["last_result_text"] = ""
                     record_game_fields(guild.id, uid, "fishing", bites=1)
                     await self._refresh_session_message(guild, member)
-                    state_changed = True
+                    guild_changed = True
 
-                if state_changed:
+                if guild_changed:
                     await save_data()
             except Exception:
                 continue
