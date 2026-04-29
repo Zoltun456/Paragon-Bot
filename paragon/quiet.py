@@ -7,6 +7,8 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+from .config import COMMAND_PREFIX
+
 
 QUIET_COOLDOWN_SECONDS = 30 * 60
 QUIET_DURATION_SECONDS = 30
@@ -22,6 +24,10 @@ def _fmt_remaining(seconds: float) -> str:
     if minutes <= 0:
         return f"{secs}s"
     return f"{minutes}m {secs:02d}s"
+
+
+def _command_text(command: str, *, prefix: str = COMMAND_PREFIX) -> str:
+    return f"`{prefix}{command}`"
 
 
 class QuietCog(commands.Cog):
@@ -87,7 +93,7 @@ class QuietCog(commands.Cog):
         member = guild.get_member(user_id) if guild is not None else None
         try:
             if member is not None and getattr(member, "voice", None) and member.voice.channel is not None and bool(member.voice.mute):
-                await member.edit(mute=False, reason="!shh expired")
+                await member.edit(mute=False, reason=f"{COMMAND_PREFIX}shh expired")
             self._active_mutes.pop(key, None)
         except (discord.Forbidden, discord.HTTPException):
             pass
@@ -114,7 +120,7 @@ class QuietCog(commands.Cog):
             if after.channel is not None:
                 if bool(after.mute):
                     try:
-                        await member.edit(mute=False, reason="!shh expired")
+                        await member.edit(mute=False, reason=f"{COMMAND_PREFIX}shh expired")
                     except (discord.Forbidden, discord.HTTPException):
                         pass
                 self._active_mutes.pop(key, None)
@@ -125,7 +131,7 @@ class QuietCog(commands.Cog):
 
         if before.channel is None and after.channel is not None and not bool(after.mute):
             try:
-                await member.edit(mute=True, reason="!shh still active")
+                await member.edit(mute=True, reason=f"{COMMAND_PREFIX}shh still active")
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
@@ -152,7 +158,10 @@ class QuietCog(commands.Cog):
 
         remaining = self._cooldown_remaining(ctx.guild.id, ctx.author.id)
         if remaining > 0:
-            await ctx.reply(f"`!shh` is on cooldown for you. Try again in **{_fmt_remaining(remaining)}**.")
+            await ctx.reply(
+                f"{_command_text('shh', prefix=ctx.clean_prefix)} is on cooldown for you. "
+                f"Try again in **{_fmt_remaining(remaining)}**."
+            )
             return
 
         self._clear_expired_mute(ctx.guild.id, target.id, still_muted=bool(target.voice.mute))
@@ -174,7 +183,7 @@ class QuietCog(commands.Cog):
             return
 
         try:
-            await target.edit(mute=True, reason=f"!shh by {ctx.author} ({ctx.author.id})")
+            await target.edit(mute=True, reason=f"{COMMAND_PREFIX}shh by {ctx.author} ({ctx.author.id})")
         except discord.Forbidden:
             await ctx.reply("I don't have permission to server mute that user.")
             return
@@ -191,11 +200,11 @@ class QuietCog(commands.Cog):
         if is_chaining:
             await ctx.reply(
                 f"{target.mention} has been shushed again. Total remaining mute time is now **{_fmt_remaining(total_remaining)}**. "
-                f"Your `!shh` cooldown is now **{_fmt_remaining(QUIET_COOLDOWN_SECONDS)}**."
+                f"Your {_command_text('shh', prefix=ctx.clean_prefix)} cooldown is now **{_fmt_remaining(QUIET_COOLDOWN_SECONDS)}**."
             )
             return
 
         await ctx.reply(
             f"{target.mention} has been shushed for **{QUIET_DURATION_SECONDS}s**. "
-            f"Your `!shh` cooldown is now **{_fmt_remaining(QUIET_COOLDOWN_SECONDS)}**."
+            f"Your {_command_text('shh', prefix=ctx.clean_prefix)} cooldown is now **{_fmt_remaining(QUIET_COOLDOWN_SECONDS)}**."
         )
