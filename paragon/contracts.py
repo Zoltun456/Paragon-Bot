@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import hashlib
 import random
@@ -27,10 +28,12 @@ from .storage import _udict, save_data
 from .time_windows import _date_key, _today_local
 from .xp import grant_bonus_xp_equivalent_boost, grant_fixed_boost, prestige_passive_rate
 
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 CONTRACT_FAST_CLEAR_WINDOW_SECONDS = 60 * 60
 CONTRACT_FAST_CLEAR_BONUS_PCT = 0.10
 CONTRACT_FAST_CLEAR_BONUS_MINUTES = 60
+CONTRACT_MIN_OBJECTIVES = 2
+CONTRACT_MAX_OBJECTIVES = 5
 
 
 def _as_dict(value) -> dict:
@@ -968,18 +971,159 @@ CONTRACT_BUILDERS: list[tuple[int, Callable[[random.Random, int], dict[str, obje
 ]
 
 
+def _objective_metrics(objectives: list[dict[str, object]]) -> set[str]:
+    metrics: set[str] = set()
+    for obj in objectives:
+        metric = str(_as_dict(obj).get("metric", "")).strip()
+        if metric:
+            metrics.add(metric)
+    return metrics
+
+
+def _contract_objective_target(rng: random.Random) -> int:
+    return int(rng.choices([2, 3, 4, 5], weights=[35, 40, 18, 7], k=1)[0])
+
+
+def _compose_contract_bundle(contracts: list[dict[str, object]]) -> dict[str, object]:
+    picked = [dict(contract) for contract in contracts if isinstance(contract, dict)]
+    if not picked:
+        return {
+            "key": "contract_bundle",
+            "title": "Contract Bundle",
+            "flavor": "Clear every listed objective for one payout.",
+            "objectives": [],
+        }
+
+    if len(picked) == 1:
+        return picked[0]
+
+    titles = [str(contract.get("title", "")).strip() for contract in picked if str(contract.get("title", "")).strip()]
+    keys = [str(contract.get("key", "")).strip() for contract in picked if str(contract.get("key", "")).strip()]
+    objectives = [
+        _as_dict(obj)
+        for contract in picked
+        for obj in _as_list(contract.get("objectives"))
+        if _as_dict(obj)
+    ]
+
+    if len(titles) <= 2:
+        title = " + ".join(titles)
+    else:
+        title = f"{titles[0]} + {len(titles) - 1} More"
+
+    bundle_count = len(picked)
+    return {
+        "key": "+".join(keys) or "contract_bundle",
+        "title": title or "Contract Bundle",
+        "flavor": (
+            f"The board stacked **{bundle_count}** assignments today. "
+            "Clear every listed objective for one payout."
+        ),
+        "objectives": objectives,
+        "bundle_count": bundle_count,
+    }
+
+
 def _generate_contract(gid: int, uid: int, date_key: str) -> dict[str, object]:
     prestige_level = _user_prestige(gid, uid)
     rng = _rng_for_contract(gid, uid, date_key)
-    builders = [builder for _, builder in CONTRACT_BUILDERS]
-    weights = [weight for weight, _ in CONTRACT_BUILDERS]
-    picked = rng.choices(builders, weights=weights, k=1)[0]
-    return _finalize_contract(picked(rng, prestige_level), prestige_level)
+    available = [
+        {"weight": int(weight), "builder": builder}
+        for weight, builder in CONTRACT_BUILDERS
+    ]
+    if not available:
+        return _finalize_contract(_compose_contract_bundle([]), prestige_level)
+
+    first_idx = rng.choices(
+        range(len(available)),
+        weights=[row["weight"] for row in available],
+        k=1,
+    )[0]
+    first = available.pop(first_idx)
+    selected = [first["builder"](rng, prestige_level)]
+    objectives = [_as_dict(obj) for obj in _as_list(selected[0].get("objectives")) if _as_dict(obj)]
+    objective_total = len(objectives)
+    used_metrics = _objective_metrics(objectives)
+    desired_total = max(CONTRACT_MIN_OBJECTIVES, objective_total, _contract_objective_target(rng))
+
+    while objective_total < desired_total and available:
+        next_idx = rng.choices(
+            range(len(available)),
+            weights=[row["weight"] for row in available],
+            k=1,
+        )[0]
+        row = available.pop(next_idx)
+        candidate = row["builder"](rng, prestige_level)
+        candidate_objectives = [
+            _as_dict(obj) for obj in _as_list(candidate.get("objectives")) if _as_dict(obj)
+        ]
+        if not candidate_objectives:
+            continue
+        if objective_total + len(candidate_objectives) > desired_total:
+            continue
+        candidate_metrics = _objective_metrics(candidate_objectives)
+        if used_metrics & candidate_metrics:
+            continue
+        selected.append(candidate)
+        objective_total += len(candidate_objectives)
+        used_metrics.update(candidate_metrics)
+
+    while objective_total < CONTRACT_MIN_OBJECTIVES and available:
+        next_idx = rng.choices(
+            range(len(available)),
+            weights=[row["weight"] for row in available],
+            k=1,
+        )[0]
+        row = available.pop(next_idx)
+        candidate = row["builder"](rng, prestige_level)
+        candidate_objectives = [
+            _as_dict(obj) for obj in _as_list(candidate.get("objectives")) if _as_dict(obj)
+        ]
+        if not candidate_objectives:
+            continue
+        if objective_total + len(candidate_objectives) > CONTRACT_MAX_OBJECTIVES:
+            continue
+        selected.append(candidate)
+        objective_total += len(candidate_objectives)
+
+    return _finalize_contract(_compose_contract_bundle(selected), prestige_level)
 
 
 class ContractsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._claim_locks: dict[tuple[int, int], asyncio.Lock] = {}
+
+    def _claim_lock(self, guild_id: int, user_id: int) -> asyncio.Lock:
+        key = (int(guild_id), int(user_id))
+        lock = self._claim_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._claim_locks[key] = lock
+        return lock
+
+    def _claimed_reward_payload(self, st: dict) -> dict[str, object]:
+        quest = _as_dict(st.get("quest"))
+        last_reward = _as_dict(st.get("last_reward"))
+        equivalent_bonus_xp = _as_float(last_reward.get("equivalent_bonus_xp", quest.get("reward_bonus_xp", 1)))
+        fast_clear_percent = _as_float(last_reward.get("fast_clear_percent", 0.0))
+        fast_clear_minutes = _as_int(last_reward.get("fast_clear_minutes", 0))
+        fast_clear_equivalent_bonus_xp = _as_float(last_reward.get("fast_clear_equivalent_bonus_xp", 0.0))
+        fast_clear_reward: dict[str, object] = {}
+        if fast_clear_percent > 0.0 and fast_clear_minutes > 0:
+            fast_clear_reward = {
+                "percent": float(fast_clear_percent),
+                "minutes": int(fast_clear_minutes),
+            }
+        return {
+            "percent": _as_float(last_reward.get("percent", 0.0)),
+            "minutes": _as_int(last_reward.get("minutes", 0)),
+            "equivalent_bonus_xp": equivalent_bonus_xp,
+            "fast_clear_reward": fast_clear_reward,
+            "fast_clear_equivalent_bonus_xp": fast_clear_equivalent_bonus_xp,
+            "total_equivalent_bonus_xp": equivalent_bonus_xp + fast_clear_equivalent_bonus_xp,
+            "already_claimed": True,
+        }
 
     async def _ensure_daily_contract(self, guild: discord.Guild, member: discord.Member) -> dict:
         st = _contract_state(guild.id, member.id)
@@ -1023,79 +1167,85 @@ class ContractsCog(commands.Cog):
         st: dict,
         progress_rows: list[dict[str, object]],
     ) -> dict:
-        quest = _as_dict(st.get("quest"))
-        reward_bonus_xp = max(1, int(quest.get("reward_bonus_xp", 1)))
-        reward = await grant_bonus_xp_equivalent_boost(
-            member,
-            reward_bonus_xp,
-            source="contract complete",
-            reward_seed_xp=reward_bonus_xp,
-        )
-        fast_clear_reward: dict[str, object] | None = None
-        fast_clear_equivalent_bonus_xp = 0.0
-        if _fast_clear_applies(st):
-            fast_clear_equivalent_bonus_xp = (
-                max(0.01, float(reward.get("rate_basis_per_min", 0.0)))
-                * float(CONTRACT_FAST_CLEAR_BONUS_PCT)
-                * float(CONTRACT_FAST_CLEAR_BONUS_MINUTES)
-            )
-            fast_clear_reward = await grant_fixed_boost(
+        async with self._claim_lock(guild.id, member.id):
+            live_state = _contract_state(guild.id, member.id)
+            if bool(live_state.get("claimed", False)):
+                return self._claimed_reward_payload(live_state)
+
+            quest = _as_dict(live_state.get("quest"))
+            reward_bonus_xp = max(1, int(quest.get("reward_bonus_xp", 1)))
+            reward = await grant_bonus_xp_equivalent_boost(
                 member,
-                pct=CONTRACT_FAST_CLEAR_BONUS_PCT,
-                minutes=CONTRACT_FAST_CLEAR_BONUS_MINUTES,
+                reward_bonus_xp,
                 source="contract complete",
-                reward_seed_xp=fast_clear_equivalent_bonus_xp,
+                reward_seed_xp=reward_bonus_xp,
             )
+            fast_clear_reward: dict[str, object] | None = None
+            fast_clear_equivalent_bonus_xp = 0.0
+            if _fast_clear_applies(live_state):
+                fast_clear_equivalent_bonus_xp = (
+                    max(0.01, float(reward.get("rate_basis_per_min", 0.0)))
+                    * float(CONTRACT_FAST_CLEAR_BONUS_PCT)
+                    * float(CONTRACT_FAST_CLEAR_BONUS_MINUTES)
+                )
+                fast_clear_reward = await grant_fixed_boost(
+                    member,
+                    pct=CONTRACT_FAST_CLEAR_BONUS_PCT,
+                    minutes=CONTRACT_FAST_CLEAR_BONUS_MINUTES,
+                    source="contract complete",
+                    reward_seed_xp=fast_clear_equivalent_bonus_xp,
+                )
 
-        step_count = len(progress_rows)
-        tier = str(quest.get("tier", "")).strip()
-        total_equivalent_bonus_xp = float(reward.get("equivalent_bonus_xp", reward_bonus_xp))
-        total_equivalent_bonus_xp += float(fast_clear_equivalent_bonus_xp)
-        total_percent = float(reward.get("percent", 0.0))
-        total_minutes = int(reward.get("minutes", 0))
-        if fast_clear_reward is not None:
-            total_percent += float(fast_clear_reward.get("percent", 0.0))
-            total_minutes += int(fast_clear_reward.get("minutes", 0))
-        st["claimed"] = True
-        st["completed_at"] = _iso(_utcnow())
-        st["last_reward"] = {
-            "percent": float(reward.get("percent", 0.0)),
-            "minutes": int(reward.get("minutes", 0)),
-            "equivalent_bonus_xp": float(reward.get("equivalent_bonus_xp", reward_bonus_xp)),
-            "fast_clear_percent": (
-                float(fast_clear_reward.get("percent", 0.0)) if fast_clear_reward is not None else 0.0
-            ),
-            "fast_clear_minutes": (
-                int(fast_clear_reward.get("minutes", 0)) if fast_clear_reward is not None else 0
-            ),
-            "fast_clear_equivalent_bonus_xp": float(fast_clear_equivalent_bonus_xp),
-        }
+            step_count = len(progress_rows)
+            tier = str(quest.get("tier", "")).strip()
+            total_equivalent_bonus_xp = float(reward.get("equivalent_bonus_xp", reward_bonus_xp))
+            total_equivalent_bonus_xp += float(fast_clear_equivalent_bonus_xp)
+            total_percent = float(reward.get("percent", 0.0))
+            total_minutes = int(reward.get("minutes", 0))
+            if fast_clear_reward is not None:
+                total_percent += float(fast_clear_reward.get("percent", 0.0))
+                total_minutes += int(fast_clear_reward.get("minutes", 0))
+            live_state["claimed"] = True
+            live_state["completed_at"] = _iso(_utcnow())
+            live_state["last_reward"] = {
+                "percent": float(reward.get("percent", 0.0)),
+                "minutes": int(reward.get("minutes", 0)),
+                "equivalent_bonus_xp": float(reward.get("equivalent_bonus_xp", reward_bonus_xp)),
+                "fast_clear_percent": (
+                    float(fast_clear_reward.get("percent", 0.0)) if fast_clear_reward is not None else 0.0
+                ),
+                "fast_clear_minutes": (
+                    int(fast_clear_reward.get("minutes", 0)) if fast_clear_reward is not None else 0
+                ),
+                "fast_clear_equivalent_bonus_xp": float(fast_clear_equivalent_bonus_xp),
+            }
 
-        record_game_fields(
-            guild.id,
-            member.id,
-            "contracts",
-            completed=1,
-            multi_step_completed=1 if step_count > 1 else 0,
-            legendary_completed=1 if tier == "Legendary" else 0,
-            fast_clear_completed=1 if fast_clear_reward is not None else 0,
-            objectives_completed_total=step_count,
-            boost_seed_xp_total=total_equivalent_bonus_xp,
-            boost_percent_total=total_percent,
-            boost_minutes_total=total_minutes,
-            reward_minutes_equivalent_total=int(quest.get("reward_minutes_equivalent", 0)),
-            fast_clear_percent_total=(
-                float(fast_clear_reward.get("percent", 0.0)) if fast_clear_reward is not None else 0.0
-            ),
-            fast_clear_minutes_total=(
-                int(fast_clear_reward.get("minutes", 0)) if fast_clear_reward is not None else 0
-            ),
-        )
-        await save_data()
-        reward["fast_clear_reward"] = fast_clear_reward or {}
-        reward["fast_clear_equivalent_bonus_xp"] = float(fast_clear_equivalent_bonus_xp)
-        reward["total_equivalent_bonus_xp"] = float(total_equivalent_bonus_xp)
-        return reward
+            record_game_fields(
+                guild.id,
+                member.id,
+                "contracts",
+                completed=1,
+                multi_step_completed=1 if step_count > 1 else 0,
+                legendary_completed=1 if tier == "Legendary" else 0,
+                fast_clear_completed=1 if fast_clear_reward is not None else 0,
+                objectives_completed_total=step_count,
+                boost_seed_xp_total=total_equivalent_bonus_xp,
+                boost_percent_total=total_percent,
+                boost_minutes_total=total_minutes,
+                reward_minutes_equivalent_total=int(quest.get("reward_minutes_equivalent", 0)),
+                fast_clear_percent_total=(
+                    float(fast_clear_reward.get("percent", 0.0)) if fast_clear_reward is not None else 0.0
+                ),
+                fast_clear_minutes_total=(
+                    int(fast_clear_reward.get("minutes", 0)) if fast_clear_reward is not None else 0
+                ),
+            )
+            await save_data()
+            reward["fast_clear_reward"] = fast_clear_reward or {}
+            reward["fast_clear_equivalent_bonus_xp"] = float(fast_clear_equivalent_bonus_xp)
+            reward["total_equivalent_bonus_xp"] = float(total_equivalent_bonus_xp)
+            reward["already_claimed"] = False
+            return reward
 
     async def _send_contract_completion_message(self, channel, member: discord.Member, st: dict, reward: dict) -> None:
         if channel is None:
@@ -1136,6 +1286,8 @@ class ContractsCog(commands.Cog):
         if not _is_complete(progress_rows):
             return False
         reward = await self._claim_contract_reward(guild, member, st, progress_rows)
+        if bool(reward.get("already_claimed", False)):
+            return False
         await self._send_contract_completion_message(channel, member, st, reward)
         return True
 
@@ -1237,12 +1389,6 @@ class ContractsCog(commands.Cog):
             return
         await self._ensure_daily_contract(ctx.guild, ctx.author)
 
-    @commands.Cog.listener()
-    async def on_command_completion(self, ctx: commands.Context):
-        if ctx.guild is None or ctx.author.bot:
-            return
-        await self.maybe_auto_complete_contract_for_member(ctx.guild, ctx.author, channel=ctx.channel)
-
     @commands.command(name="quest", aliases=["q"])
     async def quest(self, ctx: commands.Context, target: Optional[discord.Member] = None):
         if ctx.guild is None:
@@ -1258,14 +1404,8 @@ class ContractsCog(commands.Cog):
         if target.id == ctx.author.id and not str(st.get("seen_at", "")).strip():
             st["seen_at"] = _iso(_utcnow())
             await save_data()
-        progress_rows = _progress_rows(ctx.guild.id, target.id, _as_dict(st.get("quest")), _as_dict(st.get("baselines")))
 
-        claimed_now = False
-        if target.id == ctx.author.id and _is_complete(progress_rows) and not bool(st.get("claimed", False)):
-            await self._claim_contract_reward(ctx.guild, target, st, progress_rows)
-            claimed_now = True
-
-        # Re-read current state after a possible payout so the display stays honest.
+        # Re-read current state so the display reflects any auto-claim that may have happened elsewhere.
         st = _contract_state(ctx.guild.id, target.id)
         quest = _as_dict(st.get("quest"))
         progress_rows = _progress_rows(ctx.guild.id, target.id, quest, _as_dict(st.get("baselines")))
@@ -1280,9 +1420,6 @@ class ContractsCog(commands.Cog):
         fast_clear_line = self._fast_clear_line(st, viewer_is_holder=(target.id == ctx.author.id))
         if fast_clear_line:
             lines.append(fast_clear_line)
-
-        if claimed_now:
-            lines.append("Completion payout has been delivered automatically.")
 
         lines.append("Objectives:")
         lines.extend(self._objective_lines(progress_rows))

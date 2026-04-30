@@ -7,7 +7,15 @@ from typing import Optional
 import discord
 from discord.ext import commands, tasks
 
-from .config import COMMAND_PREFIX
+from .config import (
+    COMMAND_PREFIX,
+    FISH_BASE_CHEST_CHANCE,
+    FISH_DOCK_TIMER_STEP_MINUTES,
+    FISH_IDLE_TIMEOUT_SECONDS,
+    FISH_LOOP_SECONDS,
+    FISH_MAX_BITE_SECONDS,
+    FISH_MIN_BITE_SECONDS,
+)
 from .emojis import EMOJI_HOOK
 from .fish_support import add_bait, consume_bait, get_bait, refund_bait
 from .guild_setup import ensure_guild_setup, get_fishing_channel, get_fishing_channel_id
@@ -43,9 +51,6 @@ GIVE_EMOJI = "\N{DOWNWARDS BLACK ARROW}"
 SET_EMOJI = EMOJI_HOOK
 SESSION_STOP_EMOJI = DOCK_STOP_EMOJI
 
-BASE_CHEST_CHANCE = 0.05
-FISH_LOOP_SECONDS = 5
-DOCK_TIMER_STEP_MINUTES = 5
 FISHING_SOURCE = "fishing catch"
 CHEST_SOURCE = "fishing chest"
 
@@ -463,6 +468,25 @@ WATER_STATES: dict[str, dict[str, object]] = {
     },
 }
 
+WATER_STATE_DURATION_OVERRIDES: dict[str, tuple[int, int]] = {
+    "empty_reach": (55, 90),
+    "frenzy_water": (45, 70),
+    "weed_tangle": (50, 80),
+    "stormwash": (35, 55),
+    "glasswater": (40, 60),
+    "golden_hour": (18, 30),
+    "wreck_drift": (28, 45),
+    "moon_slick": (22, 38),
+    "silt_bloom": (50, 80),
+    "abyssal_pull": (16, 28),
+}
+
+for _water_state_key, _water_state in WATER_STATES.items():
+    _water_state["weight"] = 10
+    duration_override = WATER_STATE_DURATION_OVERRIDES.get(_water_state_key)
+    if duration_override is not None:
+        _water_state["duration"] = duration_override
+
 
 CHEST_LOOT: list[dict[str, object]] = [
     {"key": "bonus_spins", "name": "Rust-Scored Wheel Token", "weight": 18},
@@ -535,13 +559,26 @@ def _join_lines(lines: list[str]) -> str:
     return "\n".join(line for line in lines if str(line).strip())
 
 
+def _reset_session_line(session: dict) -> None:
+    session["loaded_bait"] = 0
+    session["bite_at"] = 0
+    session["cast_started_at"] = 0
+    session["fish"] = {}
+    session["successes"] = 0
+    session["mistakes"] = 0
+    session["required"] = 0
+    session["max_mistakes"] = 0
+    session["current_action"] = ""
+    session["current_cue"] = ""
+
+
 def _dock_timer_minutes(expires_at: int, *, now_ts: Optional[int] = None) -> int:
     now = _now_ts() if now_ts is None else int(now_ts)
     remaining = max(0, int(expires_at) - now)
     if remaining <= 0:
         return 0
     whole_minutes = max(1, (remaining + 59) // 60)
-    step = max(1, int(DOCK_TIMER_STEP_MINUTES))
+    step = max(1, int(FISH_DOCK_TIMER_STEP_MINUTES))
     return max(step, ((whole_minutes + step - 1) // step) * step)
 
 
@@ -590,6 +627,8 @@ def _session_state(gid: int, uid: int) -> dict:
     st.setdefault("session_message_id", 0)
     st.setdefault("loaded_bait", 0)
     st.setdefault("bite_at", 0)
+    st.setdefault("cast_started_at", 0)
+    st.setdefault("last_manual_action_at", 0)
     st.setdefault("cast_state_key", "")
     st.setdefault("cast_state_name", "")
     st.setdefault("cast_state_flavor", "")
@@ -642,8 +681,7 @@ def _roll_water_state(gid: int) -> bool:
     if current_key in WATER_STATES and _as_int(st.get("state_expires_at", 0), 0) > now:
         return False
 
-    seed = int.from_bytes(f"{gid}:{now // 60}:{random.random()}".encode("utf-8"), "little", signed=False) % (2**32)
-    rng = random.Random(seed)
+    rng = random.SystemRandom()
     key = _weighted_choice(rng, [(name, _as_float(data.get("weight", 1.0), 1.0)) for name, data in WATER_STATES.items()])
     data = WATER_STATES[key]
     minutes_min, minutes_max = data.get("duration", (45, 75))
@@ -725,6 +763,43 @@ async def _grant_bonus_spins(gid: int, uid: int, amount: int) -> int:
 class FishCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    def _mark_manual_session_action(self, session: dict) -> int:
+        now = _now_ts()
+        session["last_manual_action_at"] = int(now)
+        return int(now)
+
+    def _waiting_session_is_idle(self, session: dict, *, now_ts: Optional[int] = None) -> bool:
+        if not bool(session.get("active", False)):
+            return False
+        phase = str(session.get("phase", "")).strip().lower()
+        if phase not in {"waiting", "bite"}:
+            return False
+        timeout_seconds = max(1, int(FISH_IDLE_TIMEOUT_SECONDS))
+        now = _now_ts() if now_ts is None else int(now_ts)
+        last_manual_action_at = _as_int(session.get("last_manual_action_at", 0), 0)
+        if last_manual_action_at <= 0:
+            last_manual_action_at = _as_int(session.get("cast_started_at", 0), 0)
+        if last_manual_action_at <= 0:
+            return False
+        return (now - last_manual_action_at) >= timeout_seconds
+
+    async def _idle_stop_waiting_session(self, guild: discord.Guild, member: discord.Member, session: dict) -> None:
+        record_fields: dict[str, int] = {"idle_timeouts": 1}
+        if _as_int(session.get("loaded_bait", 0), 0) > 0:
+            record_fields["bait_lost_idle"] = 1
+        record_game_fields(guild.id, member.id, "fishing", **record_fields)
+
+        session["active"] = False
+        session["phase"] = "idle"
+        _reset_session_line(session)
+        bait = get_bait(guild.id, member.id)
+        session["last_result_text"] = (
+            f"{DOCK_STOP_EMOJI} {member.mention} goes idle for over **{_fmt_remaining(FISH_IDLE_TIMEOUT_SECONDS)}** "
+            f"and loses the bait on the line. Auto-casting stops. Bait in tackle box: **{bait}**."
+        )
+        await self._refresh_session_message(guild, member)
+        await self._ensure_dock_message(guild, force_refresh=True)
 
     async def _remove_user_reaction(
         self,
@@ -872,12 +947,27 @@ class FishCog(commands.Cog):
 
     def _bite_delay(self, state_key: str) -> int:
         state = WATER_STATES.get(state_key, WATER_STATES["empty_reach"])
-        low, high = state.get("bite_range", (30, 60))
-        return random.randint(int(low), int(high))
+        low, high = state.get("bite_range", (FISH_MIN_BITE_SECONDS, FISH_MAX_BITE_SECONDS))
+        global_low = max(1, int(FISH_MIN_BITE_SECONDS))
+        global_high = max(global_low, int(FISH_MAX_BITE_SECONDS))
+        low = max(global_low, int(low))
+        high = min(global_high, int(high))
+        if high < low:
+            low, high = global_low, global_high
+        return random.randint(low, high)
 
-    def _begin_cast(self, guild: discord.Guild, member: discord.Member, session: dict, *, carry_text: str = "") -> bool:
+    def _begin_cast(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        session: dict,
+        *,
+        carry_text: str = "",
+        manual_start: bool = False,
+    ) -> bool:
         gid = guild.id
         uid = member.id
+        now = _now_ts()
         state_root = _state_root(gid)
         state_changed = _roll_water_state(gid)
         if state_changed or not str(state_root.get("state_key", "")).strip():
@@ -894,7 +984,10 @@ class FishCog(commands.Cog):
         session["phase"] = "waiting"
         session["channel_id"] = int(get_fishing_channel_id(guild.id) or 0)
         session["loaded_bait"] = 1
-        session["bite_at"] = _now_ts() + self._bite_delay(state_key)
+        session["bite_at"] = now + self._bite_delay(state_key)
+        session["cast_started_at"] = int(now)
+        if manual_start or _as_int(session.get("last_manual_action_at", 0), 0) <= 0:
+            session["last_manual_action_at"] = int(now)
         session["cast_state_key"] = state_key
         session["cast_state_name"] = str(WATER_STATES.get(state_key, WATER_STATES["empty_reach"]).get("name", "Unknown Water"))
         session["cast_state_flavor"] = str(state_root.get("state_flavor", "The water shifts."))
@@ -1062,7 +1155,7 @@ class FishCog(commands.Cog):
             return
 
         started_new_session = not bool(session.get("active", False))
-        if not self._begin_cast(guild, member, session):
+        if not self._begin_cast(guild, member, session, manual_start=True):
             await channel.send(
                 f"{member.mention} is out of bait. Grab **Bait Crate x25** from {_command_text('shop')} first."
             )
@@ -1087,15 +1180,7 @@ class FishCog(commands.Cog):
 
         session["active"] = False
         session["phase"] = "idle"
-        session["loaded_bait"] = 0
-        session["bite_at"] = 0
-        session["current_action"] = ""
-        session["current_cue"] = ""
-        session["fish"] = {}
-        session["successes"] = 0
-        session["mistakes"] = 0
-        session["required"] = 0
-        session["max_mistakes"] = 0
+        _reset_session_line(session)
         bait = get_bait(guild.id, member.id)
         session["last_result_text"] = (
             f"{DOCK_STOP_EMOJI} {member.mention} packs up the line."
@@ -1116,6 +1201,7 @@ class FishCog(commands.Cog):
         if not fish:
             fish = _roll_fish_for_state(guild.id, member.id, str(session.get("cast_state_key", "")).strip().lower())
             session["fish"] = fish
+        self._mark_manual_session_action(session)
         session["phase"] = "fight"
         session["successes"] = 0
         session["mistakes"] = 0
@@ -1135,14 +1221,7 @@ class FishCog(commands.Cog):
         persist_result: bool = True,
     ) -> None:
         session = _session_state(guild.id, member.id)
-        session["loaded_bait"] = 0
-        session["fish"] = {}
-        session["successes"] = 0
-        session["mistakes"] = 0
-        session["required"] = 0
-        session["max_mistakes"] = 0
-        session["current_action"] = ""
-        session["current_cue"] = ""
+        _reset_session_line(session)
         carry_text = str(result_text or "").strip() if persist_result else ""
 
         if not bool(session.get("active", False)):
@@ -1153,7 +1232,7 @@ class FishCog(commands.Cog):
             return
 
         if self._begin_cast(guild, member, session, carry_text=carry_text):
-            await self._refresh_session_message(guild, member)
+            await self._refresh_session_message(guild, member, move_to_latest=True)
             await self._ensure_dock_message(guild, force_refresh=True)
             await save_data()
             return
@@ -1272,7 +1351,10 @@ class FishCog(commands.Cog):
         ]
 
         water = WATER_STATES.get(str(session.get("cast_state_key", "")).strip().lower(), WATER_STATES["empty_reach"])
-        chest_chance = max(0.0, min(0.40, BASE_CHEST_CHANCE + _as_float(water.get("chest_bonus", 0.0), 0.0)))
+        chest_chance = max(
+            0.0,
+            min(0.40, float(FISH_BASE_CHEST_CHANCE) + _as_float(water.get("chest_bonus", 0.0), 0.0)),
+        )
         if random.random() <= chest_chance:
             chest_text = await self._roll_chest_reward(guild, member)
             record_game_fields(guild.id, member.id, "fishing", chests_found=1)
@@ -1314,6 +1396,7 @@ class FishCog(commands.Cog):
             await channel.send(f"{member.mention} is not currently in a reel fight.")
             return
 
+        self._mark_manual_session_action(session)
         choice = str(action).strip().lower()
         correct = str(session.get("current_action", "")).strip().lower()
         if choice == correct:
@@ -1376,6 +1459,7 @@ class FishCog(commands.Cog):
                 st = _state_root(guild.id)
                 state_changed = _roll_water_state(guild.id)
                 guild_changed = state_changed
+                now_ts = _now_ts()
                 timer_minutes = _dock_timer_minutes(_as_int(st.get("state_expires_at", 0), 0))
                 timer_changed = timer_minutes != _as_int(st.get("dock_timer_minutes", -1), -1)
                 if state_changed:
@@ -1388,12 +1472,17 @@ class FishCog(commands.Cog):
                 for uid, session in _active_sessions(guild.id):
                     if not bool(session.get("active", False)):
                         continue
-                    if str(session.get("phase", "")).strip().lower() != "waiting":
-                        continue
-                    if _as_int(session.get("bite_at", 0), 0) > _now_ts():
-                        continue
                     member = guild.get_member(uid)
                     if member is None or member.bot:
+                        continue
+                    phase = str(session.get("phase", "")).strip().lower()
+                    if phase in {"waiting", "bite"} and self._waiting_session_is_idle(session, now_ts=now_ts):
+                        await self._idle_stop_waiting_session(guild, member, session)
+                        guild_changed = True
+                        continue
+                    if phase != "waiting":
+                        continue
+                    if _as_int(session.get("bite_at", 0), 0) > now_ts:
                         continue
                     session["phase"] = "bite"
                     session["bite_at"] = 0
