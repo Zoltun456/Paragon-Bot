@@ -32,6 +32,7 @@ from .emojis import (
 )
 from .fish_support import add_bait, consume_bait, get_bait, refund_bait
 from .guild_setup import ensure_guild_setup, get_fishing_channel, get_fishing_channel_id
+from .include import _as_dict, _as_float, _as_int, _fmt_num
 from .ownership import owner_only
 from .spin import (
     _add_bonus_spins,
@@ -517,33 +518,8 @@ CHEST_LOOT: list[dict[str, object]] = [
 ]
 
 
-def _as_dict(value) -> dict:
-    return value if isinstance(value, dict) else {}
-
-
-def _as_int(value, default: int = 0) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return int(default)
-
-
-def _as_float(value, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return float(default)
-
-
 def _now_ts() -> int:
     return int(time.time())
-
-
-def _fmt_num(value: int | float) -> str:
-    num = float(value)
-    if abs(num - round(num)) < 1e-9:
-        return f"{int(round(num)):,}"
-    return f"{num:,.2f}"
 
 
 def _fmt_pct(value: float) -> str:

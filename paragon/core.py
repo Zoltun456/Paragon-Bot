@@ -8,6 +8,7 @@ from discord.ext import commands, tasks
 from .config import resolve_afk_channel_id
 from .emojis import EMOJI_BULLET, EMOJI_FIRST_PLACE_MEDAL, EMOJI_SECOND_PLACE_MEDAL, EMOJI_THIRD_PLACE_MEDAL
 from .guild_setup import ensure_guild_setup
+from .include import _as_dict, _as_int, _as_list
 from .stats_store import record_game_fields
 from .storage import load_data, _gdict, _udict, save_data
 from .time_windows import _date_key, _today_local
@@ -137,22 +138,6 @@ REGULAR_CUSTOMER_TARGET = 5
 WINGMAN_TARGET_MINUTES = 45
 PARTY_BUS_MIN_HUMANS = 3
 TOUCH_GRASS_MIN_SECONDS = 30 * 60
-
-
-def _as_dict(value) -> dict:
-    return value if isinstance(value, dict) else {}
-
-
-def _as_list(value) -> list:
-    return value if isinstance(value, list) else []
-
-
-def _as_int(value, default: int = 0) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return int(default)
-
 
 def _utcnow_ts() -> int:
     return int(discord.utils.utcnow().timestamp())

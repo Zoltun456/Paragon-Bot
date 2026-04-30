@@ -6,6 +6,7 @@ import discord
 from discord.utils import get as dget
 
 from .config import AUTHOR_USER_ID
+from .include import _as_int
 from .ownership import resolve_owner_id, sync_guild_owner
 from .storage import _gdict, save_data
 
@@ -19,14 +20,6 @@ LOG_CHANNEL_NAME = "paragon-log"
 BLACKJACK_CHANNEL_NAME = "paragon-blackjack"
 FISHING_CHANNEL_NAME = "paragon-fishing"
 OWNER_CHANNEL_NAME = "paragon-owner"
-
-
-def _as_int(value, default: int = 0) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return default
-
 
 def _channels_dict(guild_id: int) -> dict:
     g = _gdict(guild_id)

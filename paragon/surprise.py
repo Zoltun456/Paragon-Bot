@@ -19,15 +19,12 @@ from .config import (
     SURPRISE_PCT_STEP,
 )
 from .guild_setup import get_log_channel
+from .include import _iso, _parse_iso, _utcnow
 from .ownership import owner_only
 from .roles import enforce_level6_exclusive
 from .stats_store import record_game_fields
 from .storage import _gdict, save_data
 from .xp import grant_fixed_boost
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _rand_minutes() -> int:
@@ -81,19 +78,6 @@ def _state(gid: int) -> dict:
     st["active"] = bool(pending)
     return st
 
-
-def _iso(dt: datetime) -> str:
-    return dt.replace(microsecond=0).isoformat()
-
-
-def _parse_iso(s: Optional[str]) -> Optional[datetime]:
-    if not s:
-        return None
-    try:
-        dt = datetime.fromisoformat(s)
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    except Exception:
-        return None
 
 
 class SurpriseCog(commands.Cog):

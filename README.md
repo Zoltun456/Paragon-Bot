@@ -1,283 +1,134 @@
-﻿# Paragon Bot
+# Paragon Bot
 
-Paragon is a Discord XP/game bot with persistent per-guild storage.
+Discord XP, voice, and mini-game bot with persistent per-guild storage.
 
-It provides:
-- Passive XP gain
-- XP boosts and prestige progression
-- Voice utilities
-- Multiple games (Wordle, Anagram, Blackjack, Coinflip, Lotto, Roulette, Surprise drops)
-- User and guild game statistics
-- Owner/admin management commands
+## Quick Start
 
-## Runtime Notes
+- Required: `DISCORD_TOKEN`
+- Optional: `COMMAND_PREFIX` (defaults to `!`)
+- Run: `python Paragon.py`
+- Guild data: `paragon_data/<guild_id>.db`
+- Global user settings: `paragon_data/_user_settings.db`
+- Voice features need FFmpeg
+- `!say` uses ElevenLabs and needs `ELEVEN_API`
+- `!play` uses `yt-dlp`; `YTDLP_COOKIES_FROM_BROWSER` or `YTDLP_COOKIE_FILE` can help with restricted YouTube playback
 
-- Default command prefix: `!` (set via `COMMAND_PREFIX` in `.env`)
-- Data is stored per guild in `paragon_data/<guild_id>.db`
-- Global per-user settings are stored in `paragon_data/_user_settings.db`
-- If cloning, bot requires `DISCORD_TOKEN` in an `.env` that has proper permissions set in Discord's dev portal
-- `!say` uses ElevenLabs TTS (`ELEVEN_API`) and requires FFmpeg available on the host
-- `!play` uses `yt-dlp` when available, with a direct-download fallback for simple file links
-- Age-restricted YouTube playback can use `YTDLP_COOKIES_FROM_BROWSER` or `YTDLP_COOKIE_FILE` in `.env` for authenticated `yt-dlp` retries
+## Active Cogs
+
+Loaded by default from `Paragon.py`:
+
+- `CoreCog`, `WordleCog`, `CoinFlipCog`, `RouletteCog`, `SurpriseCog`, `AnagramCog`
+- `ContractsCog`, `BountyCog`, `FishCog`, `ThanksCog`, `LottoCog`, `SpinCog`
+- `ShopCog`, `PrestigeCog`, `QuietCog`, `BlackjackCog`
+- `PlaybackCog`, `VoiceCog`, `WakeupCog`, `TTSCog`
+- `StatsCog`, `AdminCog`
+
+Not loaded by default:
+
+- `BossCog` exists in `paragon/boss.py` but is commented out in `Paragon.py`
+
+## Command Index
+
+These commands reflect the cogs currently loaded by `Paragon.py`.
+
+Access legend:
+
+- `User`: available to regular members
+- `Elevated`: owner/admin-style permission checks in code
+- `Owner`: owner-only
+
+### General And Progression
+
+| Command | Aliases | Access | Purpose |
+|---|---|---:|---|
+| `!help` | none | User | Show member-facing help |
+| `!adminhelp` | none | Owner | Show elevated help |
+| `!re` | none | User | Quick bot response check |
+| `!rank [@member]` | `!xp`, `!level` | User | Show XP, gain rate, and active boosts |
+| `!leaderboard [limit]` | `!lb`, `!xps` | User | Show top XP users |
+| `!boosts [@member]` | `!rate`, `!mult` | User / Elevated | View boosts; elevated use can add, remove, or clear them |
+| `!prestige [@user] [all]` | `!p` | User / Elevated | View prestige board or prestige yourself; elevated users can target others |
+| `!gamestats [@user]` | `!stats`, `!mystats` | User / Elevated | Show your stats; elevated users can inspect others |
+| `!guildgamestats` | `!serverstats` | Elevated | Show guild-wide game totals |
+
+### Daily, Social, And Economy
+
+| Command | Aliases | Access | Purpose |
+|---|---|---:|---|
+| `!quest [@user]` | `!q` | User | Show daily contract progress |
+| `!bounty [@user / stop]` | `!b` | User | Show, start, or stop the daily bounty flow |
+| `!claim` | none | User | Claim the active surprise drop |
+| `!thanks @user` | `!thx` | User | Give another user a thanks reward |
+| `!lotto [count / @user]` | `!l` | User | Buy tickets or inspect ticket counts |
+| `!spin [all]` | `!wheel` | User | Use your daily wheel spin(s) |
+| `!spinstatus` | `!wheelstatus` | User | Show spin lock and wheel buffs |
+| `!cleanse` | none | User | Spend a cleanse charge to remove debuffs |
+| `!drain` | none | User | Debuff others in your voice call and buff yourself |
+| `!shop` | none | User | View shop items |
+| `!buy <item> [amount]` | none | User | Buy a shop item |
+
+### Games
+
+| Command | Aliases | Access | Purpose |
+|---|---|---:|---|
+| `!wordle [guess]` | `!w`, `!wd` | User | Play daily Wordle |
+| `!anagram [guess]` | `!a` | User | Play the anagram game |
+| `!cf <amount>` | `!coinflip` | User | Start, accept, or cancel a coinflip wager |
+| `!roulette @user` | `!r` | User | Fire a roulette shot at another user |
+| `!fish [action]` | none | User | Run fishing actions like `cast`, `reel`, `lift`, `give`, `set`, `stop`, or `status` |
+| `!blackjack [arg]` | `!bj` | User | Join and play blackjack |
+
+### Voice And Audio
+
+| Command | Aliases | Access | Purpose |
+|---|---|---:|---|
+| `!join` | none | User | Join your voice channel |
+| `!leave` | `!disconnect`, `!dc` | User | Disconnect from voice |
+| `!play <query>` | none | User | Queue audio in voice |
+| `!say {message} {@user}` | none | User | Speak TTS in a user's voice channel |
+| `!tts` | `!ttstags`, `!ttshelp` | User | Show TTS tags/help |
+| `!rerollvoice [@user]` | `!ttsreroll`, `!voicereroll` | User / Elevated | Reroll your TTS voice; elevated users can target others |
+| `!setvoice <voice_id> ...` | `!ttsvoice`, `!voiceid` | User | Save your TTS voice profile |
+| `!wakeup @user` | `!wakeywakey` | User | Pull an AFK user through random channels into yours |
+| `!shh @user` | none | User | Server mute a user for 30 seconds with a personal cooldown |
+
+### Elevated Commands
+
+| Command | Access | Purpose |
+|---|---:|---|
+| `!boosts add/remove/clear ...` | Elevated | Manage user boosts and debuffs |
+| `!resetwordle` | Elevated | Reset the current Wordle session |
+| `!claimnow` | Elevated | Spawn a surprise drop immediately |
+| `!poplatto` | Elevated | Force a lottery draw |
+| `!lottotime [time]` | Elevated | View or set lottery draw time |
+| `!lottotoggle` | Elevated | Enable or disable the lottery |
+| `!spintime [time]` | Elevated | View or set spin reset time |
+| `!spinrewards ...` | Elevated | List or toggle spin rewards |
+| `!spinreset @user` | Elevated | Reset a user's current spin cycle |
+| `!setp <amount> @user` | Elevated | Set a user's prestige |
+| `!bjreset` | Elevated | Reset blackjack table state |
+| `!bjtime [time]` | Elevated | View or set blackjack reset time |
+| `!bjcooldown [mode]` | Elevated | Toggle blackjack daily cooldown behavior |
+| `!bjdebug` | Elevated | Toggle blackjack debug mode |
+| `!bjstate` | Elevated | Print blackjack internal state |
+| `!bjintents` | Elevated | Show Discord intent flags |
+| `!playskip` | Elevated | Skip playback |
+| `!playclear` | Elevated | Clear playback queue |
+| `!ttscooldown [mode]` | Elevated | Manage `!say` cooldown |
+| `!ttsmodel [model_id]` | Elevated | View or set ElevenLabs TTS model |
+| `!ttsqueue ...` | Elevated | Show, skip, or clear the TTS queue |
+| `!role @user @role` | Elevated | Toggle a role on a member |
+| `!xprate [@user]` | Elevated | Show passive XP/min rates |
+| `!setxp <targets...> <xp>` | Elevated | Set XP totals |
+| `!adjust @user <+amount / -amount>` | Elevated | Add or subtract XP |
+| `!softreset @user` | Elevated | Reset XP, prestige, and wheel rewards without deleting stats |
+| `!voicehealth` | Owner | Run voice diagnostics |
+| `!fishreroll` | Owner | Reroll the active fishing water state |
 
 ## Project Conventions
 
-### Emoji Constants
-
-- Define reusable emoji and shared UI-symbol constants in `paragon/emojis.py`.
-- Import those constants into modules instead of embedding Unicode emoji literals or Unicode-name escapes directly in Python files.
-- When documentation needs to mention a reaction, prefer its name or purpose in prose unless the literal character is specifically important.
-
-### Adding More Rules
-
-- Add future repository rules as new `###` subsections under `Project Conventions` so this section can expand without becoming one long checklist.
-
-## Command Reference (By Cog)
-
-`Admin` below means elevated access for that command (owner/admin checks in code).  
-`Non-Admin` means regular members can use it.
-
-## CoreCog
-
-### Non-Admin
-- `!help`
-- `!re`
-- `!rank [@member]` (aliases: `!xp`, `!level`)
-- `!leaderboard [limit]` (aliases: `!lb`, `!xps`)
-- `!boosts [@member]` (aliases: `!rate`, `!mult`) to view a user's active boosts/debuffs  
-  (This is the `boosts` line shown in `!help`.)
-
-### Admin
-- `!adminhelp`
-- `!boosts add {+/-}{rate} {time} {@user|@role|@everyone}`
-- `!boosts remove {+/-}{rate} {time} {@user|@role|@everyone}`
-- `!boosts clear {@user|@role|@everyone}`  
-  (These are the `boosts` variants shown in `!adminhelp`.)
-
-## WordleCog
-
-### Non-Admin
-- `!wordle [guess]` (aliases: `!w`, `!wd`)
-
-### Admin
-- `!resetwordle`
-
-## CoinFlipCog
-
-### Non-Admin
-- `!cf <amount>` (alias: `!coinflip`)
-- `!cf accept [@challenger]`
-- `!cf cancel`
-- Max bet is **unlimited by default** (`CF_MAX_BET=-1`).  
-  Set `CF_MAX_BET` to a non-negative value to enforce a cap.
-
-### Admin
-- None
-
-## RouletteCog
-
-### Non-Admin
-- `!roulette @user` (alias: `!r`)
-- No XP cost
-- 30 minute personal cooldown per user
-- Success chance scales by prestige and caps at 60%
-- Same-prestige shots timeout for 60s either way; lower hit odds lengthen hits and shorten backfires, while higher hit odds do the reverse, ranging from 30s to 3m
-
-### Admin
-- None
-
-## SurpriseCog
-
-### Non-Admin
-- `!claim`
-
-### Admin
-- `!claimnow`
-
-## AnagramCog
-
-### Non-Admin
-- `!anagram [guess]` (alias: `!a`)
-
-### Admin
-- None
-
-## ThanksCog
-
-### Non-Admin
-- `!thanks @user` (alias: `!thx`)
-
-### Admin
-- None
-
-## LottoCog
-
-### Non-Admin
-- `!lotto [ticket_count]` (alias: `!l`)
-- `!lotto @user` to inspect ticket count
-- Jackpot reward is a temporary XP-rate boost (not direct XP)
-- Daily auto-draw defaults to **6:00 PM ET**
-
-### Admin
-- `!poplatto` (force draw)
-- `!lottotime [time]` (set draw time, e.g. `!lottotime 6pm`)
-- `!lottotoggle`
-
-## PrestigeCog
-
-### Non-Admin
-- `!prestige [@self] [all]` (alias: `!p`)
-- `!p` with no arguments shows the prestige board
-- `!p @self all` prestiges you as many times as your current XP allows
-
-### Admin
-- `!p @user [all]` uses that user's current XP; `all` prestiges them as many times as possible
-- `!setp <amount> @user`
-
-## SpinCog
-
-### Non-Admin
-- `!spin [all]` (alias: `!wheel`) for a normal daily spin, or use `all` to instantly spend every available daily + bonus spin with no animation
-- `!spinstatus` (alias: `!wheelstatus`) to view spin lock + active wheel buffs
-- Wheel rewards now include game-specific buffs (blackjack, wordle, anagram, roulette, coinflip, lotto) plus XP/prestige rewards.
-- `!shop` lists the Wheel Spin item at 20% of your next prestige cost, rounded to the nearest 10 XP.
-
-### Admin
-- `!spintime [time]` (view/set daily wheel reset time, ET; e.g. `!spintime 5:00am`)
-- `!spinrewards [reward_key] [on|off|toggle|default]` (list/toggle reward pool)
-- `!spinreset @user` (reset that user's spin lock for the current cycle)
-
-## BlackjackCog
-
-### Non-Admin
-- `!blackjack [arg]` (alias: `!bj`)
-  - Common use:
-  - `!bj` (open/show table state)
-  - `!bj <amount>` (place a bet for the next hand)
-  - `!bj all` (go all in)
-  - `!bj leave` / `!bj stop` / `!bj exit` (leave table)
-  - Or react on the table prompt:
-    - `:dollar:` go all in
-    - `:octagonal_sign:` leave table
-    - `:arrow_forward:` deal
-  - `!bj hit`
-  - `!bj stand`
-  - `!bj dd` / `!bj doubledown`
-  - `!bj surrender`
-  - `!bj split`
-- Bets are paid in **XP**.
-- A normal win returns **2x** your wager.
-- A natural blackjack returns **2.5x** your wager.
-- A push returns your wager.
-- A surrender returns half your wager.
-- Daily eligibility is reset on a configurable ET schedule (default midnight ET).
-- After each hand, everyone must place a fresh bet to play again.
-- Daily lockout is disabled by default, but can be toggled by admin.
-
-### Admin
-- `!bjreset`
-- `!bjtime [time]` (view/set daily reset time, ET; e.g. `!bjtime 12:00am`)
-- `!bjcooldown [on|off|toggle]`
-- `!bjdebug`
-- `!bjstate`
-- `!bjintents`
-
-## VoiceCog
-
-### Non-Admin
-- `!join`
-- `!leave` (aliases: `!disconnect`, `!dc`)
-
-### Admin
-- `!voicehealth`
-
-## PlaybackCog
-
-### Non-Admin
-- `!play <link or search terms> [speed 0.1-5.0]`
-- Queues guild-local audio requests for the caller's current voice channel.
-- Plain-text input performs a YouTube top-result search via `yt-dlp` and queues the first match.
-- Optional trailing speed clamps to `0.1x`-`5.0x`.
-- Tries `yt-dlp` first, then falls back to direct file download for simpler audio URLs.
-- For age-restricted/gated YouTube videos, `yt-dlp` can retry with cookies if `YTDLP_COOKIES_FROM_BROWSER` or `YTDLP_COOKIE_FILE` is configured.
-- Rejects tracks over 20 minutes and cleans up downloaded temp files after playback.
-- Leaves voice after 30 seconds of true idleness.
-- Posts a skip-vote message with the fast-forward reaction; 50% of non-bot users in the current call must react to skip.
-
-### Admin
-- `!playskip`
-- `!playclear`
-
-## TTSCog
-
-### Non-Admin
-- `!tts` (aliases: `!ttstags`, `!ttshelp`) to view style/emotion/non-verbal tag examples
-- `!say {message} {@user}`
-- `!rerollvoice` (aliases: `!ttsreroll`, `!voicereroll`)
-- `!setvoice <voice_id> [stability] [similarity_boost] [style] [use_speaker_boost] [speed] [seed]`
-- TTS stays connected across queued `!say` requests instead of leaving/rejoining between each one.
-- If queued audio from `!play` is active in the same voice channel, TTS interrupts it and playback resumes afterward.
-- Voice auto-leaves after 30 seconds of true idleness.
-- Voice/profile is persisted globally per caller (same user keeps the same voice selection/settings across servers).
-- Voice options are pulled from available voices in your ElevenLabs account.
-- For `!setvoice`, any omitted optional settings use default profile values.
-
-### Admin
-- `!rerollvoice @user` (force reroll for another member)
-- `!ttsmodel [model_id]` (when empty, lists current available models for your account)
-
-## WakeupCog
-
-### Non-Admin
-- `!wakeup @user` (alias: `!wakeywakey @user`)
-- Caller must be in a voice channel.
-- Target must currently be in AFK.
-- Runs 10 random eligible voice-channel hops, then moves target to caller's channel.
-- If target sends no message within 60 seconds, they are moved back to AFK.
-- Wakeup lock is per-target and only clears once target returns to AFK.
-
-### Admin
-- None
-
-## StatsCog
-
-### Non-Admin
-- `!gamestats` (aliases: `!stats`, `!mystats`) for your own stats
-
-### Admin
-- `!gamestats @user` (view someone else)
-- `!guildgamestats` (alias: `!serverstats`)
-
-## AdminCog
-
-### Non-Admin
-- None
-
-### Admin
-- `!role @user @role` (toggle role)
-- `!xprate [@user ...]`
-- `!setxp <targets...> <xp>`
-- `!adjust @user <+amount|-amount>`
-- `!softreset @user`
-  Send it twice within 30 seconds to confirm. Clears current XP, prestige, and wheel rewards without deleting recorded stats.
-
-## Loaded Cogs
-
-Current entrypoint (`Paragon.py`) loads:
-- `CoreCog`
-- `WordleCog`
-- `CoinFlipCog`
-- `RouletteCog`
-- `SurpriseCog`
-- `AnagramCog`
-- `ThanksCog`
-- `LottoCog`
-- `SpinCog`
-- `PrestigeCog`
-- `BlackjackCog`
-- `VoiceCog`
-- `TTSCog`
-- `WakeupCog`
-- `StatsCog`
-- `AdminCog`
-
+- Use `paragon/emojis.py` for shared emoji and UI symbol constants.
+- Use `paragon/include.py` for small generic helpers shared across modules.
+- `paragon/include.py` currently contains: `_as_dict`, `_as_list`, `_as_int`, `_as_float`, `_fmt_num`, `_utcnow`, `_iso`, `_parse_iso`, and `_inc_num`.
+- Keep feature-specific helpers local to the module that owns the behavior.
+- Update this README whenever commands, loaded cogs, setup requirements, or repository conventions change.

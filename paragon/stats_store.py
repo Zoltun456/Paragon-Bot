@@ -2,36 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from .include import _as_dict, _as_float, _as_int, _inc_num
 from .source_keys import canonical_boost_source, normalize_boosts_by_source_map
 from .storage import _gdict, _udict
-
-
-def _as_dict(value: Any) -> dict:
-    return value if isinstance(value, dict) else {}
-
-
-def _as_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return int(default)
-
-
-def _as_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return float(default)
-
-
-def _inc_num(d: dict, key: str, amount: int | float) -> None:
-    old = d.get(key, 0)
-    if isinstance(old, bool):
-        old = 0
-    if isinstance(amount, int) and isinstance(old, int):
-        d[key] = old + amount
-        return
-    d[key] = _as_float(old) + float(amount)
 
 
 def ensure_user_stats(gid: int, uid: int) -> dict:

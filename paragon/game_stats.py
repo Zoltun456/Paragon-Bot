@@ -6,34 +6,10 @@ import discord
 from discord.ext import commands
 
 from .emojis import EMOJI_BAR_CHART, EMOJI_CHART_WITH_UPWARDS_TREND
+from .include import _as_dict, _as_float, _as_int, _fmt_num
 from .ownership import is_control_user_id
 from .stats_store import get_user_stats, iter_guild_user_stats
 from .storage import _udict
-
-
-def _as_dict(v):
-    return v if isinstance(v, dict) else {}
-
-
-def _as_float(v, default: float = 0.0) -> float:
-    try:
-        return float(v)
-    except Exception:
-        return float(default)
-
-
-def _as_int(v, default: int = 0) -> int:
-    try:
-        return int(v)
-    except Exception:
-        return int(default)
-
-
-def _fmt_num(v) -> str:
-    f = _as_float(v, 0.0)
-    if abs(f - round(f)) < 1e-9:
-        return f"{int(round(f)):,}"
-    return f"{f:,.2f}"
 
 
 def _can_view_others(ctx: commands.Context) -> bool:

@@ -61,6 +61,7 @@ from .emojis import (
     EMOJI_WHITE_CIRCLE,
 )
 from .guild_setup import ensure_guild_setup, get_log_channel
+from .include import _as_dict, _as_float, _as_int, _as_list, _fmt_num, _iso, _parse_iso, _utcnow
 from .ownership import owner_only
 from .stats_store import record_game_fields
 from .storage import _gdict, _udict, save_data
@@ -364,55 +365,6 @@ MECHANIC_DEFS = {
         "warning": "Purge the bloom with `!purge` before the rot spreads through the chamber.",
     },
 }
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _iso(dt: datetime) -> str:
-    return dt.replace(microsecond=0).isoformat()
-
-
-def _parse_iso(value: object) -> Optional[datetime]:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        dt = datetime.fromisoformat(raw)
-    except Exception:
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
-def _as_dict(value) -> dict:
-    return value if isinstance(value, dict) else {}
-
-
-def _as_list(value) -> list:
-    return value if isinstance(value, list) else []
-
-
-def _as_int(value, default: int = 0) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return int(default)
-
-
-def _as_float(value, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return float(default)
-
-
-def _fmt_num(value: int | float) -> str:
-    num = float(value)
-    if abs(num - round(num)) < 1e-9:
-        return f"{int(round(num)):,}"
-    return f"{num:,.2f}"
-
 
 def _fmt_duration_minutes(minutes: int) -> str:
     total = max(0, int(minutes))

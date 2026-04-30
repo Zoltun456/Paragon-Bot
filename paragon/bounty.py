@@ -25,6 +25,7 @@ from .config import (
     resolve_afk_channel_id,
 )
 from .guild_setup import get_log_channel
+from .include import _as_dict, _as_float, _as_int, _iso, _parse_iso, _utcnow
 from .roles import enforce_level6_exclusive
 from .stats_store import record_game_fields
 from .storage import _gdict, _udict, save_data
@@ -33,46 +34,6 @@ from .xp import grant_bonus_xp_equivalent_boost, grant_fixed_debuff, prestige_pa
 
 
 BOUNTY_VERSION = 1
-
-
-def _as_dict(value) -> dict:
-    return value if isinstance(value, dict) else {}
-
-
-def _as_int(value, default: int = 0) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return int(default)
-
-
-def _as_float(value, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return float(default)
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _iso(dt: datetime) -> str:
-    return dt.replace(microsecond=0).isoformat()
-
-
-def _parse_iso(value) -> Optional[datetime]:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        dt = datetime.fromisoformat(raw)
-    except Exception:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
-
 
 def _today_key() -> str:
     return _date_key(_today_local())
