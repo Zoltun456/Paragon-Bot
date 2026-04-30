@@ -16,7 +16,20 @@ from .config import (
     FISH_MAX_BITE_SECONDS,
     FISH_MIN_BITE_SECONDS,
 )
-from .emojis import EMOJI_HOOK
+from .emojis import (
+    EMOJI_BLACK_CIRCLE,
+    EMOJI_DOWNWARDS_BLACK_ARROW,
+    EMOJI_FISHING_POLE_AND_FISH,
+    EMOJI_HOOK,
+    EMOJI_LARGE_BLUE_CIRCLE,
+    EMOJI_LARGE_GREEN_CIRCLE,
+    EMOJI_LARGE_ORANGE_CIRCLE,
+    EMOJI_LARGE_PURPLE_CIRCLE,
+    EMOJI_LARGE_RED_CIRCLE,
+    EMOJI_OCTAGONAL_SIGN,
+    EMOJI_UPWARDS_BLACK_ARROW,
+    EMOJI_WHITE_CIRCLE,
+)
 from .fish_support import add_bait, consume_bait, get_bait, refund_bait
 from .guild_setup import ensure_guild_setup, get_fishing_channel, get_fishing_channel_id
 from .ownership import owner_only
@@ -43,11 +56,11 @@ from .storage import _gdict, _udict, save_data
 from .xp import apply_xp_change, grant_fixed_boost, prestige_cost
 
 
-DOCK_CAST_EMOJI = "\N{FISHING POLE AND FISH}"
-DOCK_STOP_EMOJI = "\N{OCTAGONAL SIGN}"
-REEL_EMOJI = "\N{FISHING POLE AND FISH}"
-LIFT_EMOJI = "\N{UPWARDS BLACK ARROW}"
-GIVE_EMOJI = "\N{DOWNWARDS BLACK ARROW}"
+DOCK_CAST_EMOJI = EMOJI_FISHING_POLE_AND_FISH
+DOCK_STOP_EMOJI = EMOJI_OCTAGONAL_SIGN
+REEL_EMOJI = EMOJI_FISHING_POLE_AND_FISH
+LIFT_EMOJI = EMOJI_UPWARDS_BLACK_ARROW
+GIVE_EMOJI = EMOJI_DOWNWARDS_BLACK_ARROW
 SET_EMOJI = EMOJI_HOOK
 SESSION_STOP_EMOJI = DOCK_STOP_EMOJI
 
@@ -58,7 +71,7 @@ CHEST_SOURCE = "fishing chest"
 RARITY_META: dict[str, dict[str, object]] = {
     "common": {
         "label": "Common",
-        "emoji": "\N{WHITE CIRCLE}",
+        "emoji": EMOJI_WHITE_CIRCLE,
         "weight": 60.0,
         "reward_pct": (1.0, 1.8),
         "required": 2,
@@ -66,7 +79,7 @@ RARITY_META: dict[str, dict[str, object]] = {
     },
     "uncommon": {
         "label": "Uncommon",
-        "emoji": "\N{LARGE GREEN CIRCLE}",
+        "emoji": EMOJI_LARGE_GREEN_CIRCLE,
         "weight": 25.0,
         "reward_pct": (1.8, 3.5),
         "required": 2,
@@ -74,7 +87,7 @@ RARITY_META: dict[str, dict[str, object]] = {
     },
     "rare": {
         "label": "Rare",
-        "emoji": "\N{LARGE BLUE CIRCLE}",
+        "emoji": EMOJI_LARGE_BLUE_CIRCLE,
         "weight": 9.0,
         "reward_pct": (4.0, 8.0),
         "required": 3,
@@ -82,7 +95,7 @@ RARITY_META: dict[str, dict[str, object]] = {
     },
     "epic": {
         "label": "Epic",
-        "emoji": "\N{LARGE PURPLE CIRCLE}",
+        "emoji": EMOJI_LARGE_PURPLE_CIRCLE,
         "weight": 4.0,
         "reward_pct": (9.0, 18.0),
         "required": 3,
@@ -90,7 +103,7 @@ RARITY_META: dict[str, dict[str, object]] = {
     },
     "legendary": {
         "label": "Legendary",
-        "emoji": "\N{LARGE ORANGE CIRCLE}",
+        "emoji": EMOJI_LARGE_ORANGE_CIRCLE,
         "weight": 1.5,
         "reward_pct": (20.0, 40.0),
         "required": 4,
@@ -98,7 +111,7 @@ RARITY_META: dict[str, dict[str, object]] = {
     },
     "mythic": {
         "label": "Mythic",
-        "emoji": "\N{LARGE RED CIRCLE}",
+        "emoji": EMOJI_LARGE_RED_CIRCLE,
         "weight": 0.45,
         "reward_pct": (45.0, 90.0),
         "required": 4,
@@ -106,7 +119,7 @@ RARITY_META: dict[str, dict[str, object]] = {
     },
     "ancient": {
         "label": "Ancient",
-        "emoji": "\N{BLACK CIRCLE}",
+        "emoji": EMOJI_BLACK_CIRCLE,
         "weight": 0.05,
         "reward_pct": (100.0, 140.0),
         "required": 5,

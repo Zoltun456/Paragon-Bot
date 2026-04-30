@@ -16,6 +16,7 @@ import discord
 from discord.ext import commands
 
 from .config import PLAYBACK_VOLUME, YTDLP_COOKIE_FILE, YTDLP_COOKIES_FROM_BROWSER
+from .emojis import EMOJI_BLACK_RIGHT_POINTING_DOUBLE_TRIANGLE
 from .ownership import is_control_user_id
 from .stats_store import record_game_fields
 from .storage import save_data
@@ -28,7 +29,7 @@ except Exception:
     YoutubeDL = None
 
 
-FAST_FORWARD_EMOJI = "\N{BLACK RIGHT-POINTING DOUBLE TRIANGLE}"
+FAST_FORWARD_EMOJI = EMOJI_BLACK_RIGHT_POINTING_DOUBLE_TRIANGLE
 MAX_PLAY_DURATION_SECONDS = 20 * 60
 MAX_PLAY_FILE_BYTES = 128 * 1024 * 1024
 MIN_PLAYBACK_SPEED = 0.5

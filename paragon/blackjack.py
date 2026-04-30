@@ -19,6 +19,31 @@ from .config import (
     BJ_SEAT_IDLE_TIMEOUT_SECONDS,
     BJ_COOLDOWN_ENABLED,
 )
+from .emojis import (
+    EMOJI_BANKNOTE_WITH_DOLLAR_SIGN,
+    EMOJI_BLACK_CLUB_SUIT,
+    EMOJI_BLACK_DIAMOND_SUIT,
+    EMOJI_BLACK_HEART_SUIT,
+    EMOJI_BLACK_RIGHT_POINTING_TRIANGLE,
+    EMOJI_BLACK_SCISSORS,
+    EMOJI_BLACK_SPADE_SUIT,
+    EMOJI_COLLISION_SYMBOL,
+    EMOJI_HAMMER_AND_WRENCH,
+    EMOJI_KEYCAP_2,
+    EMOJI_LARGE_GREEN_SQUARE,
+    EMOJI_LARGE_RED_SQUARE,
+    EMOJI_OCTAGONAL_SIGN,
+    EMOJI_RAISED_HAND,
+    EMOJI_RECYCLING_SYMBOL,
+    EMOJI_REGIONAL_INDICATOR_SYMBOL_LETTER_D,
+    EMOJI_REGIONAL_INDICATOR_SYMBOL_LETTER_H,
+    EMOJI_REGIONAL_INDICATOR_SYMBOL_LETTER_R,
+    EMOJI_REGIONAL_INDICATOR_SYMBOL_LETTER_S,
+    EMOJI_STANDING_PERSON,
+    EMOJI_VICTORY_HAND,
+    EMOJI_WAVING_WHITE_FLAG,
+    EMOJI_WHITE_RIGHT_POINTING_BACKHAND_INDEX,
+)
 from .guild_setup import get_blackjack_channel_id
 from .storage import _gdict, _udict, save_data
 from .stats_store import record_game_fields, record_xp_change
@@ -33,27 +58,27 @@ from .time_windows import LOCAL_TZ
 # Cards & Emoji UI
 # =========================
 SUITS = [
-    "\N{BLACK SPADE SUIT}",
-    "\N{BLACK HEART SUIT}",
-    "\N{BLACK DIAMOND SUIT}",
-    "\N{BLACK CLUB SUIT}",
+    EMOJI_BLACK_SPADE_SUIT,
+    EMOJI_BLACK_HEART_SUIT,
+    EMOJI_BLACK_DIAMOND_SUIT,
+    EMOJI_BLACK_CLUB_SUIT,
 ]
 RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
 
-EMOJI_DEAL = "\N{BLACK RIGHT-POINTING TRIANGLE}\N{VARIATION SELECTOR-16}"
-EMOJI_ALL_IN = "\N{BANKNOTE WITH DOLLAR SIGN}"
-EMOJI_HIT = "\N{LARGE GREEN SQUARE}"
-EMOJI_STAND = "\N{LARGE RED SQUARE}"
-EMOJI_DD = "2\N{VARIATION SELECTOR-16}\N{COMBINING ENCLOSING KEYCAP}"
-EMOJI_SURRENDER = "\N{WAVING WHITE FLAG}\N{VARIATION SELECTOR-16}"
-EMOJI_SPLIT = "\N{BLACK SCISSORS}\N{VARIATION SELECTOR-16}"
+EMOJI_DEAL = EMOJI_BLACK_RIGHT_POINTING_TRIANGLE
+EMOJI_ALL_IN = EMOJI_BANKNOTE_WITH_DOLLAR_SIGN
+EMOJI_HIT = EMOJI_LARGE_GREEN_SQUARE
+EMOJI_STAND = EMOJI_LARGE_RED_SQUARE
+EMOJI_DD = EMOJI_KEYCAP_2
+EMOJI_SURRENDER = EMOJI_WAVING_WHITE_FLAG
+EMOJI_SPLIT = EMOJI_BLACK_SCISSORS
 
 # Accept both unicode and the Discord alias for the play arrow
-DEAL_EMOJIS = {"\N{BLACK RIGHT-POINTING TRIANGLE}", EMOJI_DEAL, "arrow_forward"}
+DEAL_EMOJIS = {EMOJI_DEAL.replace("\ufe0f", ""), EMOJI_DEAL, "arrow_forward"}
 ALL_IN_EMOJIS = {EMOJI_ALL_IN, "dollar"}
 
 EMOJI_JOIN = EMOJI_ALL_IN
-EMOJI_LEAVE = "\N{OCTAGONAL SIGN}"
+EMOJI_LEAVE = EMOJI_OCTAGONAL_SIGN
 JOIN_EMOJIS = set(ALL_IN_EMOJIS)
 LEAVE_EMOJIS = {EMOJI_LEAVE, "octagonal_sign"}
 
@@ -70,10 +95,10 @@ ACTION_EMOJI_MAP = {
     EMOJI_SURRENDER: "surrender",
     EMOJI_SPLIT: "split",
     # Optional alternates:
-    "\N{REGIONAL INDICATOR SYMBOL LETTER H}": "hit",
-    "\N{REGIONAL INDICATOR SYMBOL LETTER S}": "stand",
-    "\N{REGIONAL INDICATOR SYMBOL LETTER D}": "dd",
-    "\N{REGIONAL INDICATOR SYMBOL LETTER R}": "surrender",
+    EMOJI_REGIONAL_INDICATOR_SYMBOL_LETTER_H: "hit",
+    EMOJI_REGIONAL_INDICATOR_SYMBOL_LETTER_S: "stand",
+    EMOJI_REGIONAL_INDICATOR_SYMBOL_LETTER_D: "dd",
+    EMOJI_REGIONAL_INDICATOR_SYMBOL_LETTER_R: "surrender",
 }
 
 def _norm_emoji_name(e: discord.PartialEmoji | str) -> str:
@@ -267,9 +292,9 @@ def in_right_channel(ctx: commands.Context) -> bool:
 class BlackjackCog(commands.Cog):
     """
     Blackjack table flow:
-      - Bet with `!bj <amount>` or react 💵 on the deal prompt to go all in.
-      - React 🛑 to cancel a pending bet before the hand starts.
-      - React ▶️ to deal.
+      - Bet with `!bj <amount>` or use the all-in reaction on the deal prompt.
+      - Use the cancel reaction to remove a pending bet before the hand starts.
+      - Use the deal reaction to start the hand.
       - Wagers settle directly in XP using standard blackjack payouts.
       - Optional daily loss lockout can be enabled by admin, but defaults off.
     """
@@ -286,7 +311,7 @@ class BlackjackCog(commands.Cog):
 
     async def _dprint(self, guild: discord.Guild, channel: discord.TextChannel, msg: str):
         if self._dbg(guild.id):
-            await channel.send(f"🛠️ **BJ DEBUG**: {msg}")
+            await channel.send(f"{EMOJI_HAMMER_AND_WRENCH} **BJ DEBUG**: {msg}")
 
     def _cooldown_enabled(self, gid: int) -> bool:
         st = _table(gid)
@@ -796,11 +821,11 @@ class BlackjackCog(commands.Cog):
         })
         await save_data()
         if refunds:
-            lines = ["♻️ **Blackjack reset by admin. Bets refunded:**"] + [f"- **{n}**: {b} XP" for n, b in refunds]
+            lines = [f"{EMOJI_RECYCLING_SYMBOL} **Blackjack reset by admin. Bets refunded:**"] + [f"- **{n}**: {b} XP" for n, b in refunds]
             await ctx.send("\n".join(lines))
         else:
-            await ctx.send("♻️ **Blackjack reset by admin.** No active bets to refund.")
-        await ctx.send("♻️ **Blackjack table reset. Betting is open.**")
+            await ctx.send(f"{EMOJI_RECYCLING_SYMBOL} **Blackjack reset by admin.** No active bets to refund.")
+        await ctx.send(f"{EMOJI_RECYCLING_SYMBOL} **Blackjack table reset. Betting is open.**")
         await self._post_new_deal_button(ctx.guild, ctx.channel)
 
     @commands.command(name="bjtime")
@@ -1218,7 +1243,7 @@ class BlackjackCog(commands.Cog):
         can_split = (not p.get("split")) and len(hand) == 2 and rank_of(hand[0]) == rank_of(hand[1])
         hand_label = "Hand 1" if p.get("active_hand",0) == 0 else "Hand 2"
         msg = await channel.send(
-            f"👉 **{guild.get_member(cur_uid).display_name}**, your move - **{hand_label}** - react: "
+            f"{EMOJI_WHITE_RIGHT_POINTING_BACKHAND_INDEX} **{guild.get_member(cur_uid).display_name}**, your move - **{hand_label}** - react: "
             f"{EMOJI_HIT} Hit | {EMOJI_STAND} Stand | {EMOJI_DD} Double | {EMOJI_SURRENDER} Surrender"
             + (f" | {EMOJI_SPLIT} Split" if can_split else "")
         )
@@ -1278,11 +1303,11 @@ class BlackjackCog(commands.Cog):
         self._touch_player(p)
         tot, _ = value_of_hand(hand); await save_data()
         label = "Hand 1" if p.get("active_hand",0)==0 else "Hand 2"
-        await channel.send(f"✋ **{guild.get_member(uid).display_name} HIT** ({label}) -> drew `{card}` -> {pretty(hand)} (**{tot}**)")
+        await channel.send(f"{EMOJI_RAISED_HAND} **{guild.get_member(uid).display_name} HIT** ({label}) -> drew `{card}` -> {pretty(hand)} (**{tot}**)")
         if tot > 21:
             self._set_flag(p, "busted", True); self._set_flag(p, "finished", True); await save_data()
             record_game_fields(guild.id, uid, "blackjack", busts=1)
-            await channel.send(f"💥 **{guild.get_member(uid).display_name} BUSTED** ({label}).")
+            await channel.send(f"{EMOJI_COLLISION_SYMBOL} **{guild.get_member(uid).display_name} BUSTED** ({label}).")
             # If split, switch to the other hand if it remains
             if await self._advance_after_hand_if_split(guild, channel, st, uid): return
             await self._advance_turn_or_dealer(self._ShimCtx(guild, channel), st); return
@@ -1293,7 +1318,7 @@ class BlackjackCog(commands.Cog):
         self._set_flag(p, "stood", True); self._set_flag(p, "finished", True); await save_data()
         self._touch_player(p)
         label = "Hand 1" if p.get("active_hand",0)==0 else "Hand 2"
-        await channel.send(f"🧍 **{guild.get_member(uid).display_name} STANDS** ({label}).")
+        await channel.send(f"{EMOJI_STANDING_PERSON} **{guild.get_member(uid).display_name} STANDS** ({label}).")
         if await self._advance_after_hand_if_split(guild, channel, st, uid): return
         await self._advance_turn_or_dealer(self._ShimCtx(guild, channel), st)
 
@@ -1326,11 +1351,11 @@ class BlackjackCog(commands.Cog):
         tot, _ = value_of_hand(hand)
         self._set_flag(p, "finished", True); self._set_flag(p, "stood", True); await save_data()
         label = "Hand 1" if p.get("active_hand",0)==0 else "Hand 2"
-        await channel.send(f"✌️ **{guild.get_member(uid).display_name} DOUBLE DOWN** ({label}) -> drew `{card}` -> {pretty(hand)} (**{tot}**)")
+        await channel.send(f"{EMOJI_VICTORY_HAND} **{guild.get_member(uid).display_name} DOUBLE DOWN** ({label}) -> drew `{card}` -> {pretty(hand)} (**{tot}**)")
         if tot > 21:
             self._set_flag(p, "busted", True); await save_data()
             record_game_fields(guild.id, uid, "blackjack", busts=1)
-            await channel.send(f"💥 **{guild.get_member(uid).display_name} BUSTED** ({label}).")
+            await channel.send(f"{EMOJI_COLLISION_SYMBOL} **{guild.get_member(uid).display_name} BUSTED** ({label}).")
         if await self._advance_after_hand_if_split(guild, channel, st, uid): return
         await self._advance_turn_or_dealer(self._ShimCtx(guild, channel), st)
 
@@ -1344,7 +1369,7 @@ class BlackjackCog(commands.Cog):
         record_game_fields(guild.id, uid, "blackjack", surrenders=1)
         await save_data()
         label = "Hand 1" if p.get("active_hand",0)==0 else "Hand 2"
-        await channel.send(f"🏳️ **{guild.get_member(uid).display_name} SURRENDERS** ({label}) (loses half their bet).")
+        await channel.send(f"{EMOJI_WAVING_WHITE_FLAG} **{guild.get_member(uid).display_name} SURRENDERS** ({label}) (loses half their bet).")
         if await self._advance_after_hand_if_split(guild, channel, st, uid): return
         await self._advance_turn_or_dealer(self._ShimCtx(guild, channel), st)
 
@@ -1383,7 +1408,7 @@ class BlackjackCog(commands.Cog):
         # Reset flags for hand2
         p["stood2"] = p["busted2"] = p["finished2"] = p["doubled2"] = p["surrendered2"] = False
         await save_data()
-        await channel.send(f"✂️ **{guild.get_member(uid).display_name} SPLITS** -> Hand 1: {pretty(p['hand'])} | Hand 2: {pretty(p['hand2'])}")
+        await channel.send(f"{EMOJI_BLACK_SCISSORS} **{guild.get_member(uid).display_name} SPLITS** -> Hand 1: {pretty(p['hand'])} | Hand 2: {pretty(p['hand2'])}")
         # Continue acting on Hand 1; player can hit/stand/etc.; when finished, engine will switch to Hand 2
         self._start_turn(st); await save_data()
 

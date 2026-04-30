@@ -20,6 +20,18 @@ It provides:
 - `!play` uses `yt-dlp` when available, with a direct-download fallback for simple file links
 - Age-restricted YouTube playback can use `YTDLP_COOKIES_FROM_BROWSER` or `YTDLP_COOKIE_FILE` in `.env` for authenticated `yt-dlp` retries
 
+## Project Conventions
+
+### Emoji Constants
+
+- Define reusable emoji and shared UI-symbol constants in `paragon/emojis.py`.
+- Import those constants into modules instead of embedding Unicode emoji literals or Unicode-name escapes directly in Python files.
+- When documentation needs to mention a reaction, prefer its name or purpose in prose unless the literal character is specifically important.
+
+### Adding More Rules
+
+- Add future repository rules as new `###` subsections under `Project Conventions` so this section can expand without becoming one long checklist.
+
 ## Command Reference (By Cog)
 
 `Admin` below means elevated access for that command (owner/admin checks in code).  
@@ -190,7 +202,7 @@ It provides:
 - For age-restricted/gated YouTube videos, `yt-dlp` can retry with cookies if `YTDLP_COOKIES_FROM_BROWSER` or `YTDLP_COOKIE_FILE` is configured.
 - Rejects tracks over 20 minutes and cleans up downloaded temp files after playback.
 - Leaves voice after 30 seconds of true idleness.
-- Posts a skip-vote message with `⏩`; 50% of non-bot users in the current call must react to skip.
+- Posts a skip-vote message with the fast-forward reaction; 50% of non-bot users in the current call must react to skip.
 
 ### Admin
 - `!playskip`
