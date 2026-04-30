@@ -29,6 +29,7 @@ HELP_DESCRIPTIONS = {
     "claim": "Claim the active surprise drop.",
     "claimnow": "Admin: spawn a surprise drop immediately.",
     "quest": "Show your daily contract or inspect another user's contract progress.",
+    "bounty": "Show today's bounty target, start a voice claim on them, or stop an active claim if it's on you.",
     "boss": "Show the current raid boss, affix, phase, timers, and where the fight is happening.",
     "attack": "Attack the current raid boss from inside its boss channel.",
     "resurrect": "Revive a downed raider in the boss channel so they can rejoin the fight.",

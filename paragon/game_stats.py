@@ -210,6 +210,19 @@ def _game_stats_lines(games: dict) -> list[str]:
             f"failure penalties {_fmt_num(boss.get('failure_penalties', 0))}"
         )
 
+    bounty = _as_dict(games.get("bounty"))
+    if bounty:
+        out.append(
+            "Bounty: "
+            f"assigned {_fmt_num(bounty.get('assigned', 0))} | "
+            f"claims {_fmt_num(bounty.get('claims_started', 0))}/{_fmt_num(bounty.get('claims_completed', 0))} | "
+            f"stops {_fmt_num(bounty.get('stops_used', 0))} | "
+            f"canceled {_fmt_num(bounty.get('claims_canceled', 0))} | "
+            f"W-L-S {_fmt_num(bounty.get('wins', 0))}-{_fmt_num(bounty.get('losses', 0))}-{_fmt_num(bounty.get('survives', 0))} | "
+            f"exposure {_fmt_num(bounty.get('exposure_minutes_total', 0))}m | "
+            f"reward eq {_fmt_num(bounty.get('reward_minutes_equivalent_total', 0))}m"
+        )
+
     return out
 
 
@@ -378,6 +391,9 @@ class StatsCog(commands.Cog):
                         "xp_wagered_total", "xp_profit_total",
                         "xp_spent_total", "spent_total", "xp_awarded_total",
                         "boost_seed_xp_total", "boost_percent_total", "boost_minutes_total",
+                        "assigned", "claims_started", "claims_completed", "wins", "losses",
+                        "survives", "stops_used", "claims_canceled", "reward_minutes_equivalent_total",
+                        "exposure_minutes_total", "exposure_companion_total",
                     }
                 )
                 lines.append(f"- {game}: {summary if summary else 'tracked'}")

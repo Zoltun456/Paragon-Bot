@@ -8,6 +8,7 @@ from paragon.admin import AdminCog
 from paragon.anagram import AnagramCog
 from paragon.blackjack import BlackjackCog
 from paragon.boss import BossCog
+from paragon.bounty import BountyCog
 from paragon.coinflip import CoinFlipCog
 from paragon.config import AUTHOR_USER_ID, COMMAND_PREFIX, TOKEN
 from paragon.contracts import ContractsCog
@@ -59,6 +60,7 @@ def _build_cogs() -> list[commands.Cog]:
         SurpriseCog(bot),
         AnagramCog(bot),
         ContractsCog(bot),
+        BountyCog(bot),
         FishCog(bot),
         #BossCog(bot),
         ThanksCog(bot),
