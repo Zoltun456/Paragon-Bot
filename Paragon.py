@@ -51,47 +51,47 @@ async def _global_check(_ctx):
     return True
 
 
-def _build_cogs() -> list[commands.Cog]:
-    return [
-        CoreCog(bot),
-        WordleCog(bot),
-        CoinFlipCog(bot),
-        RouletteCog(bot),
-        SurpriseCog(bot),
-        AnagramCog(bot),
-        ContractsCog(bot),
-        BountyCog(bot),
-        FishCog(bot),
-        #BossCog(bot),
-        ThanksCog(bot),
-        LottoCog(bot),
-        SpinCog(bot),
-        ShopCog(bot),
-        PrestigeCog(bot),
-        QuietCog(bot),
-        BlackjackCog(bot),
-        PlaybackCog(bot),
-        VoiceCog(bot),
-        WakeupCog(bot),
-        TTSCog(bot),
-        StatsCog(bot),
-        AdminCog(bot),
-    ]
+COG_TYPES: tuple[type[commands.Cog], ...] = (
+    CoreCog,
+    WordleCog,
+    CoinFlipCog,
+    RouletteCog,
+    SurpriseCog,
+    AnagramCog,
+    ContractsCog,
+    BountyCog,
+    FishCog,
+    # BossCog,
+    ThanksCog,
+    LottoCog,
+    SpinCog,
+    ShopCog,
+    PrestigeCog,
+    QuietCog,
+    BlackjackCog,
+    PlaybackCog,
+    VoiceCog,
+    WakeupCog,
+    TTSCog,
+    StatsCog,
+    AdminCog,
+)
 
 
-async def _add_cog(cog: commands.Cog) -> None:
-    name = cog.__class__.__name__
+async def _add_cog(cog_type: type[commands.Cog]) -> None:
+    name = cog_type.__name__
     if bot.get_cog(name) is not None:
         return
 
+    cog = cog_type(bot)
     maybe = bot.add_cog(cog)
     if inspect.isawaitable(maybe):
         await maybe
 
 
 async def setup_cogs() -> None:
-    for cog in _build_cogs():
-        await _add_cog(cog)
+    for cog_type in COG_TYPES:
+        await _add_cog(cog_type)
 
 
 def preload_cogs_if_sync_add_cog() -> None:
@@ -100,10 +100,11 @@ def preload_cogs_if_sync_add_cog() -> None:
     """
     if inspect.iscoroutinefunction(bot.add_cog):
         return
-    for cog in _build_cogs():
-        name = cog.__class__.__name__
+    for cog_type in COG_TYPES:
+        name = cog_type.__name__
         if bot.get_cog(name) is not None:
             continue
+        cog = cog_type(bot)
         bot.add_cog(cog)
 
 

@@ -308,8 +308,14 @@ class BlackjackCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.debug_enabled: Dict[int, bool] = {}  # guild_id -> bool
+
+    async def cog_load(self):
         if not self.guard_loop.is_running():
             self.guard_loop.start()
+
+    def cog_unload(self):
+        if self.guard_loop.is_running():
+            self.guard_loop.cancel()
 
     # -------- Debug helpers --------
     def _dbg(self, guild_id: int) -> bool:
