@@ -252,6 +252,20 @@ class PlaybackCog(commands.Cog):
     def _yt_dlp_auth_available(self) -> bool:
         return bool(str(YTDLP_COOKIE_FILE or "").strip() or _cookies_from_browser_opt())
 
+    def _apply_youtube_auth_tuning(self, source: str, opts: dict) -> dict:
+        out = dict(opts)
+        if not _is_youtube_source(source):
+            return out
+        out["js_runtimes"] = {"node": {}}
+        out["remote_components"] = {"ejs:github"}
+        extractor_args = dict(out.get("extractor_args") or {})
+        yt_args = dict(extractor_args.get("youtube") or {})
+        # The mweb client pairs cleanly with authenticated cookies and PO-token providers.
+        yt_args["player_client"] = ["mweb"]
+        extractor_args["youtube"] = yt_args
+        out["extractor_args"] = extractor_args
+        return out
+
     def _apply_yt_dlp_auth(self, opts: dict) -> dict:
         out = dict(opts)
         cookie_file = str(YTDLP_COOKIE_FILE or "").strip()
@@ -488,15 +502,17 @@ class PlaybackCog(commands.Cog):
                 "skip_download": True,
                 "socket_timeout": 20,
             }
+            tuned_auth_opts = None
+            if self._should_retry_with_auth(lookup_value):
+                tuned_auth_opts = self._apply_yt_dlp_auth(
+                    self._apply_youtube_auth_tuning(lookup_value, opts),
+                )
             try:
-                info = self._extract_info_with_ytdlp(lookup_value, opts=opts)
+                info = self._extract_info_with_ytdlp(lookup_value, opts=tuned_auth_opts or opts)
             except Exception as e:
-                if self._should_retry_with_auth(lookup_value):
+                if tuned_auth_opts is not None:
                     try:
-                        info = self._extract_info_with_ytdlp(
-                            lookup_value,
-                            opts=self._apply_yt_dlp_auth(opts),
-                        )
+                        info = self._extract_info_with_ytdlp(lookup_value, opts=opts)
                     except Exception:
                         if not is_url:
                             raise RuntimeError(f'No YouTube results found for "{src}".')
@@ -550,18 +566,27 @@ class PlaybackCog(commands.Cog):
             "nopart": True,
             "socket_timeout": 30,
         }
+        tuned_auth_opts = None
+        if self._should_retry_with_auth(req.source_url):
+            tuned_auth_opts = self._apply_yt_dlp_auth(
+                self._apply_youtube_auth_tuning(req.source_url, opts),
+            )
         try:
             info = None
             path = ""
             try:
-                info, path = self._download_with_ytdlp(req.source_url, opts=opts, temp_dir=temp_dir)
+                info, path = self._download_with_ytdlp(
+                    req.source_url,
+                    opts=tuned_auth_opts or opts,
+                    temp_dir=temp_dir,
+                )
             except Exception:
-                if not self._should_retry_with_auth(req.source_url):
+                if tuned_auth_opts is None:
                     raise
                 self._clear_temp_dir_files(temp_dir)
                 info, path = self._download_with_ytdlp(
                     req.source_url,
-                    opts=self._apply_yt_dlp_auth(opts),
+                    opts=opts,
                     temp_dir=temp_dir,
                 )
         except Exception as e:

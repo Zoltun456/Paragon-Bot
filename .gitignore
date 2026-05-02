@@ -8,3 +8,6 @@ venv/
 env/
 paragon_data/
 OLD/*
+cookies.txt
+*.cookies.txt
+youtube_cookies.txt

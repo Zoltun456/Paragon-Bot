@@ -12,6 +12,11 @@ Discord XP, voice, and mini-game bot with persistent per-guild storage.
 - Voice features need FFmpeg
 - `!say` uses ElevenLabs and needs `ELEVEN_API`
 - `!play` uses `yt-dlp`; `YTDLP_COOKIES_FROM_BROWSER` or `YTDLP_COOKIE_FILE` can help with restricted YouTube playback
+- Restricted YouTube playback works best with a current exported cookie file plus a JavaScript runtime such as `node`
+- Keep YouTube cookies local only. Do not commit browser cookies or exported `cookies.txt` files to the repo.
+- Preferred local setup for Chrome: add `YTDLP_COOKIES_FROM_BROWSER=chrome` to your local `.env`
+- If your YouTube login lives in a non-default Chrome profile, use `YTDLP_COOKIES_FROM_BROWSER=chrome:Profile 1` or `chrome:Profile 2`
+- Use `YTDLP_COOKIE_FILE` only for a local exported cookie file that stays gitignored
 
 ## Active Cogs
 
