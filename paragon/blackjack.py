@@ -166,6 +166,12 @@ def _natural_hand_from_shoe(st: dict) -> list[str]:
     return [ten, ace]
 
 
+def _opening_hand_snapshot(cards: object) -> list[str]:
+    if not isinstance(cards, list) or len(cards) < 2:
+        return []
+    return [str(cards[0]), str(cards[1])]
+
+
 def _sanitize_reset_time(hour: int, minute: int) -> tuple[int, int]:
     try:
         h = int(hour)
@@ -388,6 +394,8 @@ class BlackjackCog(commands.Cog):
                 "locked": 0,
                 "hand": [],  # Hand 1
                 "hand2": [], # Hand 2 (after split)
+                "dealt_hand": [],
+                "replay_hand": [],
                 "split": False,
                 "active_hand": 0,  # 0 or 1
                 # per-hand flags
@@ -403,6 +411,8 @@ class BlackjackCog(commands.Cog):
         else:
             p.setdefault("in_table", False)
             p.setdefault("locked", 0)
+            p.setdefault("dealt_hand", [])
+            p.setdefault("replay_hand", [])
             p.setdefault("last_active_ts", now_ts())
         return p
 
@@ -474,7 +484,7 @@ class BlackjackCog(commands.Cog):
             st["shoe"] = new_shoe(4)
         for p in st["players"].values():
             p.update({
-                "hand": [], "hand2": [],
+                "hand": [], "hand2": [], "dealt_hand": [],
                 "split": False, "active_hand": 0,
                 "status": "betting",
                 "stood": False, "busted": False, "finished": False, "doubled": False, "surrendered": False,
@@ -710,14 +720,18 @@ class BlackjackCog(commands.Cog):
         *,
         reason: str,
         refund_locked: bool,
+        preserve_replay_hand: bool = False,
         announce: bool = True,
     ):
         st = _table(guild.id)
         p = self._player(guild.id, uid)
         member = guild.get_member(uid)
         locked = int(p.get("locked", 0))
+        replay_hand = _opening_hand_snapshot(p.get("dealt_hand")) or _opening_hand_snapshot(p.get("hand"))
         if refund_locked and locked > 0 and member:
             await self._apply_member_xp(guild, member, locked, sync_level=False, source="blackjack refund")
+        if preserve_replay_hand and replay_hand:
+            p["replay_hand"] = replay_hand
 
         p.update(
             {
@@ -725,6 +739,7 @@ class BlackjackCog(commands.Cog):
                 "locked": 0,
                 "hand": [],
                 "hand2": [],
+                "dealt_hand": [],
                 "split": False,
                 "active_hand": 0,
                 "status": "done",
@@ -1048,6 +1063,7 @@ class BlackjackCog(commands.Cog):
                 "locked": 0,
                 "hand": [],
                 "hand2": [],
+                "dealt_hand": [],
                 "split": False,
                 "active_hand": 0,
                 "stood": False,
@@ -1099,18 +1115,30 @@ class BlackjackCog(commands.Cog):
                     st["players"][str(uid)]["hand"].append(self._deal_card(st))
                 st["dealer"].append(self._deal_card(st))
 
+            forced_natural_ids: set[int] = set()
             forced_natural_users: list[str] = []
             for uid in ready:
                 if not consume_blackjack_natural_charge(guild.id, uid):
                     continue
                 p = st["players"][str(uid)]
                 p["hand"] = _natural_hand_from_shoe(st)
+                forced_natural_ids.add(uid)
                 mbr = guild.get_member(uid)
                 forced_natural_users.append(mbr.display_name if mbr else str(uid))
 
             for uid in ready:
-                st["players"][str(uid)]["status"] = "acting"
-                self._touch_player(st["players"][str(uid)])
+                if uid in forced_natural_ids:
+                    continue
+                p = st["players"][str(uid)]
+                replay_hand = _opening_hand_snapshot(p.get("replay_hand"))
+                if replay_hand:
+                    p["hand"] = replay_hand
+
+            for uid in ready:
+                p = st["players"][str(uid)]
+                p["dealt_hand"] = list(p["hand"])
+                p["status"] = "acting"
+                self._touch_player(p)
 
             self._touch(st); await save_data()
 
@@ -1673,18 +1701,21 @@ class BlackjackCog(commands.Cog):
                     cur_uid,
                     reason=f"no action for more than {timeout_s // 60} minutes",
                     refund_locked=True,
+                    preserve_replay_hand=True,
                     announce=True,
                 )
 
                 if not any(x.get("in_table") for x in st["players"].values()):
-                    st.update({
-                        "active": True, "phase": "betting", "players": {}, "dealer": [],
-                        "turn_idx": 0, "turn_started_ts": 0, "dealing_lock": False,
-                        "deal_msg_id": 0, "action_msg_id": 0
-                    })
-                    await save_data()
-                    await ch.send("No active players remain. Table is open.")
-                    await self._post_new_deal_button(guild, ch)
+                    if st.get("phase") not in ("betting", "idle"):
+                        st.update({
+                            "active": True, "phase": "betting", "dealer": [],
+                            "turn_idx": 0, "turn_started_ts": 0, "dealing_lock": False,
+                            "action_msg_id": 0,
+                        })
+                        await save_data()
+                    if not st.get("deal_msg_id"):
+                        await ch.send("No active players remain. Table is open.")
+                        await self._post_new_deal_button(guild, ch)
     @guard_loop.before_loop
     async def _before_guard(self):
         await self.bot.wait_until_ready()
