@@ -256,14 +256,20 @@ class PlaybackCog(commands.Cog):
         out = dict(opts)
         if not _is_youtube_source(source):
             return out
-        out["js_runtimes"] = {"node": {}}
-        out["remote_components"] = {"ejs:github"}
-        extractor_args = dict(out.get("extractor_args") or {})
-        yt_args = dict(extractor_args.get("youtube") or {})
-        # The mweb client pairs cleanly with authenticated cookies and PO-token providers.
-        yt_args["player_client"] = ["mweb"]
-        extractor_args["youtube"] = yt_args
-        out["extractor_args"] = extractor_args
+        js_runtimes = dict(out.get("js_runtimes") or {})
+        js_runtimes.setdefault("node", {})
+        out["js_runtimes"] = js_runtimes
+
+        remote_components = out.get("remote_components")
+        if isinstance(remote_components, dict):
+            enabled_components = list(remote_components.keys())
+        elif isinstance(remote_components, str):
+            enabled_components = [remote_components]
+        else:
+            enabled_components = list(remote_components or [])
+        if "ejs:github" not in enabled_components:
+            enabled_components.append("ejs:github")
+        out["remote_components"] = enabled_components
         return out
 
     def _apply_yt_dlp_auth(self, opts: dict) -> dict:
@@ -289,6 +295,16 @@ class PlaybackCog(commands.Cog):
             " This may be age-restricted or gated. Configure `YTDLP_COOKIES_FROM_BROWSER` "
             "or `YTDLP_COOKIE_FILE` to let yt-dlp retry with an authenticated YouTube session."
         )
+
+    def _format_ytdlp_error(self, source: str, error: Exception, *, auth_attempted: bool) -> str:
+        err_text = str(error)
+        if auth_attempted and _is_youtube_source(source) and "Sign in to confirm your age" in err_text:
+            return (
+                "yt-dlp could not inspect that link even with the configured YouTube cookies. "
+                "YouTube still reported that the session is not age-authorized for this video. "
+                "Re-export cookies from a signed-in 18+ account that can open this exact link on youtube.com."
+            )
+        return f"yt-dlp could not inspect that link: {err_text}{self._auth_failure_hint(source)}"
 
     def _extract_info_with_ytdlp(self, source: str, *, opts: dict) -> dict:
         with YoutubeDL(opts) as ydl:
@@ -513,16 +529,20 @@ class PlaybackCog(commands.Cog):
                 if tuned_auth_opts is not None:
                     try:
                         info = self._extract_info_with_ytdlp(lookup_value, opts=opts)
-                    except Exception:
+                    except Exception as plain_error:
                         if not is_url:
                             raise RuntimeError(f'No YouTube results found for "{src}".')
-                        raise
+                        raise RuntimeError(
+                            self._format_ytdlp_error(
+                                lookup_value,
+                                plain_error,
+                                auth_attempted=True,
+                            )
+                        ) from plain_error
                 else:
                     if not is_url:
                         raise RuntimeError(f'No YouTube results found for "{src}".')
-                    raise RuntimeError(
-                        f"yt-dlp could not inspect that link: {e}{self._auth_failure_hint(lookup_value)}"
-                    ) from e
+                    raise RuntimeError(self._format_ytdlp_error(lookup_value, e, auth_attempted=False)) from e
             try:
                 duration = float(info.get("duration") or 0.0)
                 filesize = int(info.get("filesize") or info.get("filesize_approx") or 0)

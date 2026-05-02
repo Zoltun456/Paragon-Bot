@@ -1133,6 +1133,8 @@ class BlackjackCog(commands.Cog):
                 replay_hand = _opening_hand_snapshot(p.get("replay_hand"))
                 if replay_hand:
                     p["hand"] = replay_hand
+                    # Timeout replays are single-use; consume them once dealt.
+                    p["replay_hand"] = []
 
             for uid in ready:
                 p = st["players"][str(uid)]
