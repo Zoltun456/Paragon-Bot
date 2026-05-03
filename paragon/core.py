@@ -29,6 +29,7 @@ HELP_DESCRIPTIONS = {
     "roulette": "Roulette duel with 20% base odds, 2.5% per prestige gap, and symmetric hit/backfire timeouts centered at 60s.",
     "claim": "Claim the active surprise drop.",
     "claimnow": "Admin: spawn a surprise drop immediately.",
+    "checklist": "Show your current daily-cycle checklist, or inspect another user's checklist if you're elevated.",
     "quest": "Show your daily contract or inspect another user's contract progress.",
     "bounty": "Show today's bounty target, start a voice claim on them, or stop an active claim if it's on you.",
     "boss": "Show the current raid boss, affix, phase, timers, and where the fight is happening.",

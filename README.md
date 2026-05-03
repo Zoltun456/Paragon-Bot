@@ -23,7 +23,7 @@ Discord XP, voice, and mini-game bot with persistent per-guild storage.
 Loaded by default from `Paragon.py`:
 
 - `CoreCog`, `WordleCog`, `CoinFlipCog`, `RouletteCog`, `SurpriseCog`, `AnagramCog`
-- `ContractsCog`, `BountyCog`, `FishCog`, `ThanksCog`, `LottoCog`, `SpinCog`
+- `ContractsCog`, `ChecklistCog`, `BountyCog`, `FishCog`, `ThanksCog`, `LottoCog`, `SpinCog`
 - `ShopCog`, `PrestigeCog`, `QuietCog`, `BlackjackCog`
 - `PlaybackCog`, `VoiceCog`, `WakeupCog`, `TTSCog`
 - `StatsCog`, `AdminCog`
@@ -60,6 +60,7 @@ Access legend:
 
 | Command | Aliases | Access | Purpose |
 |---|---|---:|---|
+| `!checklist [@user]` | `!check` | User / Elevated | Show what you still have left in the current daily cycle; elevated users can inspect others |
 | `!quest [@user]` | `!q` | User | Show daily contract progress |
 | `!bounty [@user / stop]` | `!b` | User | Show, start, or stop the daily bounty flow |
 | `!claim` | none | User | Claim the active surprise drop |
