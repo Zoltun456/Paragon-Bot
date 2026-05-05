@@ -67,38 +67,72 @@ class QuietCog(commands.Cog):
         if still_muted:
             return
         self._active_mutes.pop(key, None)
+        self._cancel_unmute_task(guild_id, user_id)
+
+    def _cancel_unmute_task(self, guild_id: int, user_id: int) -> None:
+        key = self._key(guild_id, user_id)
         task = self._unmute_tasks.pop(key, None)
         if task is not None:
             task.cancel()
 
     def _schedule_unmute(self, guild_id: int, user_id: int) -> None:
         key = self._key(guild_id, user_id)
-        task = self._unmute_tasks.get(key)
-        if task is not None:
-            task.cancel()
-        self._unmute_tasks[key] = asyncio.create_task(self._finish_mute(guild_id, user_id))
+        self._cancel_unmute_task(guild_id, user_id)
+        task = asyncio.create_task(self._finish_mute(guild_id, user_id))
+        self._unmute_tasks[key] = task
+
+    async def _expire_mute_for_member(self, member: discord.Member, *, cancel_task: bool) -> bool:
+        guild = getattr(member, "guild", None)
+        if guild is None:
+            return True
+
+        key = self._key(guild.id, member.id)
+        expires_at = int(self._active_mutes.get(key, 0))
+        if expires_at <= 0:
+            if cancel_task:
+                self._cancel_unmute_task(guild.id, member.id)
+            return True
+        if expires_at > _now_ts():
+            return False
+
+        voice_state = getattr(member, "voice", None)
+        if voice_state is None or voice_state.channel is None:
+            return False
+
+        if bool(voice_state.mute):
+            try:
+                await member.edit(mute=False, reason=f"{COMMAND_PREFIX}shh expired")
+            except (discord.Forbidden, discord.HTTPException):
+                return False
+
+        self._active_mutes.pop(key, None)
+        if cancel_task:
+            self._cancel_unmute_task(guild.id, member.id)
+        return True
 
     async def _finish_mute(self, guild_id: int, user_id: int) -> None:
         key = self._key(guild_id, user_id)
-        expires_at = int(self._active_mutes.get(key, 0))
-        if expires_at <= 0:
-            self._unmute_tasks.pop(key, None)
-            return
-
-        delay = max(0, expires_at - _now_ts())
-        if delay > 0:
-            await asyncio.sleep(delay)
-
-        guild = self.bot.get_guild(guild_id)
-        member = guild.get_member(user_id) if guild is not None else None
+        current_task = asyncio.current_task()
         try:
-            if member is not None and getattr(member, "voice", None) and member.voice.channel is not None and bool(member.voice.mute):
-                await member.edit(mute=False, reason=f"{COMMAND_PREFIX}shh expired")
-            self._active_mutes.pop(key, None)
-        except (discord.Forbidden, discord.HTTPException):
-            pass
+            expires_at = int(self._active_mutes.get(key, 0))
+            if expires_at <= 0:
+                return
+
+            delay = max(0, expires_at - _now_ts())
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                self._active_mutes.pop(key, None)
+                return
+
+            member = guild.get_member(user_id)
+            if member is not None:
+                await self._expire_mute_for_member(member, cancel_task=False)
         finally:
-            self._unmute_tasks.pop(key, None)
+            if self._unmute_tasks.get(key) is current_task:
+                self._unmute_tasks.pop(key, None)
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -116,14 +150,7 @@ class QuietCog(commands.Cog):
             return
 
         if expires_at <= _now_ts():
-            self._unmute_tasks.pop(key, None)
-            if after.channel is not None:
-                if bool(after.mute):
-                    try:
-                        await member.edit(mute=False, reason=f"{COMMAND_PREFIX}shh expired")
-                    except (discord.Forbidden, discord.HTTPException):
-                        pass
-                self._active_mutes.pop(key, None)
+            await self._expire_mute_for_member(member, cancel_task=True)
             return
 
         if after.channel is not None and before.mute and not bool(after.mute):
