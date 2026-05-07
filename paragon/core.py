@@ -31,7 +31,7 @@ HELP_DESCRIPTIONS = {
     "claimnow": "Admin: spawn a surprise drop immediately.",
     "checklist": "Show your current daily-cycle checklist, or inspect another user's checklist if you're elevated.",
     "quest": "Show your daily contract or inspect another user's contract progress.",
-    "bounty": "Show today's bounty target, start a voice claim on them, or stop an active claim if it's on you.",
+    "bounty": "Show today's bounty target, start a voice claim with `claim`, or stop an active claim if it's on you.",
     "boss": "Show the current raid boss, affix, phase, timers, and where the fight is happening.",
     "attack": "Attack the current raid boss from inside its boss channel.",
     "resurrect": "Revive a downed raider in the boss channel so they can rejoin the fight.",
@@ -84,6 +84,7 @@ HELP_DESCRIPTIONS = {
     "xprate": "Admin: show passive XP/min rates.",
     "setxp": "Admin: set total XP for users or roles.",
     "adjust": "Admin: add or subtract XP from a user.",
+    "retroprestige": "Admin: remap prestige tiers from logged prestige-spend XP under the current curve.",
     "softreset": "Admin: reset a user's current XP, prestige, and wheel rewards without deleting stats.",
     "fishreroll": "Owner: reroll the current fishing water state immediately.",
 }

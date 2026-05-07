@@ -1,5 +1,5 @@
 import time
-from typing import Union
+from typing import Optional, Union
 
 import discord
 from discord.ext import commands
@@ -8,11 +8,13 @@ from .config import BASE_XP_PER_MINUTE
 from .ownership import owner_only
 from .roles import announce_level_up, enforce_level6_exclusive, sync_level_roles
 from .stats_store import record_xp_change
-from .storage import _udict, save_data
+from .storage import _gdict, _udict, save_data
 from .xp import (
     _compute_level_from_total_xp,
     apply_xp_change,
     get_gain_state,
+    prestige_cost,
+    prestige_state_from_spent_xp,
 )
 
 SOFTRESET_CONFIRM_TTL_SECONDS = 30
@@ -84,6 +86,39 @@ def _soft_reset_member_state(member: discord.Member) -> dict[str, int]:
             "wheel_buffs_cleared": had_wheel_buffs,
             "boosts_removed": removed_boosts,
             "debuffs_removed": removed_debuffs,
+        }
+
+
+def _historical_prestige_spent_xp(u: dict) -> int:
+        stats = u.get("stats")
+        if not isinstance(stats, dict):
+            return 0
+        xp = stats.get("xp")
+        if not isinstance(xp, dict):
+            return 0
+        by_source = xp.get("by_source")
+        if not isinstance(by_source, dict):
+            return 0
+        row = by_source.get("prestige cost")
+        if not isinstance(row, dict):
+            return 0
+        try:
+            spent = float(row.get("lost_total", 0.0))
+        except Exception:
+            spent = 0.0
+        return max(0, int(round(spent)))
+
+
+def _retro_prestige_state(u: dict) -> dict[str, int]:
+        old_prestige = max(0, int(u.get("prestige", 0)))
+        spent_total = _historical_prestige_spent_xp(u)
+        new_prestige, spent_used, spent_remainder = prestige_state_from_spent_xp(spent_total)
+        return {
+            "old_prestige": old_prestige,
+            "new_prestige": int(new_prestige),
+            "spent_total": int(spent_total),
+            "spent_used": int(spent_used),
+            "spent_remainder": int(spent_remainder),
         }
 
 
@@ -282,6 +317,100 @@ class AdminCog(commands.Cog):
         total = int(u.get("xp_f", u.get("xp", 0)))
         sign = "+" if delta_xp > 0 else ""
         await ctx.reply(f"Adjusted {member.display_name} by **{sign}{delta_xp} XP**. New total: **{total} XP**.")
+
+    @commands.command(name="retroprestige")
+    @owner_only()
+    async def retroprestige(self, ctx: commands.Context, member: Optional[discord.Member] = None):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+        if member is not None and member.bot:
+            await ctx.reply("Bots do not have prestige progression to remap.")
+            return
+
+        if member is not None:
+            targets = [(int(member.id), member.display_name)]
+        else:
+            users = _gdict(ctx.guild.id).get("users", {})
+            targets = []
+            for uid_s in users:
+                try:
+                    uid = int(uid_s)
+                except Exception:
+                    continue
+                live_member = ctx.guild.get_member(uid)
+                display_name = live_member.display_name if live_member is not None else f"User {uid}"
+                targets.append((uid, display_name))
+            targets.sort(key=lambda row: row[1].lower())
+
+        if not targets:
+            await ctx.reply("No stored user progression was found for this server.")
+            return
+
+        changed: list[tuple[str, dict[str, int]]] = []
+        unchanged = 0
+        total_levels_down = 0
+        total_levels_up = 0
+        selected_result: dict[str, int] | None = None
+
+        for uid, display_name in targets:
+            u = _udict(ctx.guild.id, uid)
+            result = _retro_prestige_state(u)
+            if member is not None and uid == int(member.id):
+                selected_result = dict(result)
+            old_prestige = int(result["old_prestige"])
+            new_prestige = int(result["new_prestige"])
+            if new_prestige == old_prestige:
+                unchanged += 1
+                continue
+
+            u["prestige"] = new_prestige
+            if new_prestige < old_prestige:
+                total_levels_down += old_prestige - new_prestige
+            else:
+                total_levels_up += new_prestige - old_prestige
+            changed.append((display_name, result))
+
+        if changed:
+            await save_data()
+            await enforce_level6_exclusive(ctx.guild)
+
+        if member is not None:
+            current_user = _udict(ctx.guild.id, member.id)
+            result = selected_result or {
+                "old_prestige": max(0, int(current_user.get("prestige", 0))),
+                "new_prestige": max(0, int(current_user.get("prestige", 0))),
+                "spent_total": _historical_prestige_spent_xp(current_user),
+                "spent_used": 0,
+                "spent_remainder": 0,
+            }
+            next_cost = prestige_cost(int(current_user.get("prestige", 0)))
+            await ctx.reply(
+                f"Retro prestige remap for **{member.display_name}** complete. "
+                f"Prestige **{result['old_prestige']} -> {result['new_prestige']}** using "
+                f"**{result['spent_total']}** logged prestige-spend XP. "
+                f"Remainder under the new curve: **{result['spent_remainder']} XP** "
+                f"(current XP left unchanged). Next prestige cost: **{next_cost} XP**."
+            )
+            return
+
+        summary_lines = [
+            f"Retro prestige remap complete for **{len(targets)}** stored user(s).",
+            f"Changed: **{len(changed)}** | Unchanged: **{unchanged}** | "
+            f"Levels down: **{total_levels_down}** | Levels up: **{total_levels_up}**.",
+            "Uses only logged `prestige cost` spend. Manual `setp` changes and free prestige rewards are not counted.",
+        ]
+        if changed:
+            preview = changed[:10]
+            for display_name, result in preview:
+                summary_lines.append(
+                    f"- **{display_name}**: P{result['old_prestige']} -> P{result['new_prestige']} "
+                    f"(spent {result['spent_total']}, remainder {result['spent_remainder']})"
+                )
+            if len(changed) > len(preview):
+                summary_lines.append(f"- ...and **{len(changed) - len(preview)}** more changed user(s).")
+
+        await ctx.reply("\n".join(summary_lines))
 
     @commands.command(name="softreset")
     @owner_only()

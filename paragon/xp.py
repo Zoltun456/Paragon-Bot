@@ -15,6 +15,9 @@ from .config import (
     PRESTIGE_COST_A,
     PRESTIGE_COST_B,
     PRESTIGE_COST_C0,
+    PRESTIGE_LINEAR_MINUTES_PER_LEVEL,
+    PRESTIGE_LINEAR_START_LEVEL,
+    PRESTIGE_LINEAR_START_MINUTES,
     PRESTIGE_MAX_BASE_PROGRESS_MINUTES,
     PRESTIGE_RATE_K,
     PRESTIGE_STACK_SOFTCAP,
@@ -35,21 +38,70 @@ def prestige_base_rate(prestige_level: int) -> float:
     return max(0.0, float(BASE_XP_PER_MINUTE) + step_bonus)
 
 
-def prestige_cost(prestige_level: int) -> int:
+def prestige_multiplier(prestige_level: int) -> float:
+    p = max(0, int(prestige_level))
+    return 1.0 + (PRESTIGE_RATE_K * p)
+
+
+def prestige_permanent_rate(prestige_level: int) -> float:
+    p = max(0, int(prestige_level))
+    return prestige_base_rate(p) * prestige_multiplier(p)
+
+
+def prestige_legacy_cost(prestige_level: int) -> int:
     p = max(0, int(prestige_level))
     val = PRESTIGE_COST_C0 * (1.0 + (PRESTIGE_COST_A * p) + (PRESTIGE_COST_B * (p ** 2)))
     base_cap = prestige_base_rate(p) * float(PRESTIGE_MAX_BASE_PROGRESS_MINUTES)
     return max(1, min(int(round(val)), int(max(1.0, math.floor(base_cap)))))
 
 
-def prestige_multiplier(prestige_level: int) -> float:
+def prestige_target_minutes(prestige_level: int) -> float:
+    """
+    Target unboosted time to earn a prestige.
+    The legacy curve is preserved through `PRESTIGE_LINEAR_START_LEVEL`, then a
+    linear time ramp takes over using permanent passive rate only.
+    """
     p = max(0, int(prestige_level))
-    return 1.0 + (PRESTIGE_RATE_K * p)
+    if p < max(0, int(PRESTIGE_LINEAR_START_LEVEL)):
+        legacy_rate = max(0.01, prestige_permanent_rate(p))
+        return max(1.0, prestige_legacy_cost(p) / legacy_rate)
+
+    extra_levels = max(0, p - int(PRESTIGE_LINEAR_START_LEVEL))
+    start_minutes = max(1.0, float(PRESTIGE_LINEAR_START_MINUTES))
+    per_level = max(0.0, float(PRESTIGE_LINEAR_MINUTES_PER_LEVEL))
+    return max(1.0, start_minutes + (per_level * float(extra_levels)))
+
+
+def prestige_cost(prestige_level: int) -> int:
+    p = max(0, int(prestige_level))
+    legacy_cost = prestige_legacy_cost(p)
+    if p < max(0, int(PRESTIGE_LINEAR_START_LEVEL)):
+        return legacy_cost
+
+    target_minutes = prestige_target_minutes(p)
+    linear_cost = int(round(prestige_permanent_rate(p) * target_minutes))
+    return max(legacy_cost, linear_cost, 1)
 
 
 def prestige_passive_rate(prestige_level: int, *, boost_multiplier: float = 1.0) -> float:
     p = max(0, int(prestige_level))
-    return prestige_base_rate(p) * prestige_multiplier(p) * max(0.0, float(boost_multiplier))
+    return prestige_permanent_rate(p) * max(0.0, float(boost_multiplier))
+
+
+def prestige_state_from_spent_xp(spent_xp: int | float) -> tuple[int, int, int]:
+    remaining_xp = max(0, int(round(float(spent_xp))))
+    prestige_level = 0
+    spent_used = 0
+
+    while True:
+        cost = prestige_cost(prestige_level)
+        if cost <= 0 or remaining_xp < cost:
+            break
+        remaining_xp -= cost
+        spent_used += cost
+        prestige_level += 1
+
+    return prestige_level, spent_used, remaining_xp
 
 
 def compress_stack_multiplier(raw_multiplier: float, *, cap: float = PRESTIGE_STACK_SOFTCAP) -> float:

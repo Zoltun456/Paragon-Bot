@@ -13,7 +13,7 @@ from .blackjack import (
     _sanitize_reset_time as _bj_sanitize_reset_time,
     _table as _bj_table,
 )
-from .bounty import _bounty_state
+from .bounty import _bounty_state, _bounty_target_is_public
 from .config import LOCAL_TZ
 from .contracts import (
     CONTRACT_FAST_CLEAR_BONUS_MINUTES,
@@ -320,9 +320,6 @@ class ChecklistCog(commands.Cog):
         if pending_rewards:
             return [f"- Surprise Drop: **claimable now** ({len(pending_rewards)} stacked drop(s))."], False
 
-        next_at = _parse_iso(st.get("next_at"))
-        if next_at is not None:
-            return [f"- Surprise Drop: no active drop. Next roll: **{_fmt_when(next_at)}**."], False
         return ["- Surprise Drop: no active drop."], False
 
     def _blackjack_lines(self, guild: discord.Guild, member: discord.Member) -> tuple[list[str], bool]:
@@ -422,6 +419,7 @@ class ChecklistCog(commands.Cog):
 
         target = ctx.guild.get_member(target_id)
         target_name = target.display_name if target is not None else f"User {target_id}"
+        target_is_public = _bounty_target_is_public(st)
 
         if bool(st.get("resolved", False)):
             if str(st.get("result", "")).strip().lower() == "claimed":
@@ -443,6 +441,19 @@ class ChecklistCog(commands.Cog):
 
         cooldown_expires = _as_int(_as_dict(st.get("cooldowns")).get(str(member.id), 0), 0)
         cooldown_left = max(0, cooldown_expires - int(_utcnow().timestamp()))
+
+        if not target_is_public:
+            if claimant_id == member.id:
+                return [f"- Bounty: **claiming** the unrevealed target{remaining_text}."], False
+            if cooldown_left > 0:
+                return [
+                    f"- Bounty: **cooldown**. Claim cooldown **{_fmt_duration_seconds(cooldown_left)}** left."
+                ], False
+            if claimant is not None:
+                return [
+                    f"- Bounty: **busy**. **{claimant.display_name}** is already holding the claim{remaining_text}."
+                ], False
+            return ["- Bounty: **available**. Today's target is still unrevealed."], False
 
         if member.id == target_id:
             if claimant is not None:

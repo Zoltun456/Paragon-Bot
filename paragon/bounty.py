@@ -21,6 +21,7 @@ from .config import (
     BOUNTY_SURVIVOR_MIN_EXPOSURE_MINUTES,
     BOUNTY_SURVIVOR_PER_COMPANION_MINUTES_EQ,
     BOUNTY_SURVIVOR_PER_EXPOSURE_MINUTES_EQ,
+    BOUNTY_SURVIVOR_REWARD_MULTIPLIER,
     COMMAND_PREFIX,
     resolve_afk_channel_id,
 )
@@ -197,7 +198,11 @@ def _claim_remaining_seconds(st: dict) -> int:
     return max(0, int((expires_at - _utcnow()).total_seconds()))
 
 
-def _projected_survivor_minutes_equivalent(st: dict) -> int:
+def _bounty_target_is_public(st: dict) -> bool:
+    return bool(st.get("announced", False) or st.get("resolved", False))
+
+
+def _survivor_reward_base_minutes_equivalent(st: dict) -> int:
     exposure_minutes = max(0, _as_int(st.get("exposure_minutes", 0), 0))
     if exposure_minutes < max(0, int(BOUNTY_SURVIVOR_MIN_EXPOSURE_MINUTES)):
         return 0
@@ -211,8 +216,21 @@ def _projected_survivor_minutes_equivalent(st: dict) -> int:
     return max(0, min(int(BOUNTY_SURVIVOR_MAX_MINUTES_EQ), int(round(reward))))
 
 
+def _projected_survivor_minutes_equivalent(st: dict) -> int:
+    base_reward = _survivor_reward_base_minutes_equivalent(st)
+    if base_reward <= 0:
+        return 0
+    reward_multiplier = max(0.0, float(BOUNTY_SURVIVOR_REWARD_MULTIPLIER))
+    survivor_cap = max(
+        int(BOUNTY_SURVIVOR_MAX_MINUTES_EQ),
+        int(round(float(BOUNTY_SURVIVOR_MAX_MINUTES_EQ) * max(1.0, reward_multiplier))),
+    )
+    projected = float(base_reward) * reward_multiplier
+    return max(0, min(survivor_cap, int(round(projected))))
+
+
 def _projected_claim_minutes_equivalent(st: dict) -> int:
-    projected = max(int(BOUNTY_CLAIM_BASE_MINUTES_EQ), _projected_survivor_minutes_equivalent(st))
+    projected = max(int(BOUNTY_CLAIM_BASE_MINUTES_EQ), _survivor_reward_base_minutes_equivalent(st))
     projected = max(0.0, float(projected) * max(0.0, float(BOUNTY_CLAIM_REWARD_MULTIPLIER)))
     hard_cap = max(int(BOUNTY_CLAIM_BASE_MINUTES_EQ), int(round(float(BOUNTY_SURVIVOR_MAX_MINUTES_EQ) * max(1.0, float(BOUNTY_CLAIM_REWARD_MULTIPLIER)))))
     return max(0, min(hard_cap, int(round(projected))))
@@ -385,12 +403,11 @@ class BountyCog(commands.Cog):
                     )
 
             if target_user_id > 0:
-                target = guild.get_member(target_user_id)
-                if isinstance(target, discord.Member) and not target.bot:
-                    notices.append(
-                        f"Today's bounty target is **{target.display_name}**. "
-                        f"Use `{COMMAND_PREFIX}b` to check status and `{COMMAND_PREFIX}b @user` to start a claim from voice."
-                    )
+                notices.append(
+                    f"Today's bounty target has been selected. "
+                    f"It will be revealed once they become active. "
+                    f"Use `{COMMAND_PREFIX}b` to check status and `{COMMAND_PREFIX}b claim` to start a claim from voice."
+                )
             else:
                 notices.append("No bounty target was assigned today because nobody qualified from yesterday's activity.")
 
@@ -434,7 +451,7 @@ class BountyCog(commands.Cog):
         try:
             await maybe_channel.send(
                 f"{member.mention} has today's bounty on their head. "
-                f"Hunters can use `{COMMAND_PREFIX}b {member.mention}` from the same voice channel, "
+                f"Hunters can use `{COMMAND_PREFIX}b claim` from the same voice channel, "
                 f"and the target can shut down an active claim with `{COMMAND_PREFIX}b stop`."
             )
         except Exception:
@@ -489,15 +506,25 @@ class BountyCog(commands.Cog):
 
             claimant_name = claimant.display_name if claimant is not None else f"User {claimant_id}"
             target_name = target.display_name if target is not None else f"User {target_id}"
+            target_is_public = _bounty_target_is_public(st)
             if stopped_by_target:
-                message = (
-                    f"**{target_name}** shut down the bounty claim. "
-                    f"**{claimant_name}** is on cooldown for **{_fmt_duration_seconds(BOUNTY_STOP_COOLDOWN_SECONDS)}**."
-                )
+                if target_is_public:
+                    message = (
+                        f"**{target_name}** shut down the bounty claim. "
+                        f"**{claimant_name}** is on cooldown for **{_fmt_duration_seconds(BOUNTY_STOP_COOLDOWN_SECONDS)}**."
+                    )
+                else:
+                    message = (
+                        f"The bounty target shut down the claim. "
+                        f"**{claimant_name}** is on cooldown for **{_fmt_duration_seconds(BOUNTY_STOP_COOLDOWN_SECONDS)}**."
+                    )
             elif reason == "movement":
-                message = (
-                    f"The bounty claim on **{target_name}** was interrupted because the voice lock broke."
-                )
+                if target_is_public:
+                    message = (
+                        f"The bounty claim on **{target_name}** was interrupted because the voice lock broke."
+                    )
+                else:
+                    message = "The bounty claim was interrupted because the voice lock broke."
             elif reason == "restart":
                 message = "The active bounty claim was reset because the bot restarted."
             elif reason == "rollover":
@@ -633,7 +660,7 @@ class BountyCog(commands.Cog):
             if current is asyncio.current_task():
                 self._claim_tasks.pop(int(guild_id), None)
 
-    async def _start_claim(self, ctx: commands.Context, target: discord.Member) -> None:
+    async def _start_claim(self, ctx: commands.Context) -> None:
         guild = ctx.guild
         if guild is None:
             return
@@ -653,15 +680,15 @@ class BountyCog(commands.Cog):
                 else:
                     await ctx.reply("Today's bounty is already over.")
                 return
-            if _as_int(st.get("target_user_id", 0), 0) != target.id:
-                current = _target_member(guild, st)
-                if current is None:
-                    await ctx.reply("There is no active bounty target right now.")
-                else:
-                    await ctx.reply(f"Today's bounty is on **{current.display_name}**, not **{target.display_name}**.")
+            target = _target_member(guild, st)
+            if target is None:
+                await ctx.reply("There is no active bounty target right now.")
                 return
             if ctx.author.id == target.id:
-                await ctx.reply("You cannot claim your own bounty.")
+                if _bounty_target_is_public(st):
+                    await ctx.reply("You cannot claim your own bounty.")
+                else:
+                    await ctx.reply("You cannot start a claim right now.")
                 return
 
             changed = _prune_cooldowns(st)
@@ -678,10 +705,10 @@ class BountyCog(commands.Cog):
             claimant_channel = getattr(getattr(ctx.author, "voice", None), "channel", None)
             target_channel = getattr(getattr(target, "voice", None), "channel", None)
             if not _is_eligible_voice_channel(claimant_channel):
-                await ctx.reply("Join a normal voice channel with the target before trying to claim the bounty.")
+                await ctx.reply("Join a normal voice channel with the current bounty target before trying to claim the bounty.")
                 return
             if target_channel is None or claimant_channel.id != target_channel.id:
-                await ctx.reply(f"You need to be in the same voice channel as **{target.display_name}** to start the claim.")
+                await ctx.reply("You need to be in the same voice channel as the current bounty target to start the claim.")
                 return
 
             active_claimant_id = _as_int(st.get("claimant_user_id", 0), 0)
@@ -708,9 +735,9 @@ class BountyCog(commands.Cog):
         self._claim_tasks[guild.id] = asyncio.create_task(self._claim_countdown(guild.id))
         projected_claim = _projected_claim_minutes_equivalent(_bounty_state(guild.id))
         await ctx.reply(
-            f"{ctx.author.mention} started a bounty claim on {target.mention}. "
+            f"{ctx.author.mention} started a bounty claim on the current bounty target. "
             f"Stay in **{claimant_channel.name}** together for **{_fmt_duration_seconds(BOUNTY_CLAIM_SECONDS)}** to collect it. "
-            f"{target.mention} can cancel the attempt with `{ctx.clean_prefix}b stop`. "
+            f"The target can cancel the attempt with `{ctx.clean_prefix}b stop`. "
             f"Projected payout is about **{_fmt_duration_minutes(projected_claim)}** of passive gain."
         )
 
@@ -759,10 +786,11 @@ class BountyCog(commands.Cog):
             lines.append("No bounty target was assigned today.")
             return lines
         target = guild.get_member(target_id)
-        target_label = target.mention if target is not None else f"<@{target_id}>"
+        target_is_public = _bounty_target_is_public(st)
+        target_label = target.mention if target_is_public and target is not None else "**unrevealed**"
 
         lines.append(f"Target: {target_label}")
-        lines.append(f"Revealed: **{'yes' if bool(st.get('announced', False)) else 'not yet'}**")
+        lines.append(f"Revealed: **{'yes' if target_is_public else 'not yet'}**")
 
         exposure_minutes = max(0, _as_int(st.get("exposure_minutes", 0), 0))
         companion_total = max(0.0, _as_float(st.get("exposure_companion_total", 0.0), 0.0))
@@ -812,7 +840,7 @@ class BountyCog(commands.Cog):
             lines.append(f"Your claim cooldown: **{_fmt_duration_seconds(remaining)}**.")
 
         lines.append(
-            f"Use `{COMMAND_PREFIX}b @user` from the same voice channel to start a claim, or `{COMMAND_PREFIX}b stop` if the bounty is on you."
+            f"Use `{COMMAND_PREFIX}b claim` from the same voice channel to start a claim, or `{COMMAND_PREFIX}b stop` if the bounty is on you."
         )
         return lines
 
@@ -934,25 +962,12 @@ class BountyCog(commands.Cog):
             return
 
         joined = " ".join(args).strip()
-        if joined.lower() == "stop":
+        lowered = joined.lower()
+        if lowered == "stop":
             await self._stop_claim(ctx)
             return
-
-        if ctx.message.mentions:
-            target = next((m for m in ctx.message.mentions if isinstance(m, discord.Member) and not m.bot), None)
-            if target is None:
-                await ctx.reply(f"Usage: `{ctx.clean_prefix}b @user` or `{ctx.clean_prefix}b stop`")
-                return
-            await self._start_claim(ctx, target)
+        if lowered == "claim":
+            await self._start_claim(ctx)
             return
 
-        try:
-            target = await commands.MemberConverter().convert(ctx, joined)
-        except commands.BadArgument:
-            await ctx.reply(f"Usage: `{ctx.clean_prefix}b` | `{ctx.clean_prefix}b @user` | `{ctx.clean_prefix}b stop`")
-            return
-
-        if target.bot:
-            await ctx.reply("Bots do not carry bounties.")
-            return
-        await self._start_claim(ctx, target)
+        await ctx.reply(f"Usage: `{ctx.clean_prefix}b` | `{ctx.clean_prefix}b claim` | `{ctx.clean_prefix}b stop`")
