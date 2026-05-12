@@ -799,6 +799,11 @@ class FishCog(commands.Cog):
     ) -> None:
         try:
             msg = await channel.fetch_message(message_id)
+        except Exception:
+            return
+        if self.bot.user is None or getattr(msg.author, "id", 0) != self.bot.user.id:
+            return
+        try:
             await msg.remove_reaction(emoji, member)
         except Exception:
             return
@@ -807,11 +812,16 @@ class FishCog(commands.Cog):
         if message_id <= 0:
             return None
         try:
-            return await channel.fetch_message(message_id)
+            msg = await channel.fetch_message(message_id)
         except Exception:
             return None
+        if self.bot.user is None or getattr(msg.author, "id", 0) != self.bot.user.id:
+            return None
+        return msg
 
     async def _set_reactions(self, msg: discord.Message, emojis: list[str]) -> None:
+        if self.bot.user is None or getattr(msg.author, "id", 0) != self.bot.user.id:
+            return
         try:
             await msg.clear_reactions()
         except Exception:
@@ -1497,6 +1507,9 @@ class FishCog(commands.Cog):
         guild = self.bot.get_guild(payload.guild_id or 0)
         if guild is None:
             return
+        fishing_channel_id = int(get_fishing_channel_id(guild.id) or 0)
+        if fishing_channel_id <= 0 or payload.channel_id != fishing_channel_id:
+            return
         channel = guild.get_channel(payload.channel_id)
         if not isinstance(channel, discord.TextChannel):
             return
@@ -1505,11 +1518,11 @@ class FishCog(commands.Cog):
         if member is None or member.bot:
             return
 
-        await self._remove_user_reaction(channel, payload.message_id, payload.emoji, member)
         emoji = _norm_emoji_name(payload.emoji)
 
         dock_id = _as_int(_state_root(guild.id).get("dock_message_id", 0), 0)
-        if payload.message_id == dock_id and channel.id == get_fishing_channel_id(guild.id):
+        if payload.message_id == dock_id:
+            await self._remove_user_reaction(channel, payload.message_id, payload.emoji, member)
             if emoji == _norm_emoji_name(DOCK_CAST_EMOJI):
                 await self._start_fishing(guild, member, channel=channel)
             elif emoji == _norm_emoji_name(DOCK_STOP_EMOJI):
@@ -1520,6 +1533,7 @@ class FishCog(commands.Cog):
         if payload.message_id != _as_int(session.get("session_message_id", 0), 0):
             return
 
+        await self._remove_user_reaction(channel, payload.message_id, payload.emoji, member)
         phase = str(session.get("phase", "idle")).strip().lower()
         if emoji == _norm_emoji_name(SESSION_STOP_EMOJI):
             await self._stop_fishing(guild, member, channel=channel)

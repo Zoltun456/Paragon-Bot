@@ -49,7 +49,7 @@ HELP_DESCRIPTIONS = {
     "spinstatus": "Show your daily spin status and active wheel buffs.",
     "cleanse": "Use a stored Cleanse item to remove your active debuffs.",
     "drain": "Use a stored Drain item to debuff everyone else in your voice call and boost yourself.",
-    "shop": "List the current XP shop items, including your prestige-scaled Wheel Spin price.",
+    "shop": "List the current XP shop items, including passive-gain-based pricing for each buy.",
     "buy": "Buy a shop item by index or name.",
     "fish": "Fish from the dock channel with bait, reel in bites, and keep casting until you stop.",
     "spawnboss": "Admin: force-spawn a raid boss immediately for testing or events.",

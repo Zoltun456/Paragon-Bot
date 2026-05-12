@@ -9,19 +9,7 @@ from discord.ext import commands
 
 from .config import (
     SHOP_COST_ROUND_STEP,
-    SHOP_CLEANSE_START_PCT,
-    SHOP_CLEANSE_STEP_GROWTH_PCT,
-    SHOP_CLEANSE_STEP_PCT,
     SHOP_ROULETTE_ACCURACY_BONUS_CHANCE,
-    SHOP_ROULETTE_ACCURACY_START_PCT,
-    SHOP_ROULETTE_ACCURACY_STEP_GROWTH_PCT,
-    SHOP_ROULETTE_ACCURACY_STEP_PCT,
-    SHOP_ROULETTE_SHIELD_START_PCT,
-    SHOP_ROULETTE_SHIELD_STEP_GROWTH_PCT,
-    SHOP_ROULETTE_SHIELD_STEP_PCT,
-    SHOP_WHEEL_SPIN_START_PCT,
-    SHOP_WHEEL_SPIN_STEP_GROWTH_PCT,
-    SHOP_WHEEL_SPIN_STEP_PCT,
     SPIN_RESET_HOUR,
     SPIN_RESET_MINUTE,
 )
@@ -42,7 +30,7 @@ from .spin_support import (
 )
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
-from .xp import apply_xp_change, prestige_cost
+from .xp import apply_xp_change, prestige_passive_rate
 
 
 def _fmt_pct(value: float) -> str:
@@ -52,14 +40,66 @@ def _fmt_pct(value: float) -> str:
     return f"{pct:.1f}%"
 
 
+def _fmt_duration_minutes(minutes: int | float) -> str:
+    total = max(0, int(round(float(minutes))))
+    hours, mins = divmod(total, 60)
+    if hours <= 0:
+        return f"{mins}m"
+    if mins <= 0:
+        return f"{hours}h"
+    return f"{hours}h {mins}m"
+
+
+# Prices are tuned as minutes of permanent passive gain per purchase within a reset.
+SHOP_ITEM_CURVES: dict[str, dict[str, int]] = {
+    "wheel_spin": {
+        "start_minutes": 240,
+        "step_minutes": 150,
+        "step_growth_minutes": 60,
+    },
+    "bait_crate": {
+        "start_minutes": 0,
+        "step_minutes": 25,
+        "step_growth_minutes": 10,
+    },
+    "cleanse": {
+        "start_minutes": 180,
+        "step_minutes": 90,
+        "step_growth_minutes": 30,
+    },
+    "roulette_shield": {
+        "start_minutes": 270,
+        "step_minutes": 150,
+        "step_growth_minutes": 60,
+    },
+    "roulette_accuracy": {
+        "start_minutes": 300,
+        "step_minutes": 180,
+        "step_growth_minutes": 75,
+    },
+}
+
+
+def _shop_item_cost_minutes(item_key: str, purchase_number: int) -> int:
+    n = max(1, int(purchase_number))
+    curve = SHOP_ITEM_CURVES.get(str(item_key).strip().lower(), {})
+    start_minutes = max(0, int(curve.get("start_minutes", 0)))
+    step_minutes = max(0, int(curve.get("step_minutes", 0)))
+    step_growth_minutes = max(0, int(curve.get("step_growth_minutes", 0)))
+    prior_buys = max(0, n - 1)
+    return start_minutes + (prior_buys * step_minutes) + (
+        step_growth_minutes * prior_buys * max(0, prior_buys - 1) // 2
+    )
+
+
 SHOP_ITEMS: list[dict[str, object]] = [
     {
         "key": "wheel_spin",
         "name": "Wheel Spin",
         "aliases": ["wheel", "spin", "wheelspin"],
         "description": (
-            f"Adds 1 bonus wheel spin. Starts at {_fmt_pct(SHOP_WHEEL_SPIN_START_PCT)} "
-            f"of your next prestige and ramps harder each purchase every reset, "
+            f"Adds 1 bonus wheel spin. Starts at about **{_fmt_duration_minutes(_shop_item_cost_minutes('wheel_spin', 1))}** "
+            "of your passive gain and ramps hard each purchase every reset, "
             f"rounded to the nearest {max(1, int(SHOP_COST_ROUND_STEP)):,} XP."
         ),
     },
@@ -69,7 +109,9 @@ SHOP_ITEMS: list[dict[str, object]] = [
         "aliases": ["bait", "baitcrate", "worms", "crate"],
         "description": (
             "Adds **25** bait for fishing. First buy each reset is free, then scales "
-            "from 5% to 10% to 15% of your next prestige and keeps climbing."
+            f"from about **{_fmt_duration_minutes(_shop_item_cost_minutes('bait_crate', 2))}** "
+            f"to **{_fmt_duration_minutes(_shop_item_cost_minutes('bait_crate', 3))}** "
+            f"to **{_fmt_duration_minutes(_shop_item_cost_minutes('bait_crate', 4))}** of passive gain and keeps climbing."
         ),
     },
     {
@@ -78,8 +120,8 @@ SHOP_ITEMS: list[dict[str, object]] = [
         "aliases": ["debuff_cleanse", "debuffs", "cleanse_item"],
         "description": (
             "Adds 1 Cleanse charge. Use `!cleanse` to remove all current debuffs. "
-            f"Starts at {_fmt_pct(SHOP_CLEANSE_START_PCT)} of your next prestige and "
-            "ramps each purchase every reset."
+            f"Starts at about **{_fmt_duration_minutes(_shop_item_cost_minutes('cleanse', 1))}** "
+            "of your passive gain and ramps each purchase every reset."
         ),
     },
     {
@@ -87,9 +129,9 @@ SHOP_ITEMS: list[dict[str, object]] = [
         "name": "Roulette Shield",
         "aliases": ["shield", "roulette_backfire_shield", "backfire_shield"],
         "description": (
-            "Adds 1 roulette backfire shield. Starts at "
-            f"{_fmt_pct(SHOP_ROULETTE_SHIELD_START_PCT)} of your next prestige and "
-            "ramps each purchase every reset."
+            "Adds 1 roulette backfire shield. Starts at about "
+            f"**{_fmt_duration_minutes(_shop_item_cost_minutes('roulette_shield', 1))}** "
+            "of your passive gain and ramps hard each purchase every reset."
         ),
     },
     {
@@ -99,40 +141,12 @@ SHOP_ITEMS: list[dict[str, object]] = [
         "description": (
             "Adds 1 roulette aim charge for "
             f"+{_fmt_pct(SHOP_ROULETTE_ACCURACY_BONUS_CHANCE * 100.0)} absolute "
-            "success chance on your next roulette shot. Starts at "
-            f"{_fmt_pct(SHOP_ROULETTE_ACCURACY_START_PCT)} of your next prestige "
-            "and ramps each purchase every reset."
+            "success chance on your next roulette shot. Starts at about "
+            f"**{_fmt_duration_minutes(_shop_item_cost_minutes('roulette_accuracy', 1))}** "
+            "of your passive gain and ramps hardest each purchase every reset."
         ),
     },
 ]
-
-SHOP_ITEM_CURVES: dict[str, dict[str, int]] = {
-    "wheel_spin": {
-        "start_pct": SHOP_WHEEL_SPIN_START_PCT,
-        "step_pct": SHOP_WHEEL_SPIN_STEP_PCT,
-        "step_growth_pct": SHOP_WHEEL_SPIN_STEP_GROWTH_PCT,
-    },
-    "bait_crate": {
-        "start_pct": 0,
-        "step_pct": 5,
-        "step_growth_pct": 0,
-    },
-    "cleanse": {
-        "start_pct": SHOP_CLEANSE_START_PCT,
-        "step_pct": SHOP_CLEANSE_STEP_PCT,
-        "step_growth_pct": SHOP_CLEANSE_STEP_GROWTH_PCT,
-    },
-    "roulette_shield": {
-        "start_pct": SHOP_ROULETTE_SHIELD_START_PCT,
-        "step_pct": SHOP_ROULETTE_SHIELD_STEP_PCT,
-        "step_growth_pct": SHOP_ROULETTE_SHIELD_STEP_GROWTH_PCT,
-    },
-    "roulette_accuracy": {
-        "start_pct": SHOP_ROULETTE_ACCURACY_START_PCT,
-        "step_pct": SHOP_ROULETTE_ACCURACY_STEP_PCT,
-        "step_growth_pct": SHOP_ROULETTE_ACCURACY_STEP_GROWTH_PCT,
-    },
-}
 
 
 def _round_to_shop_step(value: float) -> int:
@@ -178,18 +192,6 @@ def _sync_shop_cycle_state(st: dict, cycle: str) -> None:
         st[counter_key] = max(0, int(st.get(counter_key, 0)))
 
 
-def _shop_item_cost_percent(item_key: str, purchase_number: int) -> int:
-    n = max(1, int(purchase_number))
-    curve = SHOP_ITEM_CURVES.get(str(item_key).strip().lower(), {})
-    start_pct = max(0, int(curve.get("start_pct", 0)))
-    step_pct = max(0, int(curve.get("step_pct", 0)))
-    step_growth_pct = max(0, int(curve.get("step_growth_pct", 0)))
-    prior_buys = max(0, n - 1)
-    return start_pct + (prior_buys * step_pct) + (
-        step_growth_pct * prior_buys * max(0, prior_buys - 1) // 2
-    )
-
-
 def _shop_item_costs(item: dict[str, object], gid: int, uid: int, amount: int = 1) -> list[int]:
     buy_count = max(0, int(amount))
     if buy_count <= 0:
@@ -198,7 +200,7 @@ def _shop_item_costs(item: dict[str, object], gid: int, uid: int, amount: int = 
     item_key = str(item.get("key", "")).strip().lower()
     u = _udict(gid, uid)
     p = int(u.get("prestige", 0))
-    base_cost = max(1, int(prestige_cost(p)))
+    rate_per_min = max(0.01, float(prestige_passive_rate(p)))
 
     shop_state = _shop_state(gid, uid)
     _sync_shop_cycle_state(shop_state, _shop_cycle(gid))
@@ -208,8 +210,14 @@ def _shop_item_costs(item: dict[str, object], gid: int, uid: int, amount: int = 
     costs: list[int] = []
     for offset in range(buy_count):
         purchase_number = bought_this_cycle + offset + 1
-        pct = _shop_item_cost_percent(item_key, purchase_number) / 100.0
-        costs.append(_round_to_shop_step(float(base_cost) * pct))
+        minutes_equivalent = _shop_item_cost_minutes(item_key, purchase_number)
+        if minutes_equivalent <= 0:
+            costs.append(0)
+            continue
+        rounded_cost = _round_to_shop_step(rate_per_min * float(minutes_equivalent))
+        if rounded_cost <= 0:
+            rounded_cost = max(1, int(SHOP_COST_ROUND_STEP))
+        costs.append(rounded_cost)
     return costs
 
 
@@ -289,8 +297,14 @@ class ShopCog(commands.Cog):
                 _sync_shop_cycle_state(shop_state, _shop_cycle(ctx.guild.id))
                 counter_key = _shop_buy_counter_key(key)
                 next_buy = max(0, int(shop_state.get(counter_key, 0))) + 1
-                next_pct = _shop_item_cost_percent(key, next_buy)
-                extra = f" Next buy: **#{next_buy}** at **{next_pct}%**."
+                next_minutes = _shop_item_cost_minutes(key, next_buy)
+                if next_minutes <= 0:
+                    extra = f" Next buy: **#{next_buy}** is **free**."
+                else:
+                    extra = (
+                        f" Next buy: **#{next_buy}** at about "
+                        f"**{_fmt_duration_minutes(next_minutes)}** of passive gain."
+                    )
             lines.append(
                 f"`{idx}.` **{item['name']}** - **{cost} XP** - {item['description']}{extra}"
             )
@@ -407,11 +421,23 @@ class ShopCog(commands.Cog):
 
         first_cost = per_item_costs[0] if per_item_costs else 0
         last_cost = per_item_costs[-1] if per_item_costs else 0
+        current_buys = max(0, int(shop_state.get(counter_key, 0)))
+        first_purchase_number = max(1, current_buys - amount + 1)
+        last_purchase_number = max(1, current_buys)
+        first_minutes = _shop_item_cost_minutes(key, first_purchase_number)
+        last_minutes = _shop_item_cost_minutes(key, last_purchase_number)
         next_buy = max(0, int(shop_state.get(counter_key, 0))) + 1
         next_cost = sum(_shop_item_costs(item, ctx.guild.id, ctx.author.id, 1))
+        next_minutes = _shop_item_cost_minutes(key, next_buy)
+        next_curve_text = (
+            "free"
+            if next_minutes <= 0
+            else f"{_fmt_duration_minutes(next_minutes)} of passive gain"
+        )
         await ctx.reply(
             f"Bought **{amount}x {item['name']}** for **{total_cost} XP**. "
-            f"Cost curve this purchase: **{first_cost} -> {last_cost} XP**. "
-            f"Next buy: **#{next_buy}** for **{next_cost} XP**. "
+            f"Cost curve this purchase: **{first_cost} -> {last_cost} XP** "
+            f"({_fmt_duration_minutes(first_minutes)} -> {_fmt_duration_minutes(last_minutes)}). "
+            f"Next buy: **#{next_buy}** for **{next_cost} XP** ({next_curve_text}). "
             f"{effect_text}"
         )

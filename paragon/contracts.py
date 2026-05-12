@@ -81,7 +81,7 @@ def _objective(metric: str, target: int, label: str, points: int) -> dict[str, o
 
 
 def _wordle_solve_within_objective(max_attempts: int) -> dict[str, object]:
-    threshold = max(1, int(max_attempts))
+    threshold = max(3, min(4, int(max_attempts)))
     return _objective(
         f"game:wordle:wins_within_{threshold}",
         1,
@@ -635,9 +635,9 @@ def _word_surgeon(rng: random.Random, prestige_level: int) -> dict[str, object]:
         "flavor": "No rummaging through the alphabet. Walk in, cut straight to the answer, and leave the grid in stitches.",
         "objectives": [
             _objective(
-                "game:wordle:wins_within_2",
+                "game:wordle:wins_within_3",
                 1,
-                "Solve Wordle in **2** guess(es) or fewer",
+                "Solve Wordle in **3** guess(es) or fewer",
                 7,
             )
         ],
