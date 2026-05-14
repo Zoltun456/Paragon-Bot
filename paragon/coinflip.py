@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 
 from .config import CF_MAX_BET, CF_POT_BOOST_MULTIPLIER, CF_TTL_SECONDS
+from .guild_state import effective_unix_ts
 from .ownership import is_control_user_id
 from .spin_support import consume_coinflip_win_edge
 from .storage import _udict
@@ -72,7 +73,7 @@ class CoinFlipCog(commands.Cog):
                 if not pending:
                     await ctx.reply("No pending coin flip in this channel.")
                     return
-                if time.monotonic() - pending["created"] > CF_TTL_SECONDS:
+                if float(effective_unix_ts(ctx.guild.id)) - float(pending["created_ts"]) > CF_TTL_SECONDS:
                     coinflip_challenges.pop(chan_id, None)
                     await ctx.reply("That coin flip expired. Ask the challenger to start a new one.")
                     return
@@ -203,13 +204,13 @@ class CoinFlipCog(commands.Cog):
 
         async with coinflip_lock:
             pending = coinflip_challenges.get(chan_id)
-            if pending and time.monotonic() - pending["created"] <= CF_TTL_SECONDS:
+            if pending and (float(effective_unix_ts(ctx.guild.id)) - float(pending["created_ts"]) <= CF_TTL_SECONDS):
                 await ctx.reply(f"There's already a pending coin flip in this channel. Use `{p}cf accept` or `{p}cf cancel`.")
                 return
             coinflip_challenges[chan_id] = {
                 "challenger_id": ctx.author.id,
                 "amount": amount,
-                "created": time.monotonic(),
+                "created_ts": float(effective_unix_ts(ctx.guild.id)),
             }
             record_game_fields(ctx.guild.id, ctx.author.id, "coinflip", challenges_created=1)
 

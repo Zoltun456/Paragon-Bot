@@ -6,10 +6,10 @@ import discord
 from discord.ext import commands
 
 from .config import THANKS_BOOST_MINUTES, THANKS_BOOST_PCT, THANKS_REWARD_SEED_XP
+from .guild_state import effective_date_key
 from .roles import enforce_level6_exclusive
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
-from .time_windows import _date_key, _today_local
 from .xp import grant_fixed_boost
 
 
@@ -57,7 +57,7 @@ class ThanksCog(commands.Cog):
             await ctx.reply("Target must be a member of this server.")
             return
 
-        today = _date_key(_today_local())
+        today = effective_date_key(ctx.guild.id)
         st = _thanks_state(ctx.guild.id, author.id)
         if st.get("date") != today:
             st["date"] = today

@@ -23,6 +23,7 @@ from .emojis import (
     EMOJI_PARTY_POPPER,
     EMOJI_REPEAT_ARROWS,
 )
+from .guild_state import effective_local_now, is_guild_enabled
 from .guild_setup import get_log_channel
 from .spin_support import consume_lotto_bonus_tickets_pct, consume_lotto_jackpot_boost_multiplier
 from .storage import _gdict, _udict, save_data
@@ -159,7 +160,7 @@ class LottoCog(commands.Cog):
 
     async def _resolve_draw(self, guild: discord.Guild, *, now: Optional[datetime] = None, forced: bool = False) -> tuple[bool, str]:
         st = _lotto_state(guild.id)
-        now_local = now or datetime.now(LOCAL_TZ)
+        now_local = now or effective_local_now(guild.id)
         today_key = now_local.strftime("%Y-%m-%d")
 
         if (not forced) and st.get("last_draw") == today_key:
@@ -278,7 +279,7 @@ class LottoCog(commands.Cog):
             return
 
         draw_h, draw_m = _sanitize_draw_time(st.get("draw_hour", LOTTO_DRAW_HOUR), st.get("draw_minute", LOTTO_DRAW_MINUTE))
-        next_draw = _next_draw_dt(draw_h, draw_m)
+        next_draw = _next_draw_dt(draw_h, draw_m, now=effective_local_now(ctx.guild.id))
 
         # Check pot / tickets (no arg or mention)
         if arg is None or (arg.startswith("<@") and ctx.message.mentions):
@@ -379,7 +380,7 @@ class LottoCog(commands.Cog):
         cur_h, cur_m = _sanitize_draw_time(st.get("draw_hour", LOTTO_DRAW_HOUR), st.get("draw_minute", LOTTO_DRAW_MINUTE))
 
         if not when:
-            nxt = _next_draw_dt(cur_h, cur_m)
+            nxt = _next_draw_dt(cur_h, cur_m, now=effective_local_now(ctx.guild.id))
             await ctx.reply(
                 f"{EMOJI_CLOCK_FACE_SIX_OCLOCK} Lottery draw time is **{_draw_time_label(cur_h, cur_m)}**.\n"
                 f"Next draw: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**."
@@ -400,7 +401,7 @@ class LottoCog(commands.Cog):
         st["draw_minute"] = int(m)
         await save_data()
 
-        nxt = _next_draw_dt(h, m)
+        nxt = _next_draw_dt(h, m, now=effective_local_now(ctx.guild.id))
         msg = (
             f"{EMOJI_CLOCK_FACE_SIX_OCLOCK} Lottery draw time set to **{_draw_time_label(h, m)}** by {ctx.author.mention}.\n"
             f"Next draw: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**."
@@ -427,10 +428,11 @@ class LottoCog(commands.Cog):
     # -------- Background draw loop --------
     @tasks.loop(minutes=1)
     async def lotto_draw_loop(self):
-        now = datetime.now(LOCAL_TZ)
-        today_key = now.strftime("%Y-%m-%d")
-
         for guild in self.bot.guilds:
+            if not is_guild_enabled(guild):
+                continue
+            now = effective_local_now(guild.id)
+            today_key = now.strftime("%Y-%m-%d")
             st = _lotto_state(guild.id)
             # Respect toggle: skip drawing if disabled
             if not st.get("enabled", True):

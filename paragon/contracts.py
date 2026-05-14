@@ -23,10 +23,10 @@ from .config import (
     CONTRACT_REWARD_PER_DIFFICULTY_MINUTES,
     CONTRACT_REWARD_STEP_SYNERGY_MINUTES,
 )
+from .guild_state import effective_date_key, effective_utcnow, is_guild_enabled
 from .include import _as_dict, _as_float, _as_int, _as_list, _fmt_num, _iso, _parse_iso, _utcnow
 from .stats_store import get_user_stats, record_game_fields
 from .storage import _udict, save_data
-from .time_windows import _date_key, _today_local
 from .xp import grant_bonus_xp_equivalent_boost, grant_fixed_boost, prestige_passive_rate
 
 CONTRACT_VERSION = 3
@@ -147,8 +147,8 @@ def _is_complete(rows: list[dict[str, object]]) -> bool:
     return bool(rows) and all(bool(row.get("done", False)) for row in rows)
 
 
-def _is_current_contract(st: dict) -> bool:
-    today = _date_key(_today_local())
+def _is_current_contract(gid: int, st: dict) -> bool:
+    today = effective_date_key(gid)
     quest = _as_dict(st.get("quest"))
     return (
         str(st.get("date", "")) == today
@@ -158,11 +158,11 @@ def _is_current_contract(st: dict) -> bool:
     )
 
 
-def _fast_clear_applies(st: dict, *, now: Optional[datetime] = None) -> bool:
+def _fast_clear_applies(gid: int, st: dict, *, now: Optional[datetime] = None) -> bool:
     seen_at = _parse_iso(st.get("seen_at"))
     if seen_at is None:
         return False
-    current = now or _utcnow()
+    current = now or effective_utcnow(gid)
     elapsed = (current - seen_at).total_seconds()
     return 0.0 <= elapsed <= float(CONTRACT_FAST_CLEAR_WINDOW_SECONDS)
 
@@ -1076,7 +1076,7 @@ class ContractsCog(commands.Cog):
 
     async def _ensure_daily_contract(self, guild: discord.Guild, member: discord.Member) -> dict:
         st = _contract_state(guild.id, member.id)
-        today = _date_key(_today_local())
+        today = effective_date_key(guild.id)
         quest = _as_dict(st.get("quest"))
         baselines = _as_dict(st.get("baselines"))
 
@@ -1098,7 +1098,7 @@ class ContractsCog(commands.Cog):
 
         st["date"] = today
         st["claimed"] = False
-        st["assigned_at"] = _iso(_utcnow())
+        st["assigned_at"] = _iso(effective_utcnow(guild.id))
         st["seen_at"] = ""
         st["completed_at"] = ""
         st["quest"] = quest
@@ -1131,7 +1131,7 @@ class ContractsCog(commands.Cog):
             )
             fast_clear_reward: dict[str, object] | None = None
             fast_clear_equivalent_bonus_xp = 0.0
-            if _fast_clear_applies(live_state):
+            if _fast_clear_applies(guild.id, live_state):
                 fast_clear_equivalent_bonus_xp = (
                     max(0.01, float(reward.get("rate_basis_per_min", 0.0)))
                     * float(CONTRACT_FAST_CLEAR_BONUS_PCT)
@@ -1155,7 +1155,7 @@ class ContractsCog(commands.Cog):
                 total_percent += float(fast_clear_reward.get("percent", 0.0))
                 total_minutes += int(fast_clear_reward.get("minutes", 0))
             live_state["claimed"] = True
-            live_state["completed_at"] = _iso(_utcnow())
+            live_state["completed_at"] = _iso(effective_utcnow(guild.id))
             live_state["last_reward"] = {
                 "percent": float(reward.get("percent", 0.0)),
                 "minutes": int(reward.get("minutes", 0)),
@@ -1228,7 +1228,7 @@ class ContractsCog(commands.Cog):
         if guild is None or member.bot:
             return False
         st = _contract_state(guild.id, member.id)
-        if bool(st.get("claimed", False)) or not _is_current_contract(st):
+        if bool(st.get("claimed", False)) or not _is_current_contract(guild.id, st):
             return False
         quest = _as_dict(st.get("quest"))
         progress_rows = _progress_rows(guild.id, member.id, quest, _as_dict(st.get("baselines")))
@@ -1312,7 +1312,7 @@ class ContractsCog(commands.Cog):
             return ""
         remaining_seconds = int(
             float(CONTRACT_FAST_CLEAR_WINDOW_SECONDS)
-            - max(0.0, (_utcnow() - seen_at).total_seconds())
+            - max(0.0, (effective_utcnow(ctx.guild.id) - seen_at).total_seconds())
         )
         if remaining_seconds > 0:
             return (
@@ -1336,6 +1336,8 @@ class ContractsCog(commands.Cog):
     async def on_command(self, ctx: commands.Context):
         if ctx.guild is None or ctx.author.bot or not CONTRACT_AUTO_ASSIGN_ON_COMMAND:
             return
+        if not is_guild_enabled(ctx.guild):
+            return
         await self._ensure_daily_contract(ctx.guild, ctx.author)
 
     @commands.command(name="quest", aliases=["q"])
@@ -1351,7 +1353,7 @@ class ContractsCog(commands.Cog):
 
         st = await self._ensure_daily_contract(ctx.guild, target)
         if target.id == ctx.author.id and not str(st.get("seen_at", "")).strip():
-            st["seen_at"] = _iso(_utcnow())
+            st["seen_at"] = _iso(effective_utcnow(ctx.guild.id))
             await save_data()
 
         # Re-read current state so the display reflects any auto-claim that may have happened elsewhere.

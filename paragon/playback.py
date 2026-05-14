@@ -17,6 +17,7 @@ from discord.ext import commands
 
 from .config import PLAYBACK_VOLUME, YTDLP_COOKIE_FILE, YTDLP_COOKIES_FROM_BROWSER
 from .emojis import EMOJI_BLACK_RIGHT_POINTING_DOUBLE_TRIANGLE
+from .guild_state import is_guild_enabled
 from .ownership import is_control_user_id
 from .stats_store import record_game_fields
 from .storage import save_data
@@ -228,6 +229,7 @@ class PlaybackCog(commands.Cog):
         self._guild_active_vc: dict[int, discord.VoiceClient] = {}
         self._guild_skip_events: dict[int, asyncio.Event] = {}
         self._guild_play_allowed: dict[int, asyncio.Event] = {}
+        self._guild_pause_reasons: dict[int, set[str]] = {}
         self._guild_processing: set[int] = set()
         self._guild_locks: dict[int, asyncio.Lock] = {}
 
@@ -239,6 +241,7 @@ class PlaybackCog(commands.Cog):
         self._guild_active_vc.clear()
         self._guild_skip_events.clear()
         self._guild_play_allowed.clear()
+        self._guild_pause_reasons.clear()
         self._guild_processing.clear()
         self._guild_locks.clear()
 
@@ -369,6 +372,29 @@ class PlaybackCog(commands.Cog):
             self._guild_play_allowed[guild_id] = ev
         return ev
 
+    def _pause_reasons_for(self, guild_id: int) -> set[str]:
+        reasons = self._guild_pause_reasons.get(guild_id)
+        if reasons is None:
+            reasons = set()
+            self._guild_pause_reasons[guild_id] = reasons
+        return reasons
+
+    def _pause_playback(self, guild_id: int, reason: str) -> None:
+        self._pause_reasons_for(guild_id).add(str(reason))
+        self._play_allowed_for(guild_id).clear()
+
+    def _resume_playback(self, guild_id: int, reason: str) -> None:
+        reasons = self._pause_reasons_for(guild_id)
+        reasons.discard(str(reason))
+        if reasons:
+            return
+        self._guild_pause_reasons.pop(guild_id, None)
+        self._play_allowed_for(guild_id).set()
+
+    def _clear_pause_reasons(self, guild_id: int) -> None:
+        self._guild_pause_reasons.pop(guild_id, None)
+        self._play_allowed_for(guild_id).set()
+
     def _lock_for(self, guild_id: int) -> asyncio.Lock:
         lock = self._guild_locks.get(guild_id)
         if lock is None:
@@ -419,6 +445,8 @@ class PlaybackCog(commands.Cog):
         return bool(self._guild_current.get(guild_id) is not None or guild_id in self._guild_processing or pending > 0)
 
     def should_keep_voice_connected(self, guild_id: int) -> bool:
+        if not is_guild_enabled(guild_id):
+            return False
         return self.has_pending_audio(guild_id)
 
     def note_voice_disconnected(self, guild_id: int) -> None:
@@ -441,7 +469,7 @@ class PlaybackCog(commands.Cog):
             )
 
         async with self._lock_for(guild_id):
-            self._play_allowed_for(guild_id).clear()
+            self._pause_playback(guild_id, "tts")
             current = self._guild_current.get(guild_id)
             vc = self._guild_active_vc.get(guild_id) or ctx.voice_client
             if current is not None and vc is not None and (vc.is_playing() or vc.is_paused()):
@@ -453,13 +481,37 @@ class PlaybackCog(commands.Cog):
             return True
 
     async def restore_after_tts(self, guild_id: int) -> None:
-        self._play_allowed_for(guild_id).set()
+        self._resume_playback(guild_id, "tts")
+
+    async def pause_guild(self, guild_id: int) -> None:
+        vc = None
+        async with self._lock_for(guild_id):
+            self._pause_playback(guild_id, "guild_disabled")
+            current = self._guild_current.get(guild_id)
+            vc = self._guild_active_vc.get(guild_id)
+            if vc is None:
+                guild = self.bot.get_guild(guild_id)
+                vc = getattr(guild, "voice_client", None) if guild is not None else None
+            if current is not None and vc is not None and (vc.is_playing() or vc.is_paused()):
+                current.started_offset = self._current_offset(current)
+                try:
+                    vc.stop()
+                except Exception:
+                    pass
+        if vc is not None:
+            try:
+                await cleanup_voice_client(vc)
+            except Exception:
+                pass
+
+    async def resume_guild(self, guild_id: int) -> None:
+        self._resume_playback(guild_id, "guild_disabled")
 
     async def shutdown_guild(self, guild_id: int, *, clear_queue: bool = True, disconnect: bool = False) -> None:
         if clear_queue:
             self._clear_pending_queue(guild_id)
         self._skip_event_for(guild_id).set()
-        self._play_allowed_for(guild_id).set()
+        self._clear_pause_reasons(guild_id)
 
         vc = self._guild_active_vc.get(guild_id)
         if vc is None:
@@ -839,6 +891,7 @@ class PlaybackCog(commands.Cog):
 
         prepared: Optional[_PreparedTrack] = None
         try:
+            await self._play_allowed_for(guild_id).wait()
             self._debug(ctx, f"preparing track title={req.title!r} mode={req.mode}")
             prepared = await asyncio.to_thread(self._prepare_track_download, req)
             prepared.duration_seconds = float(prepared.duration_seconds or req.duration_seconds or 0.0)
@@ -881,6 +934,7 @@ class PlaybackCog(commands.Cog):
                     await ctx.reply(f"Skipped **{prepared.request.title}**.")
                     return
                 if state == "interrupted":
+                    prepared.started_offset = self._current_offset(prepared)
                     if prepared.duration_seconds > 0 and prepared.started_offset >= max(0.0, prepared.duration_seconds - 0.5):
                         return
                     continue
@@ -1036,6 +1090,8 @@ class PlaybackCog(commands.Cog):
             return
 
         guild = current.request.ctx.guild
+        if not is_guild_enabled(guild):
+            return
         voice_channel = guild.get_channel(current.request.target_channel_id)
         if not isinstance(voice_channel, discord.VoiceChannel):
             return

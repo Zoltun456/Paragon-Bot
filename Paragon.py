@@ -16,6 +16,7 @@ from paragon.contracts import ContractsCog
 from paragon.core import CoreCog
 from paragon.fish import FishCog
 from paragon.game_stats import StatsCog
+from paragon.guild_state import is_guild_enabled
 from paragon.lotto import LottoCog
 from paragon.playback import PlaybackCog
 from paragon.prestige import PrestigeCog
@@ -48,7 +49,24 @@ bot = create_bot()
 
 
 @bot.check_once
-async def _global_check(_ctx):
+async def _global_check(ctx: commands.Context):
+    if ctx.guild is None:
+        return True
+    if is_guild_enabled(ctx.guild):
+        return True
+
+    cmd = getattr(ctx, "command", None)
+    cmd_name = str(getattr(cmd, "qualified_name", "") or getattr(cmd, "name", "")).strip().lower()
+    if cmd_name == "bottoggle":
+        return True
+
+    ctx._paragon_disabled_response_sent = True
+    await ctx.reply(
+        f"Paragon is currently **disabled** for this server. "
+        f"Use `{ctx.clean_prefix}bottoggle` from a channel you can still access to re-enable it."
+    )
+    raise commands.CheckFailure("guild_disabled")
+
     return True
 
 

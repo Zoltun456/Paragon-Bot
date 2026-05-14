@@ -23,11 +23,11 @@ from .config import (
     ANAGRAM_SOLVE_MAX_MINUTES,
     ANAGRAM_SOLVE_MAX_PCT,
 )
+from .guild_state import effective_date_key
 from .roles import enforce_level6_exclusive
 from .spin_support import consume_anagram_reward_multiplier
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
-from .time_windows import _date_key, _today_local
 from .xp import grant_stacked_fixed_boost, grant_stacked_fixed_debuff
 
 _builtin_phrases = [
@@ -148,7 +148,7 @@ class AnagramCog(commands.Cog):
 
     @commands.command(name="anagram", aliases=["a"])
     async def anagram(self, ctx: commands.Context, *, guess: Optional[str] = None):
-        today = _date_key(_today_local())
+        today = effective_date_key(ctx.guild.id)
         st = _state(ctx.guild.id, ctx.author.id)
 
         if st.get("date") != today:

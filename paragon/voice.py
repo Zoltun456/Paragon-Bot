@@ -8,6 +8,7 @@ from typing import Optional
 import discord
 from discord.ext import commands, tasks
 
+from .guild_state import is_guild_enabled
 from .ownership import owner_only
 from .voice_runtime import cleanup_voice_client, ensure_voice_client
 from .voice_support import dave_4017_message, dave_support_status, is_dave_close_4017
@@ -58,6 +59,17 @@ class VoiceCog(commands.Cog):
             except Exception:
                 continue
 
+    async def pause_guild(self, guild_id: int) -> None:
+        guild = self.bot.get_guild(int(guild_id))
+        vc = getattr(guild, "voice_client", None) if guild is not None else None
+        if vc is None or not vc.is_connected():
+            return
+        await cleanup_voice_client(vc)
+        self._notify_voice_disconnected(guild_id)
+
+    async def resume_guild(self, guild_id: int) -> None:
+        return
+
     @commands.Cog.listener()
     async def on_ready(self):
         if not self.idle_watchdog.is_running():
@@ -72,6 +84,11 @@ class VoiceCog(commands.Cog):
 
             if vc is None or not vc.is_connected():
                 self._idle_since.pop(guild_id, None)
+                continue
+
+            if not is_guild_enabled(guild):
+                await cleanup_voice_client(vc)
+                self._notify_voice_disconnected(guild_id)
                 continue
 
             if self._should_keep_voice_connected(guild_id, vc):

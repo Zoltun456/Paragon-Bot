@@ -31,6 +31,7 @@ from .emojis import (
     EMOJI_WHITE_CIRCLE,
 )
 from .fish_support import add_bait, consume_bait, get_bait, refund_bait
+from .guild_state import effective_local_now, effective_unix_ts, is_guild_enabled
 from .guild_setup import ensure_guild_setup, get_fishing_channel, get_fishing_channel_id
 from .include import _as_dict, _as_float, _as_int, _fmt_num
 from .ownership import owner_only
@@ -518,8 +519,10 @@ CHEST_LOOT: list[dict[str, object]] = [
 ]
 
 
-def _now_ts() -> int:
-    return int(time.time())
+def _now_ts(guild_id: Optional[int] = None) -> int:
+    if guild_id is None:
+        return int(time.time())
+    return effective_unix_ts(guild_id)
 
 
 def _fmt_pct(value: float) -> str:
@@ -561,8 +564,8 @@ def _reset_session_line(session: dict) -> None:
     session["current_cue"] = ""
 
 
-def _dock_timer_minutes(expires_at: int, *, now_ts: Optional[int] = None) -> int:
-    now = _now_ts() if now_ts is None else int(now_ts)
+def _dock_timer_minutes(expires_at: int, *, now_ts: Optional[int] = None, guild_id: Optional[int] = None) -> int:
+    now = _now_ts(guild_id) if now_ts is None else int(now_ts)
     remaining = max(0, int(expires_at) - now)
     if remaining <= 0:
         return 0
@@ -665,7 +668,7 @@ def _water_state(st: dict) -> dict:
 
 def _roll_water_state(gid: int) -> bool:
     st = _state_root(gid)
-    now = _now_ts()
+    now = _now_ts(gid)
     current_key = str(st.get("state_key", "")).strip().lower()
     if current_key in WATER_STATES and _as_int(st.get("state_expires_at", 0), 0) > now:
         return False
@@ -745,7 +748,7 @@ async def _grant_bonus_spins(gid: int, uid: int, amount: int) -> int:
         wheel_state.get("reset_minute", 0),
     )
     ust = _spin_user_state(gid, uid)
-    _sync_spin_cycle_state(ust, _cycle_key(h, m))
+    _sync_spin_cycle_state(ust, _cycle_key(h, m, now=effective_local_now(gid)))
     return _add_bonus_spins(ust, max(1, int(amount)))
 
 
@@ -753,8 +756,8 @@ class FishCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    def _mark_manual_session_action(self, session: dict) -> int:
-        now = _now_ts()
+    def _mark_manual_session_action(self, guild_id: int, session: dict) -> int:
+        now = _now_ts(guild_id)
         session["last_manual_action_at"] = int(now)
         return int(now)
 
@@ -882,7 +885,7 @@ class FishCog(commands.Cog):
             st = _state_root(guild.id)
         water = _water_state(st)
         active_lines = sum(1 for _, sess in _active_sessions(guild.id) if bool(sess.get("active", False)))
-        timer_minutes = _dock_timer_minutes(_as_int(st.get("state_expires_at", 0), 0))
+        timer_minutes = _dock_timer_minutes(_as_int(st.get("state_expires_at", 0), 0), guild_id=guild.id)
         return _join_lines(
             [
                 "**Paragon Fishing Dock**",
@@ -908,7 +911,7 @@ class FishCog(commands.Cog):
         msg = await self._fetch_message(channel, _as_int(st.get("dock_message_id", 0), 0))
         content = self._render_dock(guild)
         st = _state_root(guild.id)
-        timer_minutes = _dock_timer_minutes(_as_int(st.get("state_expires_at", 0), 0))
+        timer_minutes = _dock_timer_minutes(_as_int(st.get("state_expires_at", 0), 0), guild_id=guild.id)
         changed = False
 
         if msg is None:
@@ -966,7 +969,7 @@ class FishCog(commands.Cog):
     ) -> bool:
         gid = guild.id
         uid = member.id
-        now = _now_ts()
+        now = _now_ts(gid)
         state_root = _state_root(gid)
         state_changed = _roll_water_state(gid)
         if state_changed or not str(state_root.get("state_key", "")).strip():
@@ -1200,7 +1203,7 @@ class FishCog(commands.Cog):
         if not fish:
             fish = _roll_fish_for_state(guild.id, member.id, str(session.get("cast_state_key", "")).strip().lower())
             session["fish"] = fish
-        self._mark_manual_session_action(session)
+        self._mark_manual_session_action(guild.id, session)
         session["phase"] = "fight"
         session["successes"] = 0
         session["mistakes"] = 0
@@ -1395,7 +1398,7 @@ class FishCog(commands.Cog):
             await channel.send(f"{member.mention} is not currently in a reel fight.")
             return
 
-        self._mark_manual_session_action(session)
+        self._mark_manual_session_action(guild.id, session)
         choice = str(action).strip().lower()
         correct = str(session.get("current_action", "")).strip().lower()
         if choice == correct:
@@ -1455,11 +1458,13 @@ class FishCog(commands.Cog):
     async def fishing_loop(self):
         for guild in list(self.bot.guilds):
             try:
+                if not is_guild_enabled(guild):
+                    continue
                 st = _state_root(guild.id)
                 state_changed = _roll_water_state(guild.id)
                 guild_changed = state_changed
-                now_ts = _now_ts()
-                timer_minutes = _dock_timer_minutes(_as_int(st.get("state_expires_at", 0), 0))
+                now_ts = _now_ts(guild.id)
+                timer_minutes = _dock_timer_minutes(_as_int(st.get("state_expires_at", 0), 0), now_ts=now_ts)
                 timer_changed = timer_minutes != _as_int(st.get("dock_timer_minutes", -1), -1)
                 if state_changed:
                     guild_changed = bool(await self._ensure_dock_message(guild, force_refresh=True)) or guild_changed
@@ -1506,6 +1511,8 @@ class FishCog(commands.Cog):
             return
         guild = self.bot.get_guild(payload.guild_id or 0)
         if guild is None:
+            return
+        if not is_guild_enabled(guild):
             return
         fishing_channel_id = int(get_fishing_channel_id(guild.id) or 0)
         if fishing_channel_id <= 0 or payload.channel_id != fishing_channel_id:

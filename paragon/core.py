@@ -7,11 +7,11 @@ from discord.ext import commands, tasks
 
 from .config import resolve_afk_channel_id
 from .emojis import EMOJI_BULLET, EMOJI_FIRST_PLACE_MEDAL, EMOJI_SECOND_PLACE_MEDAL, EMOJI_THIRD_PLACE_MEDAL
+from .guild_state import effective_date_key, effective_unix_ts, guild_settings, is_guild_enabled
 from .guild_setup import ensure_guild_setup
 from .include import _as_dict, _as_int, _as_list
 from .stats_store import record_game_fields
 from .storage import load_data, _gdict, _udict, save_data
-from .time_windows import _date_key, _today_local
 from .xp import apply_delta, get_gain_state, grant_fixed_boost, grant_fixed_debuff
 from .roles import enforce_level6_exclusive
 from .ownership import owner_only, is_control_user_id
@@ -86,18 +86,12 @@ HELP_DESCRIPTIONS = {
     "adjust": "Admin: add or subtract XP from a user.",
     "retroprestige": "Admin: remap prestige tiers from logged prestige-spend XP under the current curve.",
     "softreset": "Admin: reset a user's current XP, prestige, and wheel rewards without deleting stats.",
+    "bottoggle": "Admin: disable or re-enable Paragon for this server with a confirmation step.",
     "fishreroll": "Owner: reroll the current fishing water state immediately.",
 }
 
 def _settings(gid: int) -> dict:
-    g = _gdict(gid)
-    st = g.get("settings")
-    if st is None:
-        st = {"inactive_loss_enabled": True}
-        g["settings"] = st
-    elif "inactive_loss_enabled" not in st:
-        st["inactive_loss_enabled"] = True
-    return st
+    return guild_settings(gid)
 
 
 def is_in_countable_vc(channel: Optional[discord.VoiceChannel]) -> bool:
@@ -141,8 +135,8 @@ WINGMAN_TARGET_MINUTES = 45
 PARTY_BUS_MIN_HUMANS = 3
 TOUCH_GRASS_MIN_SECONDS = 30 * 60
 
-def _utcnow_ts() -> int:
-    return int(discord.utils.utcnow().timestamp())
+def _utcnow_ts(gid: int) -> int:
+    return effective_unix_ts(gid)
 
 
 def _parse_iso_ts(value) -> int:
@@ -165,7 +159,7 @@ def _activity_state(gid: int, uid: int) -> dict:
         st = {}
         u["activity_quests"] = st
 
-    today = _date_key(_today_local())
+    today = effective_date_key(gid)
     if str(st.get("date", "")) != today:
         last_activity_ts = _as_int(st.get("last_activity_ts", 0))
         last_text_channel_id = _as_int(st.get("last_text_channel_id", 0))
@@ -253,7 +247,7 @@ class CoreCog(commands.Cog):
     async def _register_activity(self, member: discord.Member, *, channel=None) -> bool:
         state = _activity_state(member.guild.id, member.id)
         previous_activity_ts = _as_int(state.get("last_activity_ts", 0))
-        now_ts = _utcnow_ts()
+        now_ts = _utcnow_ts(member.guild.id)
         changed = False
 
         if channel is not None:
@@ -379,7 +373,7 @@ class CoreCog(commands.Cog):
 
         record_game_fields(member.guild.id, member.id, "voice", minutes_in_call=1)
         state = _activity_state(member.guild.id, member.id)
-        state["last_activity_ts"] = _utcnow_ts()
+        state["last_activity_ts"] = _utcnow_ts(member.guild.id)
         human_members = [m for m in channel.members if isinstance(m, discord.Member) and not m.bot]
         if len(human_members) >= PARTY_BUS_MIN_HUMANS:
             record_game_fields(member.guild.id, member.id, "voice", party_bus_minutes=1)
@@ -564,6 +558,8 @@ class CoreCog(commands.Cog):
     async def award_loop(self):
         # One passive gain tick per minute for every non-bot member.
         for guild in self.bot.guilds:
+            if not is_guild_enabled(guild):
+                continue
             _gdict(guild.id)
             for member in guild.members:
                 if member.bot:
@@ -581,6 +577,8 @@ class CoreCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.guild is None or message.author.bot:
+            return
+        if not is_guild_enabled(message.guild):
             return
         member = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
         if member is None or member.bot:
@@ -600,6 +598,8 @@ class CoreCog(commands.Cog):
     async def on_command_completion(self, ctx: commands.Context):
         if ctx.guild is None or ctx.author.bot:
             return
+        if not is_guild_enabled(ctx.guild):
+            return
 
         changed = await self._register_activity(ctx.author, channel=ctx.channel)
         changed = self._record_command_usage(ctx) or changed
@@ -615,6 +615,8 @@ class CoreCog(commands.Cog):
         after: discord.VoiceState,
     ):
         if member.bot or member.guild is None:
+            return
+        if not is_guild_enabled(member.guild):
             return
         if before.channel == after.channel and before.self_mute == after.self_mute and before.self_deaf == after.self_deaf and before.mute == after.mute and before.deaf == after.deaf:
             return
@@ -817,7 +819,7 @@ class CoreCog(commands.Cog):
             await ctx.reply(msg)
             return
 
-        now = int(discord.utils.utcnow().timestamp())
+        now = effective_unix_ts(ctx.guild.id)
         key = "xp_boosts" if sign == "+" else "xp_debuffs"
         target_pct = amount / 100.0
         tolerance_pct = 0.0005
@@ -867,6 +869,8 @@ class CoreCog(commands.Cog):
         )
         orig = getattr(error, "original", error)
         try:
+            if getattr(ctx, "_paragon_disabled_response_sent", False):
+                return
             if isinstance(orig, CommandNotFound):
                 await ctx.reply(f"Unknown command. Try `{ctx.clean_prefix}help`."); return
             if isinstance(orig, CheckFailure):

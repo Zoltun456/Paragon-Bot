@@ -45,6 +45,7 @@ from .emojis import (
     EMOJI_WHITE_RIGHT_POINTING_BACKHAND_INDEX,
 )
 from .guild_setup import get_blackjack_channel_id
+from .guild_state import effective_local_now, effective_unix_ts, is_guild_enabled
 from .storage import _gdict, _udict, save_data
 from .stats_store import record_game_fields, record_xp_change
 from .spin_support import consume_blackjack_natural_charge
@@ -136,8 +137,10 @@ def value_of_hand(cards: List[str]) -> Tuple[int, bool]:
 def pretty(cards: List[str]) -> str:
     return " ".join(cards)
 
-def now_ts() -> int:
-    return int(time.time())
+def now_ts(guild_id: Optional[int] = None) -> int:
+    if guild_id is None:
+        return int(time.time())
+    return effective_unix_ts(guild_id)
 
 def rank_of(card: str) -> str:
     r = card[:-1] if card[:-1] else card[0]
@@ -252,6 +255,7 @@ def _cycle_key(hour: int, minute: int, *, now: Optional[datetime] = None) -> str
 def _table(gid: int) -> dict:
     g = _gdict(gid)
     st = g.setdefault("blackjack", {})
+    st.setdefault("guild_id", int(gid))
     st.setdefault("dealing_lock", False)
     st.setdefault("active", True)  # legacy flag; table is always available
     st.setdefault("players", {})  # uid -> per-player dict (see below)
@@ -332,7 +336,7 @@ class BlackjackCog(commands.Cog):
     def _current_cycle_key(self, gid: int) -> str:
         st = _table(gid)
         h, m = _sanitize_reset_time(st.get("reset_hour", BJ_DAILY_RESET_HOUR), st.get("reset_minute", BJ_DAILY_RESET_MINUTE))
-        return _cycle_key(h, m)
+        return _cycle_key(h, m, now=effective_local_now(gid))
 
     def _daily_state(self, gid: int, uid: int, cycle_key: str) -> dict:
         u = _udict(gid, uid)
@@ -362,7 +366,7 @@ class BlackjackCog(commands.Cog):
     async def _roll_cycle_if_needed(self, guild: discord.Guild, channel: Optional[discord.TextChannel] = None):
         st = _table(guild.id)
         h, m = _sanitize_reset_time(st.get("reset_hour", BJ_DAILY_RESET_HOUR), st.get("reset_minute", BJ_DAILY_RESET_MINUTE))
-        current_key = _cycle_key(h, m)
+        current_key = _cycle_key(h, m, now=effective_local_now(guild.id))
         prev_key = str(st.get("last_cycle_key", ""))
         if prev_key == current_key:
             return
@@ -384,7 +388,7 @@ class BlackjackCog(commands.Cog):
         lost = normalized == "loss"
         cooldown_on = self._cooldown_enabled(guild.id)
         d["locked"] = bool(lost and cooldown_on)
-        d["locked_ts"] = now_ts() if lost and cooldown_on else 0
+        d["locked_ts"] = now_ts(guild.id) if lost and cooldown_on else 0
         d["last_result"] = normalized if normalized in {"win", "loss", "push"} else ""
         d["streak"] = 0
         await save_data()
@@ -409,17 +413,19 @@ class BlackjackCog(commands.Cog):
                 "stood2": False, "busted2": False, "finished2": False, "doubled2": False, "surrendered2": False,
                 "status": "betting",
                 "in_table": False,
-                "joined_ts": now_ts(),
-                "last_active_ts": now_ts(),
+                "guild_id": int(gid),
+                "joined_ts": now_ts(gid),
+                "last_active_ts": now_ts(gid),
                 "natural_bj": False,  # only for unsplit original
             }
             st["players"][str(uid)] = p
         else:
+            p.setdefault("guild_id", int(gid))
             p.setdefault("in_table", False)
             p.setdefault("locked", 0)
             p.setdefault("dealt_hand", [])
             p.setdefault("replay_hand", [])
-            p.setdefault("last_active_ts", now_ts())
+            p.setdefault("last_active_ts", now_ts(gid))
         return p
 
     def _hand_ref(self, p: dict) -> List[str]:
@@ -513,12 +519,13 @@ class BlackjackCog(commands.Cog):
             return None
 
     def _touch_player(self, p: dict):
-        p["last_active_ts"] = now_ts()
+        p["last_active_ts"] = now_ts(_as_int(p.get("guild_id", 0), 0))
 
-    def _touch(self, st: dict): st["last_action_ts"] = now_ts()
+    def _touch(self, st: dict): st["last_action_ts"] = now_ts(_as_int(st.get("guild_id", 0), 0))
     def _start_turn(self, st: dict):
-        st["turn_started_ts"] = now_ts()
-        st["last_action_ts"] = now_ts()
+        gid = _as_int(st.get("guild_id", 0), 0)
+        st["turn_started_ts"] = now_ts(gid)
+        st["last_action_ts"] = now_ts(gid)
     class _ShimCtx:
         def __init__(self, guild: discord.Guild, channel: discord.TextChannel):
             self.guild = guild
@@ -544,12 +551,12 @@ class BlackjackCog(commands.Cog):
         force: bool = False,
     ):
         st = _table(guild.id)
-        now = now_ts()
+        now = now_ts(guild.id)
         last_cleanup = int(st.get("last_cleanup_ts", 0))
         if not force and (now - last_cleanup) < MESSAGE_CLEANUP_INTERVAL_SECONDS:
             return
 
-        cutoff_ts = discord.utils.utcnow().timestamp() - MESSAGE_RETENTION_SECONDS
+        cutoff_ts = float(effective_unix_ts(guild.id)) - MESSAGE_RETENTION_SECONDS
         bot_user_id = int(self.bot.user.id) if self.bot and self.bot.user else 0
         preserve_ids: set[int] = set()
         for k in ("deal_msg_id", "action_msg_id"):
@@ -625,7 +632,7 @@ class BlackjackCog(commands.Cog):
         locked, daily = self._is_locked(guild.id, member.id)
         if locked:
             h, m = _sanitize_reset_time(st.get("reset_hour", BJ_DAILY_RESET_HOUR), st.get("reset_minute", BJ_DAILY_RESET_MINUTE))
-            nxt = _next_reset_dt(h, m)
+            nxt = _next_reset_dt(h, m, now=effective_local_now(guild.id))
             await channel.send(f"**{member.display_name}** is locked out until **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**.")
             return False
 
@@ -674,7 +681,7 @@ class BlackjackCog(commands.Cog):
         p["locked"] = desired_bet
         p["status"] = "betting"
         p["in_table"] = True
-        p["joined_ts"] = now_ts()
+        p["joined_ts"] = now_ts(guild.id)
         self._touch_player(p)
         self._touch(st)
         st["phase"] = "betting"
@@ -855,7 +862,7 @@ class BlackjackCog(commands.Cog):
         st = _table(ctx.guild.id)
         cur_h, cur_m = _sanitize_reset_time(st.get("reset_hour", BJ_DAILY_RESET_HOUR), st.get("reset_minute", BJ_DAILY_RESET_MINUTE))
         if not when:
-            nxt = _next_reset_dt(cur_h, cur_m)
+            nxt = _next_reset_dt(cur_h, cur_m, now=effective_local_now(ctx.guild.id))
             await ctx.reply(
                 f"Blackjack reset time is **{_draw_time_label(cur_h, cur_m)}**.\n"
                 f"Next reset: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**."
@@ -874,9 +881,9 @@ class BlackjackCog(commands.Cog):
         h, m = parsed
         st["reset_hour"] = int(h)
         st["reset_minute"] = int(m)
-        st["last_cycle_key"] = _cycle_key(h, m)
+        st["last_cycle_key"] = _cycle_key(h, m, now=effective_local_now(ctx.guild.id))
         await save_data()
-        nxt = _next_reset_dt(h, m)
+        nxt = _next_reset_dt(h, m, now=effective_local_now(ctx.guild.id))
         await ctx.reply(
             f"Blackjack reset time set to **{_draw_time_label(h, m)}** by {ctx.author.mention}.\n"
             f"Next reset: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**."
@@ -1014,7 +1021,7 @@ class BlackjackCog(commands.Cog):
         seated = self._seated_order(st, ctx.guild)
         dealer = st.get("dealer", [])
         h, m = _sanitize_reset_time(st.get("reset_hour", BJ_DAILY_RESET_HOUR), st.get("reset_minute", BJ_DAILY_RESET_MINUTE))
-        nxt = _next_reset_dt(h, m)
+        nxt = _next_reset_dt(h, m, now=effective_local_now(ctx.guild.id))
 
         lines = [
             "**Blackjack Table**",
@@ -1085,7 +1092,7 @@ class BlackjackCog(commands.Cog):
                 "natural_bj": False,
                 "in_table": False,
             })
-            p["last_active_ts"] = now_ts()
+            p["last_active_ts"] = now_ts(guild.id)
 
         self._touch(st)
         await save_data()
@@ -1570,6 +1577,7 @@ class BlackjackCog(commands.Cog):
         if self.bot.user and payload.user_id == self.bot.user.id: return
         guild = self.bot.get_guild(payload.guild_id or 0)
         if not guild: return
+        if not is_guild_enabled(guild): return
         st = _table(guild.id)
         fallback_channel_id = int(get_blackjack_channel_id(guild.id) or 0)
         ch = guild.get_channel(int(st.get("channel_id", 0) or fallback_channel_id))
@@ -1664,6 +1672,8 @@ class BlackjackCog(commands.Cog):
     @tasks.loop(seconds=5)
     async def guard_loop(self):
         for guild in self.bot.guilds:
+            if not is_guild_enabled(guild):
+                continue
             st = _table(guild.id)
             fallback_channel_id = int(get_blackjack_channel_id(guild.id) or 0)
             ch = guild.get_channel(int(st.get("channel_id", 0) or fallback_channel_id))
@@ -1681,7 +1691,7 @@ class BlackjackCog(commands.Cog):
                     if not p.get("in_table"):
                         continue
                     last_active = int(p.get("last_active_ts", p.get("joined_ts", 0)) or 0)
-                    if last_active and now_ts() - last_active > idle_cutoff:
+                    if last_active and now_ts(guild.id) - last_active > idle_cutoff:
                         await self._remove_from_table(
                             guild,
                             ch,
@@ -1702,7 +1712,7 @@ class BlackjackCog(commands.Cog):
             cur_uid = acting_ids[st.get("turn_idx", 0) % len(acting_ids)]
             started = int(st.get("turn_started_ts", 0))
             timeout_s = int(BJ_TURN_TIMEOUT_SECONDS)
-            if started and now_ts() - started > timeout_s:
+            if started and now_ts(guild.id) - started > timeout_s:
                 await self._remove_from_table(
                     guild,
                     ch,

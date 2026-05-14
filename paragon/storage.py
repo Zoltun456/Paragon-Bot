@@ -49,7 +49,13 @@ def _default_state() -> Dict[str, Any]:
 def _default_guild_state() -> Dict[str, Any]:
     return {
         "users": {},
-        "settings": {"inactive_loss_enabled": True},
+        "settings": {
+            "inactive_loss_enabled": True,
+            "bot_enabled": True,
+            "bot_disabled_at": "",
+            "bot_paused_seconds": 0.0,
+            "bot_channel_snapshots": {},
+        },
         "channels": {},
     }
 
@@ -76,6 +82,14 @@ def _normalize_guild_state(payload: Any) -> Dict[str, Any]:
         payload["settings"] = settings
     if "inactive_loss_enabled" not in settings:
         settings["inactive_loss_enabled"] = True
+    if "bot_enabled" not in settings:
+        settings["bot_enabled"] = True
+    if "bot_disabled_at" not in settings:
+        settings["bot_disabled_at"] = ""
+    if "bot_paused_seconds" not in settings:
+        settings["bot_paused_seconds"] = 0.0
+    if not isinstance(settings.get("bot_channel_snapshots"), dict):
+        settings["bot_channel_snapshots"] = {}
     return payload
 
 

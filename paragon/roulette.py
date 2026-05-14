@@ -18,6 +18,7 @@ from .config import (
     ROULETTE_MIN_SUCCESS_CHANCE,
     ROULETTE_MIN_TIMEOUT_SECONDS,
 )
+from .guild_state import effective_date_key, effective_unix_ts
 from .spin_support import (
     consume_roulette_accuracy_bonus,
     consume_roulette_backfire_shield,
@@ -26,9 +27,10 @@ from .spin_support import (
 )
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
-from .time_windows import _date_key, _today_local
 
 ROULETTE_CENTER_TIMEOUT_SECONDS = 60
+ROULETTE_TIMEOUT_UNTIL_KEY = "roulette_timeout_until_ts"
+ROULETTE_PAUSED_TIMEOUT_SECONDS_KEY = "roulette_timeout_paused_seconds"
 
 
 def _get_user_prestige(member: discord.Member) -> int:
@@ -42,7 +44,7 @@ def _roulette_daily_state(gid: int, uid: int) -> dict:
     if not isinstance(st, dict):
         st = {}
         u["roulette_daily"] = st
-    today = _date_key(_today_local())
+    today = effective_date_key(gid)
     if str(st.get("date", "")) != today:
         st["date"] = today
         st["backfired"] = False
@@ -95,6 +97,63 @@ def _fmt_remaining(seconds: int) -> str:
     return f"{mins}m {rem:02d}s"
 
 
+def _member_timeout_until(member: discord.Member) -> Optional[datetime]:
+    until = getattr(member, "communication_disabled_until", None)
+    if isinstance(until, datetime):
+        return until
+    until = getattr(member, "timed_out_until", None)
+    if isinstance(until, datetime):
+        return until
+    return None
+
+
+def _clear_timeout_state(gid: int, uid: int) -> bool:
+    u = _udict(gid, uid)
+    changed = False
+    for key in (ROULETTE_TIMEOUT_UNTIL_KEY, ROULETTE_PAUSED_TIMEOUT_SECONDS_KEY):
+        if key in u:
+            u.pop(key, None)
+            changed = True
+    return changed
+
+
+def _stored_timeout_until_ts(gid: int, uid: int) -> int:
+    u = _udict(gid, uid)
+    return max(0, int(float(u.get(ROULETTE_TIMEOUT_UNTIL_KEY, 0.0) or 0.0)))
+
+
+def _stored_timeout_remaining_seconds(gid: int, uid: int) -> int:
+    u = _udict(gid, uid)
+    paused = max(0, int(float(u.get(ROULETTE_PAUSED_TIMEOUT_SECONDS_KEY, 0.0) or 0.0)))
+    if paused > 0:
+        return paused
+    until_ts = _stored_timeout_until_ts(gid, uid)
+    if until_ts <= 0:
+        return 0
+    remaining = max(0, until_ts - effective_unix_ts(gid))
+    if remaining <= 0:
+        _clear_timeout_state(gid, uid)
+    return remaining
+
+
+def _store_active_timeout(gid: int, uid: int, seconds: int) -> None:
+    u = _udict(gid, uid)
+    remaining = max(1, int(seconds))
+    u[ROULETTE_TIMEOUT_UNTIL_KEY] = float(effective_unix_ts(gid) + remaining)
+    u[ROULETTE_PAUSED_TIMEOUT_SECONDS_KEY] = 0
+
+
+async def _clear_timeout_member(member: discord.Member, reason: str) -> bool:
+    try:
+        if hasattr(member, "timeout"):
+            await member.timeout(None, reason=reason)
+        else:
+            await member.edit(communication_disabled_until=None, reason=reason)
+        return True
+    except (discord.Forbidden, discord.HTTPException):
+        return False
+
+
 async def _timeout_member(member: discord.Member, seconds: int, reason: str) -> bool:
     """
     Apply timeout. Returns True if applied, False if missing perms / HTTP error.
@@ -125,6 +184,61 @@ class RouletteCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def pause_guild(self, guild_id: int) -> None:
+        guild = self.bot.get_guild(int(guild_id))
+        if guild is None:
+            return
+        changed = False
+        now_utc = datetime.now(timezone.utc)
+        for member in guild.members:
+            if member.bot:
+                continue
+            stored_until_ts = _stored_timeout_until_ts(guild.id, member.id)
+            if stored_until_ts <= 0:
+                continue
+            stored_remaining = max(0, stored_until_ts - effective_unix_ts(guild.id))
+            if stored_remaining <= 0:
+                changed = _clear_timeout_state(guild.id, member.id) or changed
+                continue
+            live_until = _member_timeout_until(member)
+            if live_until is None:
+                changed = _clear_timeout_state(guild.id, member.id) or changed
+                continue
+            live_remaining = max(0, int(math.ceil((live_until.astimezone(timezone.utc) - now_utc).total_seconds())))
+            if abs(live_remaining - stored_remaining) > 5:
+                continue
+            if await _clear_timeout_member(member, "Roulette timeout paused while Paragon is disabled"):
+                u = _udict(guild.id, member.id)
+                u[ROULETTE_TIMEOUT_UNTIL_KEY] = 0
+                u[ROULETTE_PAUSED_TIMEOUT_SECONDS_KEY] = stored_remaining
+                changed = True
+        if changed:
+            await save_data()
+
+    async def resume_guild(self, guild_id: int) -> None:
+        guild = self.bot.get_guild(int(guild_id))
+        if guild is None:
+            return
+        changed = False
+        for member in guild.members:
+            if member.bot:
+                continue
+            remaining = _stored_timeout_remaining_seconds(guild.id, member.id)
+            u = _udict(guild.id, member.id)
+            paused = max(0, int(float(u.get(ROULETTE_PAUSED_TIMEOUT_SECONDS_KEY, 0.0) or 0.0)))
+            if paused <= 0:
+                continue
+            if remaining <= 0:
+                changed = _clear_timeout_state(guild.id, member.id) or changed
+                continue
+            if await _timeout_member(member, remaining, "Roulette timeout resumed after Paragon re-enabled"):
+                _store_active_timeout(guild.id, member.id, remaining)
+                changed = True
+            else:
+                changed = _clear_timeout_state(guild.id, member.id) or changed
+        if changed:
+            await save_data()
+
     @commands.command(name="roulette", aliases=["r"])
     async def roulette(self, ctx: commands.Context, target: Optional[discord.Member] = None):
         author: discord.Member = ctx.author  # type: ignore
@@ -142,6 +256,9 @@ class RouletteCog(commands.Cog):
             await ctx.reply("Target must be a member of this server.")
             return
 
+        _stored_timeout_remaining_seconds(ctx.guild.id, author.id)
+        _stored_timeout_remaining_seconds(ctx.guild.id, target.id)
+
         if not author.voice or not author.voice.channel:
             await ctx.reply("You must be in a voice channel to use roulette.")
             return
@@ -151,7 +268,7 @@ class RouletteCog(commands.Cog):
 
         user_state = _udict(ctx.guild.id, author.id)
         daily_state = _roulette_daily_state(ctx.guild.id, author.id)
-        now_ts = time.time()
+        now_ts = float(effective_unix_ts(ctx.guild.id))
         next_ts = float(user_state.get("roulette_next_ts", 0.0) or 0.0)
         if now_ts < next_ts:
             remaining = int(math.ceil(next_ts - now_ts))
@@ -200,9 +317,10 @@ class RouletteCog(commands.Cog):
                 success_fields["successes_after_backfire"] = 1
             record_game_fields(ctx.guild.id, author.id, "roulette", **success_fields)
             if applied:
+                _store_active_timeout(ctx.guild.id, target.id, final_timeout_seconds)
                 if timeout_bonus_seconds > 0:
                     consume_roulette_timeout_bonus_seconds(ctx.guild.id, author.id)
-                    await save_data()
+                await save_data()
                 record_game_fields(ctx.guild.id, target.id, "roulette", got_timed_out=1)
                 wheel_line = (
                     f"Wheel aim bonus applied: **+{wheel_aim_bonus * 100.0:.1f}%**.\n"
@@ -262,6 +380,8 @@ class RouletteCog(commands.Cog):
         )
         record_game_fields(ctx.guild.id, author.id, "roulette", backfires=1)
         if applied:
+            _store_active_timeout(ctx.guild.id, author.id, backfire_timeout_seconds)
+            await save_data()
             record_game_fields(ctx.guild.id, author.id, "roulette", got_timed_out=1)
             wheel_line = (
                 f"Wheel aim bonus applied: **+{wheel_aim_bonus * 100.0:.1f}%**.\n"

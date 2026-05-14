@@ -25,23 +25,31 @@ from .config import (
     COMMAND_PREFIX,
     resolve_afk_channel_id,
 )
+from .guild_state import effective_date_key, effective_utcnow, effective_yesterday_key, is_guild_enabled
 from .guild_setup import get_log_channel
-from .include import _as_dict, _as_float, _as_int, _iso, _parse_iso, _utcnow
+from .include import _as_dict, _as_float, _as_int, _iso, _parse_iso
 from .roles import enforce_level6_exclusive
 from .stats_store import record_game_fields
 from .storage import _gdict, _udict, save_data
-from .time_windows import _date_key, _today_local
 from .xp import grant_bonus_xp_equivalent_boost, grant_fixed_debuff, prestige_passive_rate
 
 
 BOUNTY_VERSION = 1
 
-def _today_key() -> str:
-    return _date_key(_today_local())
+def _today_key(gid: int) -> str:
+    return effective_date_key(gid)
 
 
-def _yesterday_key() -> str:
-    return _date_key(_today_local() - timedelta(days=1))
+def _yesterday_key(gid: int) -> str:
+    return effective_yesterday_key(gid)
+
+
+def _today_key_for_guild(gid: int) -> str:
+    return _today_key(gid)
+
+
+def _yesterday_key_for_guild(gid: int) -> str:
+    return _yesterday_key(gid)
 
 
 def _fmt_duration_seconds(seconds: int | float) -> str:
@@ -161,8 +169,8 @@ def _clear_claim_state(st: dict) -> None:
     st["claim_message_channel_id"] = 0
 
 
-def _prune_cooldowns(st: dict, *, now_ts: Optional[int] = None) -> bool:
-    current = int(_utcnow().timestamp()) if now_ts is None else int(now_ts)
+def _prune_cooldowns(gid: int, st: dict, *, now_ts: Optional[int] = None) -> bool:
+    current = int(effective_utcnow(gid).timestamp()) if now_ts is None else int(now_ts)
     raw = _as_dict(st.get("cooldowns"))
     kept = {
         str(uid): _as_int(expires_at, 0)
@@ -191,11 +199,11 @@ def _claimant_member(guild: discord.Guild, st: dict) -> Optional[discord.Member]
     return member if isinstance(member, discord.Member) and not member.bot else None
 
 
-def _claim_remaining_seconds(st: dict) -> int:
+def _claim_remaining_seconds(gid: int, st: dict) -> int:
     expires_at = _parse_iso(st.get("claim_expires_at"))
     if expires_at is None:
         return 0
-    return max(0, int((expires_at - _utcnow()).total_seconds()))
+    return max(0, int((expires_at - effective_utcnow(gid)).total_seconds()))
 
 
 def _bounty_target_is_public(st: dict) -> bool:
@@ -270,6 +278,23 @@ class BountyCog(commands.Cog):
         if task is not None and task is not current:
             task.cancel()
 
+    async def pause_guild(self, guild_id: int) -> None:
+        self._cancel_claim_task(guild_id)
+
+    async def resume_guild(self, guild_id: int) -> None:
+        guild = self.bot.get_guild(int(guild_id))
+        if guild is None or not is_guild_enabled(guild):
+            return
+        async with self._lock_for(guild.id):
+            st = _bounty_state(guild.id)
+            if _as_int(st.get("claimant_user_id", 0), 0) <= 0 or bool(st.get("resolved", False)):
+                return
+            remaining = _claim_remaining_seconds(guild.id, st)
+            if remaining <= 0:
+                return
+        if guild.id not in self._claim_tasks:
+            self._claim_tasks[guild.id] = asyncio.create_task(self._claim_countdown(guild.id, delay_seconds=remaining))
+
     def _eligible_user_ids(self, guild: discord.Guild, day_key: str) -> list[int]:
         out: list[int] = []
         for member in guild.members:
@@ -324,8 +349,8 @@ class BountyCog(commands.Cog):
         notices: list[str] = []
         async with self._lock_for(guild.id):
             st = _bounty_state(guild.id)
-            changed = _prune_cooldowns(st)
-            today_key = _today_key()
+            changed = _prune_cooldowns(guild.id, st)
+            today_key = _today_key_for_guild(guild.id)
             current_date = str(st.get("date", "")).strip()
 
             if current_date == today_key:
@@ -379,7 +404,7 @@ class BountyCog(commands.Cog):
                         )
                     await enforce_level6_exclusive(guild)
 
-            eligible_ids = self._eligible_user_ids(guild, _yesterday_key())
+            eligible_ids = self._eligible_user_ids(guild, _yesterday_key_for_guild(guild.id))
             target_user_id = self._pick_daily_target(guild, today_key=today_key, eligible_ids=eligible_ids)
             self._reset_for_today(st, today_key, target_user_id)
             changed = True
@@ -435,7 +460,7 @@ class BountyCog(commands.Cog):
 
         async with self._lock_for(guild.id):
             st = _bounty_state(guild.id)
-            if str(st.get("date", "")) != _today_key():
+            if str(st.get("date", "")) != _today_key_for_guild(guild.id):
                 return
             if bool(st.get("announced", False)):
                 return
@@ -492,7 +517,7 @@ class BountyCog(commands.Cog):
             target = guild.get_member(target_id)
             message_channel_id = _as_int(st.get("claim_message_channel_id", 0), 0)
             if stopped_by_target:
-                st["cooldowns"][str(claimant_id)] = int(_utcnow().timestamp()) + max(1, int(BOUNTY_STOP_COOLDOWN_SECONDS))
+                st["cooldowns"][str(claimant_id)] = int(effective_utcnow(guild.id).timestamp()) + max(1, int(BOUNTY_STOP_COOLDOWN_SECONDS))
                 st["stop_count"] = _as_int(st.get("stop_count", 0), 0) + 1
                 if claimant is not None:
                     record_game_fields(guild.id, claimant.id, "bounty", failed_claims=1, stopped_claims=1)
@@ -613,11 +638,14 @@ class BountyCog(commands.Cog):
                 f"{target.mention} took {target_debuff_line}."
             )
 
-    async def _claim_countdown(self, guild_id: int) -> None:
+    async def _claim_countdown(self, guild_id: int, *, delay_seconds: Optional[int] = None) -> None:
         try:
-            await asyncio.sleep(max(1, int(BOUNTY_CLAIM_SECONDS)))
+            delay = max(1, int(delay_seconds if delay_seconds is not None else BOUNTY_CLAIM_SECONDS))
+            await asyncio.sleep(delay)
             guild = self.bot.get_guild(guild_id)
             if guild is None:
+                return
+            if not is_guild_enabled(guild):
                 return
 
             text = await self._complete_claim(guild)
@@ -670,7 +698,7 @@ class BountyCog(commands.Cog):
 
         async with self._lock_for(guild.id):
             st = _bounty_state(guild.id)
-            if str(st.get("date", "")) != _today_key():
+            if str(st.get("date", "")) != _today_key_for_guild(guild.id):
                 await ctx.reply("Bounty state is still syncing. Try again in a moment.")
                 return
             if bool(st.get("resolved", False)):
@@ -691,9 +719,9 @@ class BountyCog(commands.Cog):
                     await ctx.reply("You cannot start a claim right now.")
                 return
 
-            changed = _prune_cooldowns(st)
+            changed = _prune_cooldowns(guild.id, st)
             cooldown_expires = _as_int(_as_dict(st.get("cooldowns")).get(str(ctx.author.id), 0), 0)
-            now_ts = int(_utcnow().timestamp())
+            now_ts = int(effective_utcnow(guild.id).timestamp())
             if cooldown_expires > now_ts:
                 if changed:
                     await save_data()
@@ -714,7 +742,7 @@ class BountyCog(commands.Cog):
             active_claimant_id = _as_int(st.get("claimant_user_id", 0), 0)
             if active_claimant_id > 0:
                 claimant = guild.get_member(active_claimant_id)
-                remaining = _claim_remaining_seconds(st)
+                remaining = _claim_remaining_seconds(guild.id, st)
                 name = claimant.display_name if claimant is not None else "Someone"
                 await ctx.reply(
                     f"A bounty claim is already in progress by **{name}**. "
@@ -722,9 +750,9 @@ class BountyCog(commands.Cog):
                 )
                 return
 
-            expires_at = _utcnow() + timedelta(seconds=max(1, int(BOUNTY_CLAIM_SECONDS)))
+            expires_at = effective_utcnow(guild.id) + timedelta(seconds=max(1, int(BOUNTY_CLAIM_SECONDS)))
             st["claimant_user_id"] = int(ctx.author.id)
-            st["claim_started_at"] = _iso(_utcnow())
+            st["claim_started_at"] = _iso(effective_utcnow(guild.id))
             st["claim_expires_at"] = _iso(expires_at)
             st["claim_channel_id"] = int(claimant_channel.id)
             st["claim_message_channel_id"] = int(ctx.channel.id)
@@ -732,7 +760,7 @@ class BountyCog(commands.Cog):
             record_game_fields(guild.id, target.id, "bounty", claims_against=1)
             await save_data()
 
-        self._claim_tasks[guild.id] = asyncio.create_task(self._claim_countdown(guild.id))
+        self._claim_tasks[guild.id] = asyncio.create_task(self._claim_countdown(guild.id, delay_seconds=BOUNTY_CLAIM_SECONDS))
         projected_claim = _projected_claim_minutes_equivalent(_bounty_state(guild.id))
         await ctx.reply(
             f"{ctx.author.mention} started a bounty claim on the current bounty target. "
@@ -777,7 +805,7 @@ class BountyCog(commands.Cog):
         st = _bounty_state(guild.id)
         lines: list[str] = ["**Today's Bounty**"]
 
-        if str(st.get("date", "")) != _today_key():
+        if str(st.get("date", "")) != _today_key_for_guild(guild.id):
             lines.append("Status is syncing. Try again in a moment.")
             return lines
 
@@ -826,7 +854,7 @@ class BountyCog(commands.Cog):
         if claimant is not None:
             lines.append(
                 f"Active claim: **{claimant.display_name}** is holding the bounty. "
-                f"Time remaining: **{_fmt_duration_seconds(_claim_remaining_seconds(st))}**."
+                f"Time remaining: **{_fmt_duration_seconds(_claim_remaining_seconds(guild.id, st))}**."
             )
             lines.append(
                 f"If the hold finishes, projected claimant payout is about **{_fmt_duration_minutes(projected_claim)}** of passive gain."
@@ -835,7 +863,7 @@ class BountyCog(commands.Cog):
             lines.append("Active claim: none.")
 
         cooldown_expires = _as_int(_as_dict(st.get("cooldowns")).get(str(viewer_id), 0), 0)
-        remaining = max(0, cooldown_expires - int(_utcnow().timestamp()))
+        remaining = max(0, cooldown_expires - int(effective_utcnow(guild.id).timestamp()))
         if remaining > 0:
             lines.append(f"Your claim cooldown: **{_fmt_duration_seconds(remaining)}**.")
 
@@ -847,23 +875,22 @@ class BountyCog(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         for guild in self.bot.guilds:
-            async with self._lock_for(guild.id):
-                st = _bounty_state(guild.id)
-                if _as_int(st.get("claimant_user_id", 0), 0) > 0:
-                    _clear_claim_state(st)
-                    await save_data()
+            if is_guild_enabled(guild):
+                await self.resume_guild(guild.id)
         if not self.bounty_loop.is_running():
             self.bounty_loop.start()
 
     @tasks.loop(minutes=1)
     async def bounty_loop(self):
         for guild in self.bot.guilds:
+            if not is_guild_enabled(guild):
+                continue
             notices = await self._ensure_today_state(guild)
             await self._send_rollover_notices(guild, notices)
 
             async with self._lock_for(guild.id):
                 st = _bounty_state(guild.id)
-                if str(st.get("date", "")) != _today_key():
+                if str(st.get("date", "")) != _today_key_for_guild(guild.id):
                     continue
                 if bool(st.get("resolved", False)):
                     continue
@@ -891,6 +918,8 @@ class BountyCog(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.guild is None or message.author.bot:
             return
+        if not is_guild_enabled(message.guild):
+            return
         member = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
         if member is None or member.bot:
             return
@@ -898,7 +927,7 @@ class BountyCog(commands.Cog):
         notices = await self._ensure_today_state(message.guild)
         await self._send_rollover_notices(message.guild, notices)
 
-        if _note_daily_activity(message.guild.id, member.id, _today_key()):
+        if _note_daily_activity(message.guild.id, member.id, _today_key_for_guild(message.guild.id)):
             await save_data()
 
         await self._maybe_announce_target(message.guild, member, channel=message.channel)
@@ -912,6 +941,8 @@ class BountyCog(commands.Cog):
     ):
         if member.bot or member.guild is None:
             return
+        if not is_guild_enabled(member.guild):
+            return
 
         notices = await self._ensure_today_state(member.guild)
         await self._send_rollover_notices(member.guild, notices)
@@ -919,7 +950,7 @@ class BountyCog(commands.Cog):
         before_channel = before.channel
         after_channel = after.channel
         if not _is_eligible_voice_channel(before_channel) and _is_eligible_voice_channel(after_channel):
-            if _note_daily_activity(member.guild.id, member.id, _today_key()):
+            if _note_daily_activity(member.guild.id, member.id, _today_key_for_guild(member.guild.id)):
                 await save_data()
             await self._maybe_announce_target(member.guild, member, channel=get_log_channel(member.guild))
 

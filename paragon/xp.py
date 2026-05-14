@@ -22,14 +22,17 @@ from .config import (
     PRESTIGE_RATE_K,
     PRESTIGE_STACK_SOFTCAP,
 )
+from .guild_state import effective_unix_ts
 from .source_keys import canonical_boost_source
 from .spin_support import consume_mulligan_charge
 from .storage import _udict, save_data
 from .stats_store import record_xp_boost, record_xp_change
 
 
-def _now_ts() -> int:
-    return int(time.time())
+def _now_ts(guild_id: Optional[int] = None) -> int:
+    if guild_id is None:
+        return int(time.time())
+    return effective_unix_ts(guild_id)
 
 
 def prestige_base_rate(prestige_level: int) -> float:
@@ -321,7 +324,7 @@ async def grant_fixed_boost(
     - minutes is duration in whole minutes
     """
     u = _udict(member.guild.id, member.id)
-    now = _now_ts()
+    now = _now_ts(member.guild.id)
     changed = _prune_expired_boosts(u, now=now)
     changed = _prune_expired_debuffs(u, now=now) or changed
     boosts = _coerce_boosts(u)
@@ -426,7 +429,7 @@ async def grant_stacked_fixed_boost(
     persist: bool = True,
 ) -> dict:
     u = _udict(member.guild.id, member.id)
-    now = _now_ts()
+    now = _now_ts(member.guild.id)
     changed = _prune_expired_boosts(u, now=now)
     changed = _prune_expired_debuffs(u, now=now) or changed
     existing_pct, existing_minutes = _pop_matching_effect(
@@ -472,7 +475,7 @@ async def grant_fixed_debuff(
     - minutes is duration in whole minutes
     """
     u = _udict(member.guild.id, member.id)
-    now = _now_ts()
+    now = _now_ts(member.guild.id)
     changed = _prune_expired_boosts(u, now=now)
     changed = _prune_expired_debuffs(u, now=now) or changed
     if consume_mulligan_charge(member.guild.id, member.id):
@@ -528,7 +531,7 @@ async def grant_stacked_fixed_debuff(
     persist: bool = True,
 ) -> dict:
     u = _udict(member.guild.id, member.id)
-    now = _now_ts()
+    now = _now_ts(member.guild.id)
     changed = _prune_expired_boosts(u, now=now)
     changed = _prune_expired_debuffs(u, now=now) or changed
     if consume_mulligan_charge(member.guild.id, member.id):
@@ -571,7 +574,7 @@ async def get_gain_state(member) -> dict:
     Runtime state for rank/boost UI and prestige pacing display.
     """
     u = _udict(member.guild.id, member.id)
-    now = _now_ts()
+    now = _now_ts(member.guild.id)
     changed = _prune_expired_boosts(u, now=now)
     changed = _prune_expired_debuffs(u, now=now) or changed
     boosts = _coerce_boosts(u)
@@ -700,7 +703,7 @@ async def apply_delta(
         raise ValueError("apply_delta expects non-negative minute counts")
 
     u = _udict(member.guild.id, member.id)
-    now = _now_ts()
+    now = _now_ts(member.guild.id)
     changed = _prune_expired_boosts(u, now=now)
     changed = _prune_expired_debuffs(u, now=now) or changed
     prestige = int(u.get("prestige", 0))

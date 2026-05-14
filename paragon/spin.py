@@ -13,6 +13,7 @@ from discord.ext import commands
 
 from .config import SPIN_DISABLED_REWARDS, SPIN_RESET_HOUR, SPIN_RESET_MINUTE
 from .emojis import EMOJI_FERRIS_WHEEL
+from .guild_state import effective_local_now, effective_unix_ts
 from .ownership import owner_only
 from .spin_support import (
     add_blackjack_natural_charges,
@@ -343,8 +344,8 @@ def _add_bonus_spins(st: dict, amount: int) -> int:
     return int(st["bonus_spins"])
 
 
-def _count_active_debuffs(u: dict, *, now: Optional[int] = None) -> int:
-    now_ts = int(time.time()) if now is None else int(now)
+def _count_active_debuffs(u: dict, *, now: Optional[int] = None, guild_id: Optional[int] = None) -> int:
+    now_ts = effective_unix_ts(guild_id) if now is None and guild_id is not None else int(time.time()) if now is None else int(now)
     raw = u.get("xp_debuffs")
     debuffs = raw if isinstance(raw, list) else []
     active = 0
@@ -362,7 +363,7 @@ def _count_active_debuffs(u: dict, *, now: Optional[int] = None) -> int:
 
 def _cleanse_debuffs(gid: int, uid: int) -> int:
     u = _udict(gid, uid)
-    active = _count_active_debuffs(u)
+    active = _count_active_debuffs(u, guild_id=gid)
     u["xp_debuffs"] = []
     return active
 
@@ -654,7 +655,7 @@ class SpinCog(commands.Cog):
         reward_result = await self._apply_reward(ctx, reward_key)
         user_state["cycle_key"] = cycle
         user_state["last_reward"] = reward_key
-        user_state["last_spin_ts"] = int(time.time())
+        user_state["last_spin_ts"] = effective_unix_ts(gid)
 
         gid = int(ctx.guild.id)
         uid = int(ctx.author.id)
@@ -694,8 +695,9 @@ class SpinCog(commands.Cog):
         uid = int(ctx.author.id)
         st = _wheel_state(gid)
         h, m = _sanitize_reset_time(st.get("reset_hour", SPIN_RESET_HOUR), st.get("reset_minute", SPIN_RESET_MINUTE))
-        cycle = _cycle_key(h, m)
-        nxt = _next_reset_dt(h, m)
+        now_local = effective_local_now(gid)
+        cycle = _cycle_key(h, m, now=now_local)
+        nxt = _next_reset_dt(h, m, now=now_local)
 
         ust = _spin_user_state(gid, uid)
         _sync_spin_cycle_state(ust, cycle)
@@ -798,8 +800,9 @@ class SpinCog(commands.Cog):
         uid = int(ctx.author.id)
         st = _wheel_state(gid)
         h, m = _sanitize_reset_time(st.get("reset_hour", SPIN_RESET_HOUR), st.get("reset_minute", SPIN_RESET_MINUTE))
-        cycle = _cycle_key(h, m)
-        nxt = _next_reset_dt(h, m)
+        now_local = effective_local_now(gid)
+        cycle = _cycle_key(h, m, now=now_local)
+        nxt = _next_reset_dt(h, m, now=now_local)
         ust = _spin_user_state(gid, uid)
         _sync_spin_cycle_state(ust, cycle)
         daily_remaining = int(ust.get("daily_spins_remaining", 0))
@@ -833,7 +836,7 @@ class SpinCog(commands.Cog):
             return
 
         u = _udict(gid, uid)
-        active = _count_active_debuffs(u)
+        active = _count_active_debuffs(u, guild_id=gid)
         if active <= 0:
             await ctx.reply(
                 f"You have **{charges}** Cleanse item(s), but no active debuffs to remove."
@@ -933,7 +936,7 @@ class SpinCog(commands.Cog):
         st = _wheel_state(ctx.guild.id)
         cur_h, cur_m = _sanitize_reset_time(st.get("reset_hour", SPIN_RESET_HOUR), st.get("reset_minute", SPIN_RESET_MINUTE))
         if when is None or not when.strip():
-            nxt = _next_reset_dt(cur_h, cur_m)
+            nxt = _next_reset_dt(cur_h, cur_m, now=effective_local_now(ctx.guild.id))
             await ctx.reply(
                 f"Spin reset time is **{_draw_time_label(cur_h, cur_m)}**.\n"
                 f"Next reset: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**."
@@ -953,7 +956,7 @@ class SpinCog(commands.Cog):
         st["reset_hour"] = int(h)
         st["reset_minute"] = int(m)
         await save_data()
-        nxt = _next_reset_dt(h, m)
+        nxt = _next_reset_dt(h, m, now=effective_local_now(ctx.guild.id))
         await ctx.reply(
             f"Spin reset time set to **{_draw_time_label(h, m)}** by {ctx.author.mention}.\n"
             f"Next reset: **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**."
@@ -1027,7 +1030,7 @@ class SpinCog(commands.Cog):
         gid = int(ctx.guild.id)
         st = _wheel_state(gid)
         h, m = _sanitize_reset_time(st.get("reset_hour", SPIN_RESET_HOUR), st.get("reset_minute", SPIN_RESET_MINUTE))
-        cycle = _cycle_key(h, m)
+        cycle = _cycle_key(h, m, now=effective_local_now(gid))
 
         ust = _spin_user_state(gid, target.id)
         ust["cycle_key"] = cycle

@@ -18,8 +18,9 @@ from .config import (
     SURPRISE_MIN_PCT,
     SURPRISE_PCT_STEP,
 )
+from .guild_state import effective_utcnow, is_guild_enabled
 from .guild_setup import get_log_channel
-from .include import _iso, _parse_iso, _utcnow
+from .include import _iso, _parse_iso
 from .ownership import owner_only
 from .roles import enforce_level6_exclusive
 from .stats_store import record_game_fields
@@ -88,8 +89,10 @@ class SurpriseCog(commands.Cog):
 
     @tasks.loop(minutes=1)
     async def drop_loop(self):
-        now = _utcnow()
         for guild in list(self.bot.guilds):
+            if not is_guild_enabled(guild):
+                continue
+            now = effective_utcnow(guild.id)
             st = _state(guild.id)
             next_at = _parse_iso(st.get("next_at"))
             if next_at is None:
@@ -187,7 +190,7 @@ class SurpriseCog(commands.Cog):
     @owner_only()
     async def claimnow(self, ctx: commands.Context):
         st = _state(ctx.guild.id)
-        now = _utcnow()
+        now = effective_utcnow(ctx.guild.id)
         reward = _rand_xp()
         pending = st.get("pending_rewards")
         if not isinstance(pending, list):

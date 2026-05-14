@@ -1,3 +1,4 @@
+import inspect
 import time
 from typing import Optional, Union
 
@@ -5,7 +6,16 @@ import discord
 from discord.ext import commands
 
 from .config import BASE_XP_PER_MINUTE
-from .ownership import owner_only
+from .guild_setup import ensure_guild_setup
+from .guild_state import (
+    current_disabled_elapsed_seconds,
+    hide_managed_channels,
+    is_guild_enabled,
+    mark_guild_disabled,
+    mark_guild_enabled,
+    restore_managed_channels,
+)
+from .ownership import is_control_user_id, owner_only
 from .roles import announce_level_up, enforce_level6_exclusive, sync_level_roles
 from .stats_store import record_xp_change
 from .storage import _gdict, _udict, save_data
@@ -18,6 +28,7 @@ from .xp import (
 )
 
 SOFTRESET_CONFIRM_TTL_SECONDS = 30
+BOT_TOGGLE_CONFIRM_TTL_SECONDS = 30
 
 
 # ---- Helpers ----
@@ -126,6 +137,33 @@ class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._pending_softresets: dict[tuple[int, int, int], float] = {}
+        self._pending_bot_toggles: dict[tuple[int, int], tuple[bool, float]] = {}
+
+    async def _call_cog_hook(self, hook_name: str, guild_id: int) -> None:
+        cogs = list(self.bot.cogs.values())
+        if hook_name == "pause_guild":
+            cogs.sort(key=lambda cog: 1 if cog.__class__.__name__ == "VoiceCog" else 0)
+        for cog in cogs:
+            hook = getattr(cog, hook_name, None)
+            if hook is None or not callable(hook):
+                continue
+            try:
+                maybe = hook(guild_id)
+                if inspect.isawaitable(maybe):
+                    await maybe
+            except Exception:
+                continue
+
+    async def _pause_guild_runtime(self, guild_id: int) -> None:
+        await self._call_cog_hook("pause_guild", guild_id)
+
+    async def _resume_guild_runtime(self, guild_id: int) -> None:
+        await self._call_cog_hook("resume_guild", guild_id)
+
+    def _can_toggle_bot(self, ctx: commands.Context) -> bool:
+        perms = getattr(ctx.author, "guild_permissions", None)
+        is_admin = bool(perms and (perms.administrator or perms.manage_guild))
+        return bool(is_admin or is_control_user_id(ctx.guild, ctx.author.id))
 
     @commands.command(name="role")
     @owner_only()
@@ -463,4 +501,61 @@ class AdminCog(commands.Cog):
             f"Soft reset applied to **{member.display_name}**. "
             f"XP **{result['old_xp']} -> 0**, prestige **{result['old_prestige']} -> 0**, "
             f"and {spin_summary}. Stats were left intact."
+        )
+
+    @commands.command(name="bottoggle", aliases=["togglebot"])
+    async def bottoggle(self, ctx: commands.Context):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+        if not self._can_toggle_bot(ctx):
+            await ctx.reply("You need administrator or Manage Server permission to toggle Paragon for this server.")
+            return
+
+        now = time.monotonic()
+        self._pending_bot_toggles = {
+            key: value
+            for key, value in self._pending_bot_toggles.items()
+            if value[1] > now
+        }
+
+        guild_id = int(ctx.guild.id)
+        author_id = int(ctx.author.id)
+        currently_enabled = is_guild_enabled(ctx.guild)
+        target_enabled = not currently_enabled
+        pending_key = (guild_id, author_id)
+        pending = self._pending_bot_toggles.get(pending_key)
+
+        if pending is None or bool(pending[0]) != bool(target_enabled) or pending[1] <= now:
+            self._pending_bot_toggles[pending_key] = (bool(target_enabled), now + BOT_TOGGLE_CONFIRM_TTL_SECONDS)
+            action = "disable" if currently_enabled else "re-enable"
+            await ctx.reply(
+                f"Paragon {action} is armed for **{ctx.guild.name}**. "
+                f"Send `{ctx.clean_prefix}bottoggle` again within "
+                f"**{BOT_TOGGLE_CONFIRM_TTL_SECONDS} seconds** to confirm."
+            )
+            return
+
+        self._pending_bot_toggles.pop(pending_key, None)
+
+        if currently_enabled:
+            await ensure_guild_setup(ctx.guild)
+            await self._pause_guild_runtime(guild_id)
+            await mark_guild_disabled(ctx.guild)
+            hidden_channels = await hide_managed_channels(ctx.guild)
+            await ctx.reply(
+                f"Paragon is now **DISABLED** for **{ctx.guild.name}**. "
+                f"Managed channels hidden: **{hidden_channels}**. "
+                f"All guild timers and daily cycles are now frozen until you re-enable with `{ctx.clean_prefix}bottoggle`."
+            )
+            return
+
+        frozen_seconds = current_disabled_elapsed_seconds(ctx.guild)
+        await mark_guild_enabled(ctx.guild)
+        restored_channels = await restore_managed_channels(ctx.guild)
+        await self._resume_guild_runtime(guild_id)
+        await ctx.reply(
+            f"Paragon is now **ENABLED** for **{ctx.guild.name}**. "
+            f"Managed channels restored: **{restored_channels}**. "
+            f"Frozen time resumed after **{frozen_seconds} seconds** offline."
         )

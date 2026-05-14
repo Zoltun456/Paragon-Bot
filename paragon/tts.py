@@ -22,6 +22,7 @@ from .config import (
     ELEVEN_OUTPUT_FORMAT,
     ELEVEN_VOICE_ID,
 )
+from .guild_state import effective_unix_ts, is_guild_enabled
 from .ownership import is_control_user_id
 from .stats_store import record_game_fields
 from .storage import _gdict, save_data
@@ -113,6 +114,14 @@ class _SayRequest:
     target_name: str
     message_preview: str
     enqueued_at: float
+
+
+@dataclass(slots=True)
+class _ActiveSayAudio:
+    temp_path: str
+    audio_seconds: float
+    started_at: float = 0.0
+    started_offset: float = 0.0
 
 
 def _fetch_eleven_voice_catalog() -> list[tuple[str, str]]:
@@ -290,13 +299,11 @@ class TTSCog(commands.Cog):
         self._guild_current: dict[int, _SayRequest] = {}
         self._guild_active_vc: dict[int, discord.VoiceClient] = {}
         self._guild_skip_events: dict[int, asyncio.Event] = {}
+        self._guild_play_allowed: dict[int, asyncio.Event] = {}
+        self._guild_active_audio: dict[int, _ActiveSayAudio] = {}
         self._guild_processing: set[int] = set()
         self._cooldown_enabled: dict[int, bool] = {}
-        self._cooldown = commands.CooldownMapping.from_cooldown(
-            1,
-            TTS_COOLDOWN_SECONDS,
-            commands.BucketType.member,
-        )
+        self._cooldown_until: dict[tuple[int, int], int] = {}
         self._voice_catalog_cache: list[tuple[str, str]] = []
         self._voice_name_cache: dict[str, str] = {}
         self._voice_cache_ts: float = 0.0
@@ -312,7 +319,10 @@ class TTSCog(commands.Cog):
         self._guild_current.clear()
         self._guild_active_vc.clear()
         self._guild_skip_events.clear()
+        self._guild_play_allowed.clear()
+        self._guild_active_audio.clear()
         self._guild_processing.clear()
+        self._cooldown_until.clear()
         self._voice_profile_locks.clear()
         self._model_catalog_cache.clear()
         self._model_name_cache.clear()
@@ -334,7 +344,38 @@ class TTSCog(commands.Cog):
             self._guild_skip_events[guild_id] = ev
         return ev
 
+    def _play_allowed_for(self, guild_id: int) -> asyncio.Event:
+        ev = self._guild_play_allowed.get(guild_id)
+        if ev is None:
+            ev = asyncio.Event()
+            ev.set()
+            self._guild_play_allowed[guild_id] = ev
+        return ev
+
+    def _current_audio_offset(self, audio: _ActiveSayAudio) -> float:
+        if float(audio.started_at or 0.0) <= 0.0:
+            return max(0.0, float(audio.started_offset or 0.0))
+        elapsed = max(0.0, time.monotonic() - float(audio.started_at))
+        return min(float(audio.audio_seconds or 0.0), max(0.0, float(audio.started_offset or 0.0) + elapsed))
+
+    def _cooldown_key(self, guild_id: int, user_id: int) -> tuple[int, int]:
+        return (int(guild_id), int(user_id))
+
+    def _cooldown_retry_after(self, guild_id: int, user_id: int) -> float:
+        key = self._cooldown_key(guild_id, user_id)
+        expires_at = int(self._cooldown_until.get(key, 0))
+        remaining = float(max(0, expires_at - effective_unix_ts(guild_id)))
+        if remaining <= 0.0:
+            self._cooldown_until.pop(key, None)
+        return remaining
+
+    def _touch_cooldown(self, guild_id: int, user_id: int) -> None:
+        key = self._cooldown_key(guild_id, user_id)
+        self._cooldown_until[key] = effective_unix_ts(guild_id) + int(TTS_COOLDOWN_SECONDS)
+
     def should_keep_voice_connected(self, guild_id: int) -> bool:
+        if not is_guild_enabled(guild_id):
+            return False
         queue = self._guild_queues.get(guild_id)
         pending = queue.qsize() if queue is not None else 0
         return bool(guild_id in self._guild_processing or pending > 0)
@@ -359,6 +400,7 @@ class TTSCog(commands.Cog):
         if clear_queue:
             self._clear_pending_queue(guild_id)
         self._skip_event_for(guild_id).set()
+        self._play_allowed_for(guild_id).set()
 
         vc = self._guild_active_vc.get(guild_id)
         if vc is None:
@@ -372,6 +414,30 @@ class TTSCog(commands.Cog):
                 pass
             if disconnect:
                 await cleanup_voice_client(vc)
+
+    async def pause_guild(self, guild_id: int) -> None:
+        self._play_allowed_for(guild_id).clear()
+        audio = self._guild_active_audio.get(guild_id)
+        if audio is not None:
+            audio.started_offset = self._current_audio_offset(audio)
+
+        vc = self._guild_active_vc.get(guild_id)
+        if vc is None:
+            guild = self.bot.get_guild(guild_id)
+            vc = getattr(guild, "voice_client", None) if guild is not None else None
+        if vc is not None:
+            try:
+                if vc.is_playing() or vc.is_paused():
+                    vc.stop()
+            except Exception:
+                pass
+            try:
+                await cleanup_voice_client(vc)
+            except Exception:
+                pass
+
+    async def resume_guild(self, guild_id: int) -> None:
+        self._play_allowed_for(guild_id).set()
     def _ensure_worker(self, guild_id: int):
         task = self._guild_workers.get(guild_id)
         if task and not task.done():
@@ -691,11 +757,6 @@ class TTSCog(commands.Cog):
             return
 
         self._cooldown_enabled[ctx.guild.id] = new_state
-        self._cooldown = commands.CooldownMapping.from_cooldown(
-            1,
-            TTS_COOLDOWN_SECONDS,
-            commands.BucketType.member,
-        )
         await ctx.reply(
             f"TTS cooldown is now **{'ON' if new_state else 'OFF'}** "
             f"(when ON: per-user, per-server, {int(TTS_COOLDOWN_SECONDS)}s)."
@@ -842,11 +903,11 @@ class TTSCog(commands.Cog):
             return
 
         if self._cooldown_is_enabled(ctx.guild.id):
-            bucket = self._cooldown.get_bucket(ctx.message)
-            retry_after = bucket.update_rate_limit() if bucket else None
-            if retry_after:
+            retry_after = self._cooldown_retry_after(ctx.guild.id, ctx.author.id)
+            if retry_after > 0.0:
                 await ctx.reply(f"Slow down-try again in {retry_after:.1f}s.")
                 return
+            self._touch_cooldown(ctx.guild.id, ctx.author.id)
 
         queue = self._queue_for(ctx.guild.id)
         preview = message if len(message) <= 96 else f"{message[:93]}..."
@@ -995,6 +1056,81 @@ class TTSCog(commands.Cog):
             f"seed={int(normalized['seed'])}."
         )
 
+    async def _wait_for_tts_end(
+        self,
+        guild_id: int,
+        vc: discord.VoiceClient,
+        *,
+        skip_event: asyncio.Event,
+        play_err: list[str],
+    ) -> str:
+        play_allowed = self._play_allowed_for(guild_id)
+        audio = self._guild_active_audio.get(guild_id)
+        remaining = 0.0
+        if audio is not None:
+            remaining = max(0.0, float(audio.audio_seconds or 0.0) - float(audio.started_offset or 0.0))
+        max_wait = max(8.0, min(300.0, remaining + 10.0))
+        play_start = time.monotonic()
+        while True:
+            if play_err:
+                return "error"
+            if skip_event.is_set():
+                if vc.is_playing() or vc.is_paused():
+                    vc.stop()
+                return "skipped"
+            if not play_allowed.is_set():
+                return "interrupted"
+            if not vc.is_playing() and not vc.is_paused():
+                return "finished"
+            if (time.monotonic() - play_start) > max_wait:
+                try:
+                    vc.stop()
+                except Exception:
+                    pass
+                return "timeout"
+            await asyncio.sleep(0.2)
+
+    async def _start_tts_playback(self, guild_id: int, vc: discord.VoiceClient) -> tuple[str, list[str]]:
+        audio = self._guild_active_audio.get(guild_id)
+        if audio is None:
+            return "error:missing_audio", []
+
+        play_err: list[str] = []
+
+        def _after(err: Optional[Exception]):
+            if err:
+                play_err.append(str(err))
+
+        before_options = None
+        if float(audio.started_offset or 0.0) > 0.0:
+            before_options = f"-ss {audio.started_offset:.3f}"
+        src = discord.FFmpegPCMAudio(audio.temp_path, before_options=before_options, options="-vn")
+        audio.started_at = time.monotonic()
+        try:
+            vc.play(src, after=_after)
+        except Exception as e:
+            return f"error:{e}", play_err
+
+        start_deadline = time.monotonic() + 3.0
+        started = False
+        while time.monotonic() < start_deadline:
+            if play_err:
+                break
+            if vc.is_playing() or vc.is_paused():
+                started = True
+                break
+            await asyncio.sleep(0.1)
+        if not started:
+            return "not_started", play_err
+
+        state = await self._wait_for_tts_end(
+            guild_id,
+            vc,
+            skip_event=self._skip_event_for(guild_id),
+            play_err=play_err,
+        )
+        return state, play_err
+
     async def _process_say(self, req: _SayRequest):
         ctx = req.ctx
         payload = req.payload
@@ -1033,7 +1169,7 @@ class TTSCog(commands.Cog):
             temp_path = ""
             playback_suspended = False
             try:
-                # await ctx.send(f"{req.requester_name} says: {message} to {target.display_name}.")
+                await self._play_allowed_for(guild_id).wait()
                 self._debug(ctx, "starting synthesis")
                 voice_ids = await self._get_voice_ids()
                 voice_profile = await self._get_or_create_voice_profile(int(ctx.author.id), voice_ids)
@@ -1041,7 +1177,7 @@ class TTSCog(commands.Cog):
                 voice_settings = dict(voice_profile.get("settings", {}))
                 seed = int(voice_profile.get("seed", 1))
                 speed = float(voice_profile.get("speed", 1.0))
-                model_id = self._tts_model_for_guild(int(ctx.guild.id))
+                model_id = self._tts_model_for_guild(guild_id)
                 self._debug(
                     ctx,
                     f"voice_id={voice_id} model_id={model_id} seed={seed} speed={speed} settings={voice_settings}",
@@ -1066,80 +1202,74 @@ class TTSCog(commands.Cog):
                     temp_path = f.name
                     f.write(audio_bytes)
                 audio_seconds = await asyncio.to_thread(_probe_audio_seconds, temp_path)
+                self._guild_active_audio[guild_id] = _ActiveSayAudio(
+                    temp_path=temp_path,
+                    audio_seconds=audio_seconds,
+                )
                 self._debug(ctx, f"audio ready path={temp_path} bytes={len(audio_bytes)} duration={audio_seconds:.2f}s")
 
                 if playback_cog is not None and hasattr(playback_cog, "suspend_for_tts"):
                     playback_suspended = bool(await playback_cog.suspend_for_tts(ctx, target_channel))
 
-                vc = await self._ensure_voice_client(ctx, target_channel)
-                self._guild_active_vc[guild_id] = vc
-                if not vc.is_connected():
-                    raise RuntimeError("Not connected to voice after connect/move.")
-                if skip_event.is_set():
-                    await ctx.reply("Current TTS request was skipped.")
-                    return
-
-                busy_deadline = time.monotonic() + 10.0
-                while (vc.is_playing() or vc.is_paused()) and time.monotonic() < busy_deadline:
+                while True:
                     if skip_event.is_set():
                         await ctx.reply("Current TTS request was skipped.")
                         return
-                    await asyncio.sleep(0.1)
-                if vc.is_playing() or vc.is_paused():
-                    raise RuntimeError("Voice client stayed busy too long. Please try again in a moment.")
 
-                play_err: list[str] = []
+                    await self._play_allowed_for(guild_id).wait()
+                    vc = await self._ensure_voice_client(ctx, target_channel)
+                    self._guild_active_vc[guild_id] = vc
+                    if not vc.is_connected():
+                        raise RuntimeError("Not connected to voice after connect/move.")
 
-                def _after(err: Optional[Exception]):
-                    if err:
-                        play_err.append(str(err))
-
-                src = discord.FFmpegPCMAudio(temp_path)
-                self._debug(ctx, "starting playback")
-                vc.play(src, after=_after)
-                start_deadline = time.monotonic() + 3.0
-                started = False
-                while time.monotonic() < start_deadline:
-                    if play_err:
-                        break
-                    if skip_event.is_set():
-                        vc.stop()
-                        break
+                    busy_deadline = time.monotonic() + 10.0
+                    while (vc.is_playing() or vc.is_paused()) and time.monotonic() < busy_deadline:
+                        if skip_event.is_set():
+                            await ctx.reply("Current TTS request was skipped.")
+                            return
+                        if not self._play_allowed_for(guild_id).is_set():
+                            break
+                        await asyncio.sleep(0.1)
+                    if not self._play_allowed_for(guild_id).is_set():
+                        continue
                     if vc.is_playing() or vc.is_paused():
-                        started = True
-                        break
-                    await asyncio.sleep(0.1)
-                if not started:
-                    if play_err:
-                        await ctx.reply(f"TTS playback error: {play_err[0][:160]}")
-                    else:
-                        await ctx.reply("TTS playback did not start.")
-                    self._debug(ctx, f"playback start failed play_err={play_err}")
-                    return
+                        raise RuntimeError("Voice client stayed busy too long. Please try again in a moment.")
 
-                max_wait = max(8.0, min(300.0, audio_seconds + 10.0))
-                play_start = time.monotonic()
-                while vc.is_playing() or vc.is_paused():
-                    if play_err:
-                        break
-                    if skip_event.is_set():
-                        vc.stop()
+                    self._debug(ctx, "starting playback")
+                    state, play_err = await self._start_tts_playback(guild_id, vc)
+                    if state.startswith("error:"):
+                        await ctx.reply(f"TTS playback error: {state.split(':', 1)[1][:160]}")
+                        return
+                    if state == "not_started":
+                        if play_err:
+                            await ctx.reply(f"TTS playback error: {play_err[0][:160]}")
+                        else:
+                            await ctx.reply("TTS playback did not start.")
+                        self._debug(ctx, f"playback start failed play_err={play_err}")
+                        return
+                    if state == "error":
+                        await ctx.reply(f"TTS playback error: {play_err[0][:160]}")
+                        self._debug(ctx, f"playback after error={play_err[0]}")
+                        return
+                    if state == "timeout":
+                        await ctx.reply("TTS playback timed out.")
+                        self._debug(ctx, "playback timeout")
+                        return
+                    if state == "skipped":
                         await ctx.reply("Current TTS request was skipped.")
                         self._debug(ctx, "playback skipped by admin")
                         return
-                    if (time.monotonic() - play_start) > max_wait:
-                        vc.stop()
-                        await ctx.reply("TTS playback timed out.")
-                        self._debug(ctx, f"playback timeout max_wait={max_wait:.2f}s")
-                        return
-                    await asyncio.sleep(0.2)
+                    if state == "interrupted":
+                        audio = self._guild_active_audio.get(guild_id)
+                        if audio is not None:
+                            audio.started_offset = self._current_audio_offset(audio)
+                            if audio.audio_seconds > 0 and audio.started_offset >= max(0.0, audio.audio_seconds - 0.5):
+                                return
+                        continue
 
-                if play_err:
-                    await ctx.reply(f"TTS playback error: {play_err[0][:160]}")
-                    self._debug(ctx, f"playback after error={play_err[0]}")
+                    await asyncio.sleep(POST_PLAY_IDLE_SECONDS)
+                    self._debug(ctx, "playback finished successfully")
                     return
-                await asyncio.sleep(POST_PLAY_IDLE_SECONDS)
-                self._debug(ctx, "playback finished successfully")
             except asyncio.TimeoutError:
                 await ctx.reply("TTS playback timed out.")
                 self._debug(ctx, "asyncio timeout raised")
@@ -1167,6 +1297,7 @@ class TTSCog(commands.Cog):
                         await playback_cog.restore_after_tts(guild_id)
                     except Exception as e:
                         self._debug(ctx, f"restore_after_tts failed={type(e).__name__}: {e}")
+                self._guild_active_audio.pop(guild_id, None)
                 self._guild_active_vc.pop(guild_id, None)
                 if temp_path:
                     try:

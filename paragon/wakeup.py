@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from typing import Optional
 
 import discord
 from discord.ext import commands
 
 from .config import resolve_afk_channel_id
+from .guild_state import is_guild_enabled
 
 WAKEUP_HOPS = 10
 WAKEUP_WAIT_SECONDS = 15
@@ -105,6 +107,9 @@ class WakeupCog(commands.Cog):
 
             current: Optional[discord.VoiceChannel] = target_vc
             for _ in range(WAKEUP_HOPS):
+                if not is_guild_enabled(ctx.guild):
+                    should_release = True
+                    return
                 pool = [ch for ch in eligible if current is None or ch.id != current.id] or eligible
                 dest = random.choice(pool)
                 moved = await self._move_member(target, dest, reason=f"Wakeup by {caller} ({caller.id})")
@@ -112,6 +117,9 @@ class WakeupCog(commands.Cog):
                     current = dest
                 await asyncio.sleep(WAKEUP_HOP_DELAY_SECONDS)
 
+            if not is_guild_enabled(ctx.guild):
+                should_release = True
+                return
             if not self._member_can_join_voice(target, caller_vc) or not self._bot_can_move_to(ctx.guild, caller_vc):
                 await ctx.reply(
                     f"Finished wakeup hops for **{target.display_name}**, but couldn't move them to your channel due to permissions."
@@ -130,12 +138,25 @@ class WakeupCog(commands.Cog):
                     and not m.author.bot
                 )
 
-            try:
-                await self.bot.wait_for("message", timeout=WAKEUP_WAIT_SECONDS, check=_check)
+            deadline = time.monotonic() + WAKEUP_WAIT_SECONDS
+            responded = False
+            while time.monotonic() < deadline:
+                if not is_guild_enabled(ctx.guild):
+                    should_release = True
+                    return
+                remaining = max(0.0, deadline - time.monotonic())
+                try:
+                    await self.bot.wait_for("message", timeout=min(1.0, remaining), check=_check)
+                    responded = True
+                    break
+                except asyncio.TimeoutError:
+                    continue
+
+            if responded:
                 await ctx.reply(
                     f"**{target.display_name}** responded. Their wakeup lock stays active until they return to AFK."
                 )
-            except asyncio.TimeoutError:
+            else:
                 moved_back = await self._move_member(
                     target,
                     afk_channel,
@@ -161,6 +182,8 @@ class WakeupCog(commands.Cog):
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         if member.bot:
+            return
+        if not is_guild_enabled(member.guild):
             return
         if not await self._is_target_locked(member.id):
             return

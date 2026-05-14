@@ -21,6 +21,7 @@ from .config import (
     WORD_REGEX,
 )
 from .emojis import EMOJI_BLACK_LARGE_SQUARE, EMOJI_LARGE_GREEN_SQUARE, EMOJI_LARGE_YELLOW_SQUARE
+from .guild_state import effective_date_key, effective_local_now, effective_utcnow, is_guild_enabled
 from .guild_setup import get_log_channel
 from .ownership import owner_only
 from .roles import enforce_level6_exclusive
@@ -31,7 +32,7 @@ from .spin_support import (
 )
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
-from .time_windows import _date_key, _today_local, is_active_hours
+from .time_windows import is_active_hours
 from .xp import grant_fixed_boost, grant_fixed_debuff
 
 _builtin_wordlist = [
@@ -213,23 +214,27 @@ def format_wordle_hint_line(gid: int, uid: int, today: str, target: str) -> str:
 class WordleCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._last_notice_dates: dict[int, str] = {}
 
     @commands.Cog.listener()
     async def on_ready(self):
-        if not hasattr(self.bot, "_last_wordle_date"):
-            self.bot._last_wordle_date = _date_key(_today_local())
+        self._last_notice_dates = {
+            int(guild.id): effective_date_key(guild.id)
+            for guild in self.bot.guilds
+        }
         if not self.wordle_reset_notifier.is_running():
             self.wordle_reset_notifier.start()
 
     @tasks.loop(minutes=1)
     async def wordle_reset_notifier(self):
-        now_local = _today_local()
-        today = _date_key(now_local)
-        last_date = getattr(self.bot, "_last_wordle_date", None)
-        if last_date == today:
-            return
-        self.bot._last_wordle_date = today
         for guild in self.bot.guilds:
+            if not is_guild_enabled(guild):
+                continue
+            today = effective_date_key(guild.id)
+            last_date = str(self._last_notice_dates.get(int(guild.id), today))
+            if last_date == today:
+                continue
+            self._last_notice_dates[int(guild.id)] = today
             ch = get_log_channel(guild)
             if not ch:
                 continue
@@ -246,7 +251,7 @@ class WordleCog(commands.Cog):
         from .storage import _gdict
 
         g = ctx.guild
-        today = _date_key(_today_local())
+        today = effective_date_key(g.id)
         users = _gdict(g.id).get("users", {})
         cnt = 0
         for u in users.values():
@@ -259,7 +264,7 @@ class WordleCog(commands.Cog):
 
     @commands.command(name="wordle", aliases=["w", "wd"])
     async def wordle(self, ctx: commands.Context, guess: Optional[str] = None):
-        if WORDLE_RESPECT_ACTIVE_HOURS and not is_active_hours(datetime.now(timezone.utc)):
+        if WORDLE_RESPECT_ACTIVE_HOURS and not is_active_hours(effective_utcnow(ctx.guild.id)):
             await ctx.reply("Wordle is available, but XP changes only during active hours. Try again then to play for XP.")
             return
         if not _wordlist:
@@ -268,10 +273,10 @@ class WordleCog(commands.Cog):
             load_guesslist()
 
         st = _user_wordle_state(ctx.guild.id, ctx.author.id)
-        today = _date_key(_today_local())
+        today = effective_date_key(ctx.guild.id)
         if st.get("date") != today:
             _reset_daily_wordle_state(st, today)
-        target = daily_target_for(ctx.author.id, _today_local())
+        target = daily_target_for(ctx.author.id, effective_local_now(ctx.guild.id))
 
         if guess is None:
             rows = []

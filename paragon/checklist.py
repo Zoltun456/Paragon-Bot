@@ -15,6 +15,7 @@ from .blackjack import (
 )
 from .bounty import _bounty_state, _bounty_target_is_public
 from .config import LOCAL_TZ
+from .guild_state import effective_date_key, effective_local_now, effective_utcnow
 from .contracts import (
     CONTRACT_FAST_CLEAR_BONUS_MINUTES,
     CONTRACT_FAST_CLEAR_BONUS_PCT,
@@ -25,7 +26,7 @@ from .contracts import (
 )
 from .fish import WATER_STATES, _session_state as _fish_session_state, _state_root as _fish_state_root
 from .fish_support import get_bait
-from .include import _as_dict, _as_int, _parse_iso, _utcnow
+from .include import _as_dict, _as_int, _parse_iso
 from .lotto import (
     LOTTO_MAX_PER_USER,
     LOTTO_TICKET_COST,
@@ -55,7 +56,6 @@ from .spin import (
 from .storage import _udict, save_data
 from .surprise import _state as _surprise_state
 from .thanks import _thanks_state
-from .time_windows import _date_key, _today_local
 from .wordle import WORDLE_MAX_GUESSES, _reset_daily_wordle_state, _user_wordle_state
 
 
@@ -210,8 +210,9 @@ class ChecklistCog(commands.Cog):
             wheel_state.get("reset_hour", 0),
             wheel_state.get("reset_minute", 0),
         )
-        cycle = _spin_cycle_key(hour, minute)
-        next_reset = _spin_next_reset_dt(hour, minute)
+        now_local = effective_local_now(guild.id)
+        cycle = _spin_cycle_key(hour, minute, now=now_local)
+        next_reset = _spin_next_reset_dt(hour, minute, now=now_local)
 
         st = _spin_user_state(guild.id, member.id)
         before = (
@@ -300,7 +301,7 @@ class ChecklistCog(commands.Cog):
             st.get("draw_hour", 0),
             st.get("draw_minute", 0),
         )
-        next_draw = _next_draw_dt(draw_hour, draw_minute)
+        next_draw = _next_draw_dt(draw_hour, draw_minute, now=effective_local_now(guild.id))
         remaining_xp = max(0, int(LOTTO_MAX_PER_USER) - (tickets * int(LOTTO_TICKET_COST)))
         remaining_tickets = max(0, remaining_xp // max(1, int(LOTTO_TICKET_COST)))
         total_tickets, _ = _ticket_totals(st)
@@ -329,8 +330,9 @@ class ChecklistCog(commands.Cog):
             table.get("reset_hour", 0),
             table.get("reset_minute", 0),
         )
-        cycle = _bj_cycle_key(hour, minute)
-        next_reset = _bj_next_reset_dt(hour, minute)
+        now_local = effective_local_now(guild.id)
+        cycle = _bj_cycle_key(hour, minute, now=now_local)
+        next_reset = _bj_next_reset_dt(hour, minute, now=now_local)
 
         user_state = _udict(guild.id, member.id).get("blackjack_daily")
         if not isinstance(user_state, dict):
@@ -385,7 +387,7 @@ class ChecklistCog(commands.Cog):
             if seen_at is not None:
                 remaining = int(
                     float(CONTRACT_FAST_CLEAR_WINDOW_SECONDS)
-                    - max(0.0, (_utcnow() - seen_at).total_seconds())
+                    - max(0.0, (effective_utcnow(ctx.guild.id) - seen_at).total_seconds())
                 )
                 if remaining > 0:
                     lines.append(
@@ -409,7 +411,7 @@ class ChecklistCog(commands.Cog):
         member: discord.Member,
     ) -> tuple[list[str], bool]:
         st = _bounty_state(ctx.guild.id)
-        today = _date_key(_today_local())
+        today = effective_date_key(ctx.guild.id)
         if str(st.get("date", "")) != today:
             return ["- Bounty: state is still syncing."], False
 
@@ -435,12 +437,12 @@ class ChecklistCog(commands.Cog):
         expires_at = _parse_iso(st.get("claim_expires_at"))
         remaining_text = ""
         if expires_at is not None:
-            seconds_left = max(0, int((expires_at - _utcnow()).total_seconds()))
+            seconds_left = max(0, int((expires_at - effective_utcnow(ctx.guild.id)).total_seconds()))
             if seconds_left > 0:
                 remaining_text = f" ({_fmt_duration_seconds(seconds_left)} left)"
 
         cooldown_expires = _as_int(_as_dict(st.get("cooldowns")).get(str(member.id), 0), 0)
-        cooldown_left = max(0, cooldown_expires - int(_utcnow().timestamp()))
+        cooldown_left = max(0, cooldown_expires - int(effective_utcnow(ctx.guild.id).timestamp()))
 
         if not target_is_public:
             if claimant_id == member.id:
@@ -479,7 +481,7 @@ class ChecklistCog(commands.Cog):
         ctx: commands.Context,
         member: discord.Member,
     ) -> tuple[list[str], bool]:
-        today = _date_key(_today_local())
+        today = effective_date_key(ctx.guild.id)
         dirty = False
         await self._ensure_external_daily_state(ctx.guild, member)
 
