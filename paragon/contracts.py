@@ -1293,7 +1293,7 @@ class ContractsCog(commands.Cog):
             f"(worth about **{_fmt_num(last_reward.get('equivalent_bonus_xp', reward_bonus_xp))} XP**)."
         )
 
-    def _fast_clear_line(self, st: dict, *, viewer_is_holder: bool) -> str:
+    def _fast_clear_line(self, guild_id: int, st: dict, *, viewer_is_holder: bool) -> str:
         if not viewer_is_holder:
             return ""
         if bool(st.get("claimed", False)):
@@ -1312,7 +1312,7 @@ class ContractsCog(commands.Cog):
             return ""
         remaining_seconds = int(
             float(CONTRACT_FAST_CLEAR_WINDOW_SECONDS)
-            - max(0.0, (effective_utcnow(ctx.guild.id) - seen_at).total_seconds())
+            - max(0.0, (effective_utcnow(guild_id) - seen_at).total_seconds())
         )
         if remaining_seconds > 0:
             return (
@@ -1368,7 +1368,11 @@ class ContractsCog(commands.Cog):
             self._status_line(ctx, target, st, progress_rows),
             self._reward_line(st),
         ]
-        fast_clear_line = self._fast_clear_line(st, viewer_is_holder=(target.id == ctx.author.id))
+        fast_clear_line = self._fast_clear_line(
+            ctx.guild.id,
+            st,
+            viewer_is_holder=(target.id == ctx.author.id),
+        )
         if fast_clear_line:
             lines.append(fast_clear_line)
 
