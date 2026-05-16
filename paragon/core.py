@@ -87,6 +87,7 @@ HELP_DESCRIPTIONS = {
     "retroprestige": "Admin: remap prestige tiers from logged prestige-spend XP under the current curve.",
     "softreset": "Admin: reset a user's current XP, prestige, and wheel rewards without deleting stats.",
     "bottoggle": "Admin: disable or re-enable Paragon for this server with a confirmation step.",
+    "database": "Admin: show, create, or switch stored guild databases while keeping shared server settings.",
     "fishreroll": "Owner: reroll the current fishing water state immediately.",
 }
 

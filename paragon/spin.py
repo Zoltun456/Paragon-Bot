@@ -651,14 +651,14 @@ class SpinCog(commands.Cog):
         if animate:
             await self._animate_spin(ctx, wheel_state, reward_key)
 
+        gid = int(ctx.guild.id)
+        uid = int(ctx.author.id)
         reward_meta = WHEEL_REWARDS.get(reward_key, {})
         reward_result = await self._apply_reward(ctx, reward_key)
         user_state["cycle_key"] = cycle
         user_state["last_reward"] = reward_key
         user_state["last_spin_ts"] = effective_unix_ts(gid)
 
-        gid = int(ctx.guild.id)
-        uid = int(ctx.author.id)
         record_game_fields(gid, uid, "spin", spins=1)
         record_game_fields(gid, uid, "spin", **{f"reward_{reward_key}": 1})
 

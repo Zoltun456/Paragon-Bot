@@ -18,7 +18,18 @@ from .guild_state import (
 from .ownership import is_control_user_id, owner_only
 from .roles import announce_level_up, enforce_level6_exclusive, sync_level_roles
 from .stats_store import record_xp_change
-from .storage import _gdict, _udict, save_data
+from .storage import (
+    _gdict,
+    _udict,
+    active_database_version,
+    available_database_versions,
+    create_database_version,
+    database_version_user_count,
+    has_database_version,
+    next_database_version,
+    save_data,
+    set_active_database_version,
+)
 from .xp import (
     _compute_level_from_total_xp,
     apply_xp_change,
@@ -29,6 +40,7 @@ from .xp import (
 
 SOFTRESET_CONFIRM_TTL_SECONDS = 30
 BOT_TOGGLE_CONFIRM_TTL_SECONDS = 30
+DATABASE_CONFIRM_TTL_SECONDS = 30
 
 
 # ---- Helpers ----
@@ -138,6 +150,7 @@ class AdminCog(commands.Cog):
         self.bot = bot
         self._pending_softresets: dict[tuple[int, int, int], float] = {}
         self._pending_bot_toggles: dict[tuple[int, int], tuple[bool, float]] = {}
+        self._pending_database_actions: dict[tuple[int, int], tuple[str, int, float]] = {}
 
     async def _call_cog_hook(self, hook_name: str, guild_id: int) -> None:
         cogs = list(self.bot.cogs.values())
@@ -164,6 +177,52 @@ class AdminCog(commands.Cog):
         perms = getattr(ctx.author, "guild_permissions", None)
         is_admin = bool(perms and (perms.administrator or perms.manage_guild))
         return bool(is_admin or is_control_user_id(ctx.guild, ctx.author.id))
+
+    def _can_manage_database(self, ctx: commands.Context) -> bool:
+        return self._can_toggle_bot(ctx)
+
+    def _database_status_lines(self, guild_id: int) -> list[str]:
+        active_id = active_database_version(guild_id)
+        next_id = next_database_version(guild_id)
+        ids = available_database_versions(guild_id)
+        summary = ", ".join(
+            f"`{version_id}` ({database_version_user_count(guild_id, version_id)} user(s))"
+            for version_id in ids
+        ) or "(none)"
+        current_users = len(_gdict(guild_id).get("users", {}))
+        return [
+            f"Active database: **{active_id}** with **{current_users}** stored user(s).",
+            f"Available databases: {summary}.",
+            f"Next new database id: **{next_id}**.",
+        ]
+
+    def _confirm_database_action(
+        self,
+        ctx: commands.Context,
+        *,
+        action: str,
+        target_id: int,
+        now: float,
+    ) -> bool:
+        self._pending_database_actions = {
+            key: value
+            for key, value in self._pending_database_actions.items()
+            if value[2] > now
+        }
+        pending_key = (int(ctx.guild.id), int(ctx.author.id))
+        pending = self._pending_database_actions.get(pending_key)
+        if pending is not None and pending[0] == action and int(pending[1]) == int(target_id) and pending[2] > now:
+            self._pending_database_actions.pop(pending_key, None)
+            return True
+
+        self._pending_database_actions[pending_key] = (str(action), int(target_id), now + DATABASE_CONFIRM_TTL_SECONDS)
+        return False
+
+    async def _refresh_post_database_swap(self, guild: discord.Guild) -> None:
+        try:
+            await enforce_level6_exclusive(guild)
+        except Exception:
+            pass
 
     @commands.command(name="role")
     @owner_only()
@@ -558,4 +617,117 @@ class AdminCog(commands.Cog):
             f"Paragon is now **ENABLED** for **{ctx.guild.name}**. "
             f"Managed channels restored: **{restored_channels}**. "
             f"Frozen time resumed after **{frozen_seconds} seconds** offline."
+        )
+
+    @commands.command(name="database", aliases=["db"])
+    async def database(self, ctx: commands.Context, action: Optional[str] = None, target: Optional[str] = None):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+        if not self._can_manage_database(ctx):
+            await ctx.reply("You need administrator or Manage Server permission to manage guild databases.")
+            return
+
+        token = str(action or "status").strip().lower()
+        if token in {"", "status", "show", "list"}:
+            lines = [
+                f"**Database status for {ctx.guild.name}**",
+                *self._database_status_lines(ctx.guild.id),
+                (
+                    f"Use `{ctx.clean_prefix}database new` for a fresh user/game database, or "
+                    f"`{ctx.clean_prefix}database set <id>` to switch to an existing one."
+                ),
+            ]
+            await ctx.reply("\n".join(lines))
+            return
+
+        now = time.monotonic()
+        guild_id = int(ctx.guild.id)
+        was_enabled = is_guild_enabled(ctx.guild)
+
+        if token == "new":
+            pending_id = next_database_version(guild_id)
+            if not self._confirm_database_action(ctx, action="new", target_id=pending_id, now=now):
+                await ctx.reply(
+                    f"Database create is armed for **ID {pending_id}**. "
+                    f"Send `{ctx.clean_prefix}database new` again within "
+                    f"**{DATABASE_CONFIRM_TTL_SECONDS} seconds** to confirm.\n"
+                    f"Shared server settings stay in place, and gameplay/user data starts fresh."
+                )
+                return
+
+            if was_enabled:
+                await self._pause_guild_runtime(guild_id)
+            try:
+                new_id = await create_database_version(guild_id)
+            finally:
+                if was_enabled:
+                    await self._resume_guild_runtime(guild_id)
+
+            await self._refresh_post_database_swap(ctx.guild)
+            await ctx.reply(
+                f"Database **{new_id}** is now active for **{ctx.guild.name}**. "
+                f"Shared server settings were kept, and gameplay/user data started fresh.\n"
+                f"Available databases: "
+                + ", ".join(
+                    f"`{version_id}` ({database_version_user_count(guild_id, version_id)} user(s))"
+                    for version_id in available_database_versions(guild_id)
+                )
+                + "."
+            )
+            return
+
+        if token == "set":
+            if target is None:
+                await ctx.reply(f"Usage: `{ctx.clean_prefix}database set <id>`")
+                return
+            try:
+                target_id = int(str(target).strip())
+            except ValueError:
+                await ctx.reply(f"Database id must be an integer. Usage: `{ctx.clean_prefix}database set <id>`")
+                return
+            if target_id <= 0:
+                await ctx.reply("Database id must be a positive integer.")
+                return
+            if not has_database_version(guild_id, target_id):
+                await ctx.reply(
+                    f"Database **{target_id}** does not exist. Available: "
+                    + ", ".join(f"`{version_id}`" for version_id in available_database_versions(guild_id))
+                    + "."
+                )
+                return
+            if active_database_version(guild_id) == target_id:
+                await ctx.reply(f"Database **{target_id}** is already active.")
+                return
+
+            if not self._confirm_database_action(ctx, action="set", target_id=target_id, now=now):
+                await ctx.reply(
+                    f"Database switch to **ID {target_id}** is armed. "
+                    f"Send `{ctx.clean_prefix}database set {target_id}` again within "
+                    f"**{DATABASE_CONFIRM_TTL_SECONDS} seconds** to confirm."
+                )
+                return
+
+            if was_enabled:
+                await self._pause_guild_runtime(guild_id)
+            try:
+                changed = await set_active_database_version(guild_id, target_id)
+            finally:
+                if was_enabled:
+                    await self._resume_guild_runtime(guild_id)
+
+            if not changed:
+                await ctx.reply(f"Database **{target_id}** no longer exists.")
+                return
+
+            await self._refresh_post_database_swap(ctx.guild)
+            await ctx.reply(
+                f"Database **{target_id}** is now active for **{ctx.guild.name}**. "
+                f"It currently has **{database_version_user_count(guild_id, target_id)}** stored user(s)."
+            )
+            return
+
+        await ctx.reply(
+            f"Usage: `{ctx.clean_prefix}database` | `{ctx.clean_prefix}database new` | "
+            f"`{ctx.clean_prefix}database set <id>`"
         )
