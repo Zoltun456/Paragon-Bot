@@ -47,6 +47,13 @@ def create_bot() -> commands.Bot:
 
 bot = create_bot()
 
+DISABLED_GUILD_ALLOWED_COMMANDS = {
+    "bottoggle",
+    "play",
+    "playskip",
+    "playclear",
+}
+
 
 @bot.check_once
 async def _global_check(ctx: commands.Context):
@@ -57,7 +64,7 @@ async def _global_check(ctx: commands.Context):
 
     cmd = getattr(ctx, "command", None)
     cmd_name = str(getattr(cmd, "qualified_name", "") or getattr(cmd, "name", "")).strip().lower()
-    if cmd_name == "bottoggle":
+    if cmd_name in DISABLED_GUILD_ALLOWED_COMMANDS:
         return True
 
     ctx._paragon_disabled_response_sent = True

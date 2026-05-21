@@ -64,6 +64,9 @@ class VoiceCog(commands.Cog):
         vc = getattr(guild, "voice_client", None) if guild is not None else None
         if vc is None or not vc.is_connected():
             return
+        if self._should_keep_voice_connected(guild_id, vc):
+            self._idle_since.pop(guild_id, None)
+            return
         await cleanup_voice_client(vc)
         self._notify_voice_disconnected(guild_id)
 
@@ -86,12 +89,15 @@ class VoiceCog(commands.Cog):
                 self._idle_since.pop(guild_id, None)
                 continue
 
+            keep_connected = self._should_keep_voice_connected(guild_id, vc)
             if not is_guild_enabled(guild):
-                await cleanup_voice_client(vc)
-                self._notify_voice_disconnected(guild_id)
+                if not keep_connected:
+                    await cleanup_voice_client(vc)
+                    self._notify_voice_disconnected(guild_id)
+                self._idle_since.pop(guild_id, None)
                 continue
 
-            if self._should_keep_voice_connected(guild_id, vc):
+            if keep_connected:
                 self._idle_since.pop(guild_id, None)
                 continue
 

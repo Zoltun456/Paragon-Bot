@@ -106,6 +106,22 @@ class GlobalCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(allowed)
         ctx.reply.assert_not_awaited()
 
+    async def test_global_check_allows_playback_commands_when_disabled(self):
+        for cmd_name in ("play", "playskip", "playclear"):
+            with self.subTest(command=cmd_name):
+                ctx = SimpleNamespace(
+                    guild=SimpleNamespace(id=803),
+                    clean_prefix="?",
+                    command=SimpleNamespace(qualified_name=cmd_name, name=cmd_name),
+                    reply=AsyncMock(),
+                )
+
+                with patch("Paragon.is_guild_enabled", return_value=False):
+                    allowed = await _global_check(ctx)
+
+                self.assertTrue(allowed)
+                ctx.reply.assert_not_awaited()
+
 
 class CommandSmokeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -220,6 +236,29 @@ class RuntimeHookSmokeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         load_data()
 
+    async def test_voice_watchdog_keeps_playback_connected_while_disabled(self):
+        vc = DummyVoiceClient()
+        vc.is_playing = lambda: False
+        vc.is_paused = lambda: False
+        guild = DummyGuild(840, voice_client=vc)
+        playback_stub = SimpleNamespace(
+            should_keep_voice_connected=lambda guild_id: guild_id == 840,
+            note_voice_disconnected=lambda _guild_id: None,
+        )
+        bot = SimpleNamespace(
+            guilds=[guild],
+            get_cog=lambda name: playback_stub if name == "PlaybackCog" else None,
+        )
+        voice = VoiceCog(bot)
+
+        with (
+            patch("paragon.voice.is_guild_enabled", return_value=False),
+            patch("paragon.voice.cleanup_voice_client", new=AsyncMock()) as cleanup_voice,
+        ):
+            await VoiceCog.idle_watchdog.coro(voice)
+
+        self.assertEqual(cleanup_voice.await_count, 0)
+
     async def test_pause_resume_hooks_smoke(self):
         playback_vc = DummyVoiceClient()
         playback_guild = DummyGuild(841, voice_client=playback_vc)
@@ -244,6 +283,8 @@ class RuntimeHookSmokeTests(unittest.IsolatedAsyncioTestCase):
         tts._guild_active_audio[842] = _ActiveSayAudio(temp_path="voice.mp3", audio_seconds=12.0)
 
         voice_vc = DummyVoiceClient()
+        voice_vc.is_playing = lambda: False
+        voice_vc.is_paused = lambda: False
         voice_guild = DummyGuild(843, voice_client=voice_vc)
         voice_bot = SimpleNamespace(
             get_guild=lambda gid: voice_guild if gid == 843 else None,
@@ -288,11 +329,11 @@ class RuntimeHookSmokeTests(unittest.IsolatedAsyncioTestCase):
             await roulette.resume_guild(845)
 
         try:
-            self.assertTrue(playback_vc.stopped)
+            self.assertFalse(playback_vc.stopped)
             self.assertTrue(tts_vc.stopped)
             self.assertTrue(playback._play_allowed_for(841).is_set())
             self.assertTrue(tts._play_allowed_for(842).is_set())
-            self.assertEqual(cleanup_playback.await_count, 1)
+            self.assertEqual(cleanup_playback.await_count, 0)
             self.assertEqual(cleanup_tts.await_count, 1)
             self.assertEqual(cleanup_voice.await_count, 1)
             self.assertIn(844, bounty._claim_tasks)

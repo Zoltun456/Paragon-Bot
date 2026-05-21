@@ -17,7 +17,6 @@ from discord.ext import commands
 
 from .config import PLAYBACK_VOLUME, YTDLP_COOKIE_FILE, YTDLP_COOKIES_FROM_BROWSER
 from .emojis import EMOJI_BLACK_RIGHT_POINTING_DOUBLE_TRIANGLE
-from .guild_state import is_guild_enabled
 from .ownership import is_control_user_id
 from .stats_store import record_game_fields
 from .storage import save_data
@@ -445,8 +444,6 @@ class PlaybackCog(commands.Cog):
         return bool(self._guild_current.get(guild_id) is not None or guild_id in self._guild_processing or pending > 0)
 
     def should_keep_voice_connected(self, guild_id: int) -> bool:
-        if not is_guild_enabled(guild_id):
-            return False
         return self.has_pending_audio(guild_id)
 
     def note_voice_disconnected(self, guild_id: int) -> None:
@@ -484,28 +481,11 @@ class PlaybackCog(commands.Cog):
         self._resume_playback(guild_id, "tts")
 
     async def pause_guild(self, guild_id: int) -> None:
-        vc = None
-        async with self._lock_for(guild_id):
-            self._pause_playback(guild_id, "guild_disabled")
-            current = self._guild_current.get(guild_id)
-            vc = self._guild_active_vc.get(guild_id)
-            if vc is None:
-                guild = self.bot.get_guild(guild_id)
-                vc = getattr(guild, "voice_client", None) if guild is not None else None
-            if current is not None and vc is not None and (vc.is_playing() or vc.is_paused()):
-                current.started_offset = self._current_offset(current)
-                try:
-                    vc.stop()
-                except Exception:
-                    pass
-        if vc is not None:
-            try:
-                await cleanup_voice_client(vc)
-            except Exception:
-                pass
+        # `!bottoggle` freezes game systems, but playback remains available.
+        return
 
     async def resume_guild(self, guild_id: int) -> None:
-        self._resume_playback(guild_id, "guild_disabled")
+        return
 
     async def shutdown_guild(self, guild_id: int, *, clear_queue: bool = True, disconnect: bool = False) -> None:
         if clear_queue:
@@ -1025,6 +1005,8 @@ class PlaybackCog(commands.Cog):
             enqueued_at=time.monotonic(),
         )
 
+        # Playback is intentionally allowed while the rest of the guild is disabled.
+        self._resume_playback(ctx.guild.id, "guild_disabled")
         queue = self._queue_for(ctx.guild.id)
         await queue.put(req)
         record_game_fields(ctx.guild.id, ctx.author.id, "playback", tracks_queued=1)
@@ -1050,6 +1032,7 @@ class PlaybackCog(commands.Cog):
             await ctx.reply("No queued audio is currently active.")
             return
 
+        self._resume_playback(ctx.guild.id, "guild_disabled")
         self._skip_event_for(ctx.guild.id).set()
         vc = self._guild_active_vc.get(ctx.guild.id) or ctx.voice_client
         if vc is not None:
@@ -1090,8 +1073,6 @@ class PlaybackCog(commands.Cog):
             return
 
         guild = current.request.ctx.guild
-        if not is_guild_enabled(guild):
-            return
         voice_channel = guild.get_channel(current.request.target_channel_id)
         if not isinstance(voice_channel, discord.VoiceChannel):
             return
