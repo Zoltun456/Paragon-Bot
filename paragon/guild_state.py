@@ -12,7 +12,7 @@ from .guild_setup import (
     get_log_channel_id,
     get_owner_channel_id,
 )
-from .include import _as_dict, _as_float, _as_int, _iso, _parse_iso, _utcnow
+from .include import _as_dict, _as_int, _iso, _parse_iso, _utcnow
 from .ownership import resolve_owner_id
 from .storage import _gdict, save_data
 
@@ -40,6 +40,11 @@ def guild_settings(guild_id: int) -> dict:
     if not isinstance(snapshots, dict):
         snapshots = {}
         st[BOT_CHANNEL_SNAPSHOTS_KEY] = snapshots
+    if bool(st.get(BOT_ENABLED_KEY, True)):
+        # Older disabled-guild logic carried a permanent paused offset after re-enable.
+        # Clear that stale runtime state so enabled guilds track the real current date again.
+        st[BOT_DISABLED_AT_KEY] = ""
+        st[BOT_PAUSED_SECONDS_KEY] = 0.0
     return st
 
 
@@ -71,23 +76,21 @@ def paused_seconds(guild_or_id) -> float:
     gid = _guild_id(guild_or_id)
     if gid <= 0:
         return 0.0
-    st = guild_settings(gid)
-    total = max(0.0, _as_float(st.get(BOT_PAUSED_SECONDS_KEY, 0.0), 0.0))
-    if bool(st.get(BOT_ENABLED_KEY, True)):
-        return total
+    if is_guild_enabled(gid):
+        return 0.0
     disabled_at = _disabled_at_dt(gid)
     if disabled_at is None:
-        return total
-    elapsed = max(0.0, (_utcnow() - disabled_at).total_seconds())
-    return total + elapsed
+        return 0.0
+    return max(0.0, (_utcnow() - disabled_at).total_seconds())
 
 
 def effective_utcnow(guild_or_id) -> datetime:
     now = _utcnow()
-    offset = paused_seconds(guild_or_id)
-    if offset <= 0.0:
+    gid = _guild_id(guild_or_id)
+    if gid <= 0 or is_guild_enabled(gid):
         return now
-    return now - timedelta(seconds=offset)
+    disabled_at = _disabled_at_dt(gid)
+    return disabled_at or now
 
 
 def effective_unix_ts(guild_or_id) -> int:
@@ -121,10 +124,12 @@ async def mark_guild_disabled(guild: discord.Guild) -> bool:
     if not bool(st.get(BOT_ENABLED_KEY, True)):
         if not str(st.get(BOT_DISABLED_AT_KEY, "")).strip():
             st[BOT_DISABLED_AT_KEY] = _iso(_utcnow())
+            st[BOT_PAUSED_SECONDS_KEY] = 0.0
             await save_data()
         return False
     st[BOT_ENABLED_KEY] = False
     st[BOT_DISABLED_AT_KEY] = _iso(_utcnow())
+    st[BOT_PAUSED_SECONDS_KEY] = 0.0
     await save_data()
     return True
 
@@ -132,6 +137,7 @@ async def mark_guild_disabled(guild: discord.Guild) -> bool:
 async def mark_guild_enabled(guild: discord.Guild) -> int:
     st = guild_settings(guild.id)
     if bool(st.get(BOT_ENABLED_KEY, True)):
+        st[BOT_PAUSED_SECONDS_KEY] = 0.0
         st[BOT_DISABLED_AT_KEY] = ""
         await save_data()
         return 0
@@ -139,7 +145,7 @@ async def mark_guild_enabled(guild: discord.Guild) -> int:
     now = _utcnow()
     disabled_at = _disabled_at_dt(guild.id)
     elapsed = max(0.0, (now - disabled_at).total_seconds()) if disabled_at is not None else 0.0
-    st[BOT_PAUSED_SECONDS_KEY] = max(0.0, _as_float(st.get(BOT_PAUSED_SECONDS_KEY, 0.0), 0.0)) + elapsed
+    st[BOT_PAUSED_SECONDS_KEY] = 0.0
     st[BOT_DISABLED_AT_KEY] = ""
     st[BOT_ENABLED_KEY] = True
     await save_data()

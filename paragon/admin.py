@@ -605,7 +605,7 @@ class AdminCog(commands.Cog):
             await ctx.reply(
                 f"Paragon is now **DISABLED** for **{ctx.guild.name}**. "
                 f"Managed channels hidden: **{hidden_channels}**. "
-                f"All guild timers and daily cycles are now frozen until you re-enable with `{ctx.clean_prefix}bottoggle`."
+                f"All guild timers and daily cycles are now paused until you re-enable with `{ctx.clean_prefix}bottoggle`."
             )
             return
 
@@ -616,7 +616,7 @@ class AdminCog(commands.Cog):
         await ctx.reply(
             f"Paragon is now **ENABLED** for **{ctx.guild.name}**. "
             f"Managed channels restored: **{restored_channels}**. "
-            f"Frozen time resumed after **{frozen_seconds} seconds** offline."
+            f"Timers resumed after **{frozen_seconds} seconds** offline, and the guild clock was realigned to the current date."
         )
 
     @commands.command(name="database", aliases=["db"])

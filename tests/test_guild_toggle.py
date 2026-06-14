@@ -15,7 +15,7 @@ class GuildStateTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         load_data()
 
-    async def test_disable_then_enable_keeps_effective_time_frozen(self):
+    async def test_disable_then_enable_realigns_effective_time_to_current_time(self):
         guild = SimpleNamespace(id=101)
         t0 = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
         t1 = t0 + timedelta(hours=1)
@@ -35,10 +35,22 @@ class GuildStateTests(unittest.IsolatedAsyncioTestCase):
                 elapsed = await mark_guild_enabled(guild)
             self.assertEqual(elapsed, 2 * 60 * 60)
             self.assertTrue(is_guild_enabled(guild.id))
-            self.assertEqual(int(guild_settings(guild.id)["bot_paused_seconds"]), 2 * 60 * 60)
+            self.assertEqual(int(guild_settings(guild.id)["bot_paused_seconds"]), 0)
 
             with patch("paragon.guild_state._utcnow", return_value=t3):
-                self.assertEqual(effective_utcnow(guild.id), t0 + timedelta(minutes=30))
+                self.assertEqual(effective_utcnow(guild.id), t3)
+
+    async def test_enabled_guild_ignores_legacy_paused_offset(self):
+        guild = SimpleNamespace(id=102)
+        settings = guild_settings(guild.id)
+        settings["bot_enabled"] = True
+        settings["bot_disabled_at"] = ""
+        settings["bot_paused_seconds"] = 30 * 24 * 60 * 60
+
+        now = datetime(2026, 6, 14, 0, 15, tzinfo=timezone.utc)
+        with patch("paragon.guild_state._utcnow", return_value=now):
+            self.assertEqual(effective_utcnow(guild.id), now)
+        self.assertEqual(guild_settings(guild.id)["bot_paused_seconds"], 0.0)
 
 
 class AdminToggleTests(unittest.IsolatedAsyncioTestCase):
@@ -81,3 +93,38 @@ class AdminToggleTests(unittest.IsolatedAsyncioTestCase):
             mark_disabled.assert_awaited_once_with(guild)
             hide_channels.assert_awaited_once_with(guild)
             self.assertIn("DISABLED", ctx.reply.await_args_list[-1].args[0])
+
+    async def test_bottoggle_reenable_realigns_clock_without_extra_command(self):
+        bot = SimpleNamespace(cogs={})
+        cog = AdminCog(bot)
+        cog._resume_guild_runtime = AsyncMock()
+
+        guild = SimpleNamespace(id=204, name="Paragon Test")
+        author = SimpleNamespace(
+            id=305,
+            guild_permissions=SimpleNamespace(administrator=True, manage_guild=True),
+        )
+        ctx = SimpleNamespace(
+            guild=guild,
+            author=author,
+            clean_prefix="!",
+            reply=AsyncMock(),
+        )
+
+        with (
+            patch("paragon.admin.time.monotonic", side_effect=[200.0, 201.0]),
+            patch("paragon.admin.is_guild_enabled", return_value=False),
+            patch("paragon.admin.current_disabled_elapsed_seconds", return_value=2515725),
+            patch("paragon.admin.mark_guild_enabled", new=AsyncMock(return_value=2515725)) as mark_enabled,
+            patch("paragon.admin.restore_managed_channels", new=AsyncMock(return_value=4)) as restore_channels,
+        ):
+            await AdminCog.bottoggle.callback(cog, ctx)
+            mark_enabled.assert_not_awaited()
+            restore_channels.assert_not_awaited()
+            self.assertIn("armed", ctx.reply.await_args_list[0].args[0])
+
+            await AdminCog.bottoggle.callback(cog, ctx)
+            mark_enabled.assert_awaited_once_with(guild)
+            restore_channels.assert_awaited_once_with(guild)
+            cog._resume_guild_runtime.assert_awaited_once_with(guild.id)
+            self.assertIn("realigned to the current date", ctx.reply.await_args_list[-1].args[0])
