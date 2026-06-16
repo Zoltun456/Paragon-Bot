@@ -1,5 +1,6 @@
 ﻿# blackjack.py
 from __future__ import annotations
+from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
 import random
 import time
@@ -46,6 +47,7 @@ from .emojis import (
 )
 from .guild_setup import get_blackjack_channel_id
 from .guild_state import effective_local_now, effective_unix_ts, is_guild_enabled
+from .include import _as_int
 from .storage import _gdict, _udict, save_data
 from .stats_store import record_game_fields, record_xp_change
 from .spin_support import consume_blackjack_natural_charge
@@ -320,6 +322,68 @@ class BlackjackCog(commands.Cog):
     def cog_unload(self):
         if self.guard_loop.is_running():
             self.guard_loop.cancel()
+
+    async def pause_guild(self, guild_id: int) -> None:
+        st = _table(guild_id)
+        if bool(st.get("dealing_lock")):
+            st["dealing_lock"] = False
+            await save_data()
+
+    async def resume_guild(self, guild_id: int) -> None:
+        st = _table(guild_id)
+        phase = str(st.get("phase", "betting"))
+        changed = False
+
+        if bool(st.get("dealing_lock")):
+            st["dealing_lock"] = False
+            changed = True
+
+        if phase == "dealing":
+            self._reset_hand(st)
+            st["phase"] = "betting"
+            st["action_msg_id"] = 0
+            st["turn_idx"] = 0
+            st["turn_started_ts"] = 0
+            self._touch(st)
+            changed = True
+        elif phase == "acting":
+            st["action_msg_id"] = 0
+            self._start_turn(st)
+            changed = True
+
+        if changed:
+            await save_data()
+
+        guild = self.bot.get_guild(int(guild_id)) if self.bot else None
+        if guild is None:
+            return
+
+        fallback_channel_id = int(get_blackjack_channel_id(guild.id) or 0)
+        channel = guild.get_channel(int(st.get("channel_id", 0) or fallback_channel_id))
+        if channel is None or not hasattr(channel, "send"):
+            return
+
+        if phase == "acting":
+            order = self._seated_order(st, guild)
+            acting_ids = [
+                uid for uid in order
+                if st["players"][str(uid)].get("status") == "acting" and st["players"][str(uid)].get("in_table")
+            ]
+            if acting_ids:
+                try:
+                    await self._prompt_turn_with_reactions(guild, channel)
+                except Exception:
+                    pass
+            else:
+                st["phase"] = "betting"
+                st["turn_idx"] = 0
+                st["turn_started_ts"] = 0
+                await save_data()
+        elif st.get("phase") in ("betting", "idle") and not st.get("deal_msg_id"):
+            try:
+                await self._post_new_deal_button(guild, channel)
+            except Exception:
+                pass
 
     # -------- Debug helpers --------
     def _dbg(self, guild_id: int) -> bool:
@@ -636,6 +700,11 @@ class BlackjackCog(commands.Cog):
             await channel.send(f"**{member.display_name}** is locked out until **{nxt.strftime('%Y-%m-%d %I:%M %p ET')}**.")
             return False
 
+        uid_key = str(member.id)
+        had_player_row = uid_key in st.get("players", {})
+        player_snapshot = deepcopy(st["players"].get(uid_key)) if had_player_row else None
+        old_phase = st.get("phase", "betting")
+        old_last_action_ts = int(st.get("last_action_ts", 0) or 0)
         p = self._player(guild.id, member.id)
         current_locked = int(p.get("locked", 0))
         u = _udict(guild.id, member.id)
@@ -659,6 +728,8 @@ class BlackjackCog(commands.Cog):
             await channel.send(f"Table is full (**{BJ_MAX_PLAYERS}** players).")
             return False
 
+        was_seated = bool(p.get("in_table"))
+        wallet_delta = 0
         if current_locked > 0:
             await self._apply_member_xp(
                 guild,
@@ -667,33 +738,55 @@ class BlackjackCog(commands.Cog):
                 sync_level=False,
                 source="blackjack refund pending",
             )
+            wallet_delta += current_locked
 
-        await self._apply_member_xp(
-            guild,
-            member,
-            -desired_bet,
-            sync_level=False,
-            source="blackjack ante",
-        )
+        try:
+            await self._apply_member_xp(
+                guild,
+                member,
+                -desired_bet,
+                sync_level=False,
+                source="blackjack ante",
+            )
+            wallet_delta -= desired_bet
 
-        was_seated = bool(p.get("in_table"))
-        p["bet"] = desired_bet
-        p["locked"] = desired_bet
-        p["status"] = "betting"
-        p["in_table"] = True
-        p["joined_ts"] = now_ts(guild.id)
-        self._touch_player(p)
-        self._touch(st)
-        st["phase"] = "betting"
-        record_game_fields(
-            guild.id,
-            member.id,
-            "blackjack",
-            bets_set=1,
-            stake_set_total=desired_bet,
-            streak_snapshot=int(daily.get("streak", 0)),
-        )
-        await save_data()
+            p["bet"] = desired_bet
+            p["locked"] = desired_bet
+            p["status"] = "betting"
+            p["in_table"] = True
+            p["joined_ts"] = now_ts(guild.id)
+            self._touch_player(p)
+            self._touch(st)
+            st["phase"] = "betting"
+            record_game_fields(
+                guild.id,
+                member.id,
+                "blackjack",
+                bets_set=1,
+                stake_set_total=desired_bet,
+                streak_snapshot=int(daily.get("streak", 0)),
+            )
+            await save_data()
+        except Exception:
+            if wallet_delta != 0:
+                try:
+                    await self._apply_member_xp(
+                        guild,
+                        member,
+                        -wallet_delta,
+                        sync_level=False,
+                        source="blackjack join rollback",
+                    )
+                except Exception:
+                    pass
+            st["phase"] = old_phase
+            st["last_action_ts"] = old_last_action_ts
+            if had_player_row and player_snapshot is not None:
+                st["players"][uid_key] = deepcopy(player_snapshot)
+            else:
+                st.get("players", {}).pop(uid_key, None)
+            await save_data()
+            raise
 
         if all_in:
             verb = "updated to all in" if was_seated else "went all in"
@@ -964,15 +1057,24 @@ class BlackjackCog(commands.Cog):
             return
 
         if a in ("deal", "start"):
-            await self._begin_deal_core(ctx.guild, ctx.channel)
+            try:
+                await self._begin_deal_core(ctx.guild, ctx.channel)
+            except Exception:
+                await ctx.reply("Blackjack hit an internal error while starting the hand.")
             return
 
         if a in ("all", "allin", "all-in", "ai", "max"):
-            await self._join_table(ctx.guild, ctx.channel, ctx.author, all_in=True)
+            try:
+                await self._join_table(ctx.guild, ctx.channel, ctx.author, all_in=True)
+            except Exception:
+                await ctx.reply("Blackjack hit an internal error while placing your bet. Your seat was rolled back.")
             return
 
         if a.replace(",", "").isdigit():
-            await self._join_table(ctx.guild, ctx.channel, ctx.author, bet_amount=int(a.replace(",", "")))
+            try:
+                await self._join_table(ctx.guild, ctx.channel, ctx.author, bet_amount=int(a.replace(",", "")))
+            except Exception:
+                await ctx.reply("Blackjack hit an internal error while placing your bet. Your seat was rolled back.")
             return
 
         if st["phase"] != "acting":
@@ -996,6 +1098,7 @@ class BlackjackCog(commands.Cog):
     @owner_only()
     async def bjstate(self, ctx: commands.Context):
         st = _table(ctx.guild.id)
+        seated = [uid for uid, p in st.get("players", {}).items() if p.get("in_table")]
         await ctx.reply("\n".join([
             f"active={st.get('active')}",
             f"phase={st.get('phase')}",
@@ -1004,7 +1107,8 @@ class BlackjackCog(commands.Cog):
             f"channel_id={st.get('channel_id')}",
             f"reset={st.get('reset_hour')}:{int(st.get('reset_minute', 0)):02d} ET",
             f"cooldown_enabled={bool(st.get('cooldown_enabled', BJ_COOLDOWN_ENABLED))}",
-            f"players={list(st.get('players', {}).keys())}",
+            f"player_rows={list(st.get('players', {}).keys())}",
+            f"seated_players={seated}",
         ]))
 
     @commands.command(name="bjintents")
@@ -1603,12 +1707,26 @@ class BlackjackCog(commands.Cog):
                 member = await self._resolve_member(guild, payload.user_id)
                 if not member or member.bot:
                     return
-                await self._join_table(guild, ch, member, all_in=True)
+                try:
+                    await self._join_table(guild, ch, member, all_in=True)
+                except Exception as e:
+                    await self._dprint(guild, ch, f"_join_table error: {type(e).__name__}: {e}")
+                    try:
+                        await ch.send("Blackjack hit an internal error while placing that bet. No seat was saved.")
+                    except Exception:
+                        pass
             elif em_name in LEAVE_EMOJIS or payload.emoji.name in LEAVE_EMOJIS:
                 member = await self._resolve_member(guild, payload.user_id)
                 if not member or member.bot:
                     return
-                await self._leave_table(guild, ch, member.id)
+                try:
+                    await self._leave_table(guild, ch, member.id)
+                except Exception as e:
+                    await self._dprint(guild, ch, f"_leave_table error: {type(e).__name__}: {e}")
+                    try:
+                        await ch.send("Blackjack hit an internal error while updating that seat.")
+                    except Exception:
+                        pass
             else:
                 await self._dprint(
                     guild,
