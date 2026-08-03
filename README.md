@@ -71,7 +71,7 @@ Access legend:
 | `!cleanse` | none | User | Spend a cleanse charge to remove debuffs |
 | `!drain` | none | User | Debuff others in your voice call and buff yourself |
 | `!shop` | none | User | View shop items |
-| `!buy <item> [amount]` | none | User | Buy a shop item |
+| `!buy <item> [amount|max]` | none | User | Buy a shop item, or as many as you can afford with `max` |
 
 ### Games
 

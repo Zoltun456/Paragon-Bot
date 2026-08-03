@@ -210,15 +210,49 @@ def _shop_item_costs(item: dict[str, object], gid: int, uid: int, amount: int = 
     costs: list[int] = []
     for offset in range(buy_count):
         purchase_number = bought_this_cycle + offset + 1
-        minutes_equivalent = _shop_item_cost_minutes(item_key, purchase_number)
-        if minutes_equivalent <= 0:
-            costs.append(0)
-            continue
-        rounded_cost = _round_to_shop_step(rate_per_min * float(minutes_equivalent))
-        if rounded_cost <= 0:
-            rounded_cost = max(1, int(SHOP_COST_ROUND_STEP))
-        costs.append(rounded_cost)
+        costs.append(_shop_purchase_cost(item_key, purchase_number, rate_per_min))
     return costs
+
+
+def _shop_purchase_cost(item_key: str, purchase_number: int, rate_per_min: float) -> int:
+    minutes_equivalent = _shop_item_cost_minutes(item_key, purchase_number)
+    if minutes_equivalent <= 0:
+        return 0
+    rounded_cost = _round_to_shop_step(float(rate_per_min) * float(minutes_equivalent))
+    if rounded_cost <= 0:
+        return max(1, int(SHOP_COST_ROUND_STEP))
+    return rounded_cost
+
+
+def _max_affordable_shop_amount(
+    item: dict[str, object], gid: int, uid: int, available_xp: int
+) -> int:
+    """Return the largest number of consecutive purchases affordable right now."""
+    remaining_xp = int(available_xp)
+    if remaining_xp < 0:
+        return 0
+
+    item_key = str(item.get("key", "")).strip().lower()
+    if item_key not in SHOP_ITEM_CURVES:
+        return 0
+
+    u = _udict(gid, uid)
+    prestige = int(u.get("prestige", 0))
+    rate_per_min = max(0.01, float(prestige_passive_rate(prestige)))
+
+    shop_state = _shop_state(gid, uid)
+    _sync_shop_cycle_state(shop_state, _shop_cycle(gid))
+    counter_key = _shop_buy_counter_key(item_key)
+    bought_this_cycle = max(0, int(shop_state.get(counter_key, 0)))
+
+    amount = 0
+    while True:
+        purchase_number = bought_this_cycle + amount + 1
+        next_cost = _shop_purchase_cost(item_key, purchase_number, rate_per_min)
+        if next_cost > remaining_xp:
+            return amount
+        remaining_xp -= next_cost
+        amount += 1
 
 
 def _shop_item_cost(item: dict[str, object], gid: int, uid: int) -> int:
@@ -308,7 +342,7 @@ class ShopCog(commands.Cog):
             lines.append(
                 f"`{idx}.` **{item['name']}** - **{cost} XP** - {item['description']}{extra}"
             )
-        lines.append(f"Buy with `{ctx.clean_prefix}buy <index|name> [amount]`.")
+        lines.append(f"Buy with `{ctx.clean_prefix}buy <index|name> [amount|max]`.")
         await ctx.reply("\n".join(lines))
 
     @commands.command(name="buy")
@@ -317,23 +351,28 @@ class ShopCog(commands.Cog):
             await ctx.reply("This command can only be used in a server.")
             return
         if not args:
-            await ctx.reply(f"Usage: `{ctx.clean_prefix}buy <index|name> [amount]`")
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}buy <index|name> [amount|max]`")
             return
 
         tokens = [str(arg).strip() for arg in args if str(arg).strip()]
         if not tokens:
-            await ctx.reply(f"Usage: `{ctx.clean_prefix}buy <index|name> [amount]`")
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}buy <index|name> [amount|max]`")
             return
 
         amount = 1
+        buy_max = False
         query_tokens = list(tokens)
         if len(tokens) >= 2:
-            try:
-                amount = int(tokens[-1])
+            if tokens[-1].lower() == "max":
+                buy_max = True
                 query_tokens = tokens[:-1]
-            except ValueError:
-                amount = 1
-                query_tokens = list(tokens)
+            else:
+                try:
+                    amount = int(tokens[-1])
+                    query_tokens = tokens[:-1]
+                except ValueError:
+                    amount = 1
+                    query_tokens = list(tokens)
 
         if amount <= 0:
             await ctx.reply("Buy amount must be at least 1.")
@@ -341,7 +380,7 @@ class ShopCog(commands.Cog):
 
         query = " ".join(query_tokens).strip()
         if not query:
-            await ctx.reply(f"Usage: `{ctx.clean_prefix}buy <index|name> [amount]`")
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}buy <index|name> [amount|max]`")
             return
 
         item = _resolve_shop_item(query)
@@ -350,23 +389,29 @@ class ShopCog(commands.Cog):
             return
 
         key = str(item.get("key", "")).strip().lower()
-        if key in SHOP_ITEM_CURVES:
-            per_item_costs = _shop_item_costs(item, ctx.guild.id, ctx.author.id, amount)
-        else:
-            per_item_costs = [_shop_item_cost(item, ctx.guild.id, ctx.author.id)] * amount
+        if key not in SHOP_ITEM_CURVES:
+            await ctx.reply(f"`{item['name']}` is not purchasable yet.")
+            return
 
-        total_cost = max(0, sum(per_item_costs))
         u = _udict(ctx.guild.id, ctx.author.id)
         cur_xp = int(u.get("xp_f", u.get("xp", 0)))
+        if buy_max:
+            amount = _max_affordable_shop_amount(item, ctx.guild.id, ctx.author.id, cur_xp)
+            if amount <= 0:
+                next_cost = _shop_item_cost(item, ctx.guild.id, ctx.author.id)
+                await ctx.reply(
+                    f"You need **{next_cost} XP** to buy **1x {item['name']}**, "
+                    f"but you only have **{cur_xp} XP**."
+                )
+                return
+
+        per_item_costs = _shop_item_costs(item, ctx.guild.id, ctx.author.id, amount)
+        total_cost = max(0, sum(per_item_costs))
         if cur_xp < total_cost:
             await ctx.reply(
                 f"You need **{total_cost} XP** to buy **{amount}x {item['name']}**, "
                 f"but you only have **{cur_xp} XP**."
             )
-            return
-
-        if key not in SHOP_ITEM_CURVES:
-            await ctx.reply(f"`{item['name']}` is not purchasable yet.")
             return
 
         shop_state = _shop_state(ctx.guild.id, ctx.author.id)
