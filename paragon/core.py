@@ -27,6 +27,7 @@ HELP_DESCRIPTIONS = {
     "resetwordle": "Admin: reset the current Wordle session.",
     "cf": "Start, accept, or cancel coinflip wagers.",
     "roulette": "Roulette duel with 20% base odds, 2.5% per prestige gap, and symmetric hit/backfire timeouts centered at 60s.",
+    "resetroulette": "Admin: reset a user's 30-minute roulette command cooldown; active timeouts and wheel boosts are unchanged.",
     "claim": "Claim the active surprise drop.",
     "claimnow": "Admin: spawn a surprise drop immediately.",
     "checklist": "Show your current daily-cycle checklist, or inspect another user's checklist if you're elevated.",

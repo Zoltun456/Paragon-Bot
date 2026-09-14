@@ -19,6 +19,7 @@ from .config import (
     ROULETTE_MIN_TIMEOUT_SECONDS,
 )
 from .guild_state import effective_date_key, effective_unix_ts
+from .ownership import owner_only
 from .spin_support import (
     consume_roulette_accuracy_bonus,
     consume_roulette_backfire_shield,
@@ -248,6 +249,35 @@ class RouletteCog(commands.Cog):
                 changed = _clear_timeout_state(guild.id, member.id) or changed
         if changed:
             await save_data()
+
+    @commands.command(name="resetroulette", aliases=["roulettereset", "rreset"])
+    @owner_only()
+    async def reset_roulette(
+        self,
+        ctx: commands.Context,
+        member: Optional[discord.Member] = None,
+    ):
+        """Reset a member's roulette command cooldown."""
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+        if member is None:
+            await ctx.reply(f"Usage: `{ctx.clean_prefix}resetroulette @user`")
+            return
+        if member.bot:
+            await ctx.reply("Target must be a non-bot member.")
+            return
+        if member.guild.id != ctx.guild.id:
+            await ctx.reply("Target must be a member of this server.")
+            return
+
+        user_state = _udict(ctx.guild.id, member.id)
+        user_state["roulette_next_ts"] = 0.0
+        await save_data()
+        await ctx.reply(
+            f"Roulette cooldown reset for {member.mention}. They can use "
+            f"`{ctx.clean_prefix}roulette` again now. Active Discord timeouts and wheel boosts were unchanged."
+        )
 
     @commands.command(name="roulette", aliases=["r"])
     async def roulette(self, ctx: commands.Context, target: Optional[discord.Member] = None):

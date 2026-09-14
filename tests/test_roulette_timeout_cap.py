@@ -12,6 +12,7 @@ from paragon.roulette import (
     _capped_timeout_with_bonus,
     _timeout_member,
 )
+from paragon.core import CoreCog
 from paragon.spin_support import consume_roulette_timeout_bonus_seconds
 
 
@@ -93,6 +94,41 @@ class RouletteTimeoutCapTests(unittest.IsolatedAsyncioTestCase):
         consume_bonus.assert_called_once_with(10, 20, seconds=used_bonus)
         reply = ctx.reply.await_args.args[0]
         self.assertIn(f"Bank remaining: **{huge_bonus - used_bonus}s**", reply)
+
+    async def test_admin_can_reset_user_roulette_cooldown(self):
+        guild = SimpleNamespace(id=40)
+        member = SimpleNamespace(
+            id=41,
+            guild=guild,
+            bot=False,
+            mention="<@41>",
+        )
+        ctx = SimpleNamespace(guild=guild, clean_prefix="!", reply=AsyncMock())
+        user = {"roulette_next_ts": 9999999999.0}
+
+        with (
+            patch("paragon.roulette._udict", return_value=user),
+            patch("paragon.roulette.save_data", new=AsyncMock()) as save,
+        ):
+            await RouletteCog.reset_roulette.callback(RouletteCog(SimpleNamespace()), ctx, member)
+
+        self.assertEqual(user["roulette_next_ts"], 0.0)
+        save.assert_awaited_once()
+        reply = ctx.reply.await_args.args[0]
+        self.assertIn("They can use `!roulette` again now", reply)
+        self.assertIn("Active Discord timeouts and wheel boosts were unchanged", reply)
+
+    async def test_resetroulette_is_listed_in_admin_help(self):
+        roulette_cog = RouletteCog(SimpleNamespace())
+        reset_command = next(cmd for cmd in roulette_cog.get_commands() if cmd.name == "resetroulette")
+        core = CoreCog(SimpleNamespace(commands=[reset_command]))
+        ctx = SimpleNamespace(clean_prefix="!", reply=AsyncMock(), send=AsyncMock())
+
+        await CoreCog.admin_help_command.callback(core, ctx)
+
+        help_text = ctx.reply.await_args.args[0]
+        self.assertIn("!resetroulette", help_text)
+        self.assertIn("roulette command cooldown", help_text)
 
 
 if __name__ == "__main__":
