@@ -29,6 +29,7 @@ from .stats_store import record_game_fields
 from .storage import _udict, save_data
 
 ROULETTE_CENTER_TIMEOUT_SECONDS = 60
+DISCORD_MAX_TIMEOUT_SECONDS = 28 * 24 * 60 * 60
 ROULETTE_TIMEOUT_UNTIL_KEY = "roulette_timeout_until_ts"
 ROULETTE_PAUSED_TIMEOUT_SECONDS_KEY = "roulette_timeout_paused_seconds"
 
@@ -97,6 +98,14 @@ def _fmt_remaining(seconds: int) -> str:
     return f"{mins}m {rem:02d}s"
 
 
+def _capped_timeout_with_bonus(base_seconds: int, available_bonus_seconds: int) -> tuple[int, int]:
+    """Return Discord-safe timeout seconds and the bonus seconds needed for it."""
+    base = min(DISCORD_MAX_TIMEOUT_SECONDS, max(1, int(base_seconds)))
+    available = max(0, int(available_bonus_seconds))
+    used_bonus = min(available, DISCORD_MAX_TIMEOUT_SECONDS - base)
+    return base + used_bonus, used_bonus
+
+
 def _member_timeout_until(member: discord.Member) -> Optional[datetime]:
     until = getattr(member, "communication_disabled_until", None)
     if isinstance(until, datetime):
@@ -159,7 +168,8 @@ async def _timeout_member(member: discord.Member, seconds: int, reason: str) -> 
     Apply timeout. Returns True if applied, False if missing perms / HTTP error.
     Compatible with discord.py 2.0+.
     """
-    until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    safe_seconds = min(DISCORD_MAX_TIMEOUT_SECONDS, max(1, int(seconds)))
+    until = datetime.now(timezone.utc) + timedelta(seconds=safe_seconds)
     try:
         if hasattr(member, "timeout"):
             await member.timeout(until, reason=reason)
@@ -304,7 +314,10 @@ class RouletteCog(commands.Cog):
         success = random.random() < chance
         if success:
             timeout_bonus_seconds = get_roulette_timeout_bonus_seconds(ctx.guild.id, author.id)
-            final_timeout_seconds = hit_timeout_seconds + timeout_bonus_seconds
+            final_timeout_seconds, applied_timeout_bonus_seconds = _capped_timeout_with_bonus(
+                hit_timeout_seconds,
+                timeout_bonus_seconds,
+            )
             applied = await _timeout_member(
                 target,
                 final_timeout_seconds,
@@ -318,8 +331,12 @@ class RouletteCog(commands.Cog):
             record_game_fields(ctx.guild.id, author.id, "roulette", **success_fields)
             if applied:
                 _store_active_timeout(ctx.guild.id, target.id, final_timeout_seconds)
-                if timeout_bonus_seconds > 0:
-                    consume_roulette_timeout_bonus_seconds(ctx.guild.id, author.id)
+                if applied_timeout_bonus_seconds > 0:
+                    consume_roulette_timeout_bonus_seconds(
+                        ctx.guild.id,
+                        author.id,
+                        seconds=applied_timeout_bonus_seconds,
+                    )
                 await save_data()
                 record_game_fields(ctx.guild.id, target.id, "roulette", got_timed_out=1)
                 wheel_line = (
@@ -328,8 +345,9 @@ class RouletteCog(commands.Cog):
                     else ""
                 )
                 timeout_line = (
-                    f"Wheel timeout extend applied: **+{timeout_bonus_seconds}s**.\n"
-                    if timeout_bonus_seconds > 0
+                    f"Wheel timeout extend applied: **+{applied_timeout_bonus_seconds}s**. "
+                    f"Bank remaining: **{timeout_bonus_seconds - applied_timeout_bonus_seconds}s**.\n"
+                    if applied_timeout_bonus_seconds > 0
                     else ""
                 )
                 await ctx.reply(

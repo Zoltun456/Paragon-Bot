@@ -226,11 +226,17 @@ def get_roulette_timeout_bonus_seconds(gid: int, uid: int) -> int:
     return max(0, int(b.get("roulette_timeout_bonus_seconds", 0)))
 
 
-def consume_roulette_timeout_bonus_seconds(gid: int, uid: int) -> int:
+def consume_roulette_timeout_bonus_seconds(
+    gid: int,
+    uid: int,
+    *,
+    seconds: int | None = None,
+) -> int:
     b = _wheel_buffs(gid, uid)
-    seconds = max(0, int(b.get("roulette_timeout_bonus_seconds", 0)))
-    b["roulette_timeout_bonus_seconds"] = 0
-    return int(seconds)
+    available = max(0, int(b.get("roulette_timeout_bonus_seconds", 0)))
+    consumed = available if seconds is None else min(available, max(0, int(seconds)))
+    b["roulette_timeout_bonus_seconds"] = available - consumed
+    return int(consumed)
 
 
 def set_coinflip_win_edge(gid: int, uid: int, *, bonus: float, charges: int = 1) -> dict:
