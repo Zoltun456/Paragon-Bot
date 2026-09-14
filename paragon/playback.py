@@ -254,7 +254,7 @@ class PlaybackCog(commands.Cog):
     def _yt_dlp_auth_available(self) -> bool:
         return bool(str(YTDLP_COOKIE_FILE or "").strip() or _cookies_from_browser_opt())
 
-    def _apply_youtube_auth_tuning(self, source: str, opts: dict) -> dict:
+    def _apply_youtube_tuning(self, source: str, opts: dict) -> dict:
         out = dict(opts)
         if not _is_youtube_source(source):
             return out
@@ -273,6 +273,12 @@ class PlaybackCog(commands.Cog):
             enabled_components.append("ejs:github")
         out["remote_components"] = enabled_components
         return out
+
+    def _log_ytdlp_attempt_failure(self, stage: str, *, auth_attempted: bool, error: Exception) -> None:
+        if not PLAY_DEBUG:
+            return
+        mode = "authenticated" if auth_attempted else "unauthenticated"
+        print(f"[PLAY][yt-dlp][{stage}][{mode}] {type(error).__name__}: {error}")
 
     def _apply_yt_dlp_auth(self, opts: dict) -> dict:
         out = dict(opts)
@@ -544,37 +550,54 @@ class PlaybackCog(commands.Cog):
         if YoutubeDL is not None:
             opts = {
                 "quiet": True,
-                "no_warnings": True,
+                "noprogress": True,
                 "noplaylist": True,
                 "extract_flat": False,
                 "skip_download": True,
                 "socket_timeout": 20,
             }
-            tuned_auth_opts = None
-            if self._should_retry_with_auth(lookup_value):
-                tuned_auth_opts = self._apply_yt_dlp_auth(
-                    self._apply_youtube_auth_tuning(lookup_value, opts),
-                )
+            opts = self._apply_youtube_tuning(lookup_value, opts)
+            auth_attempted = False
             try:
-                info = self._extract_info_with_ytdlp(lookup_value, opts=tuned_auth_opts or opts)
-            except Exception as e:
-                if tuned_auth_opts is not None:
+                info = self._extract_info_with_ytdlp(lookup_value, opts=opts)
+            except Exception as plain_error:
+                self._log_ytdlp_attempt_failure(
+                    "metadata",
+                    auth_attempted=False,
+                    error=plain_error,
+                )
+                if self._should_retry_with_auth(lookup_value):
+                    auth_attempted = True
                     try:
-                        info = self._extract_info_with_ytdlp(lookup_value, opts=opts)
-                    except Exception as plain_error:
+                        info = self._extract_info_with_ytdlp(
+                            lookup_value,
+                            opts=self._apply_yt_dlp_auth(opts),
+                        )
+                    except Exception as auth_error:
+                        self._log_ytdlp_attempt_failure(
+                            "metadata",
+                            auth_attempted=True,
+                            error=auth_error,
+                        )
                         if not is_url:
                             raise RuntimeError(f'No YouTube results found for "{src}".')
                         raise RuntimeError(
                             self._format_ytdlp_error(
                                 lookup_value,
-                                plain_error,
+                                auth_error,
                                 auth_attempted=True,
                             )
-                        ) from plain_error
+                        ) from auth_error
                 else:
                     if not is_url:
                         raise RuntimeError(f'No YouTube results found for "{src}".')
-                    raise RuntimeError(self._format_ytdlp_error(lookup_value, e, auth_attempted=False)) from e
+                    raise RuntimeError(
+                        self._format_ytdlp_error(
+                            lookup_value,
+                            plain_error,
+                            auth_attempted=auth_attempted,
+                        )
+                    ) from plain_error
             try:
                 duration = float(info.get("duration") or 0.0)
                 filesize = int(info.get("filesize") or info.get("filesize_approx") or 0)
@@ -610,7 +633,7 @@ class PlaybackCog(commands.Cog):
         outtmpl = os.path.join(temp_dir, "track.%(ext)s")
         opts = {
             "quiet": True,
-            "no_warnings": True,
+            "noprogress": True,
             "noplaylist": True,
             "format": "bestaudio/best",
             "outtmpl": outtmpl,
@@ -618,29 +641,34 @@ class PlaybackCog(commands.Cog):
             "nopart": True,
             "socket_timeout": 30,
         }
-        tuned_auth_opts = None
+        opts = self._apply_youtube_tuning(req.source_url, opts)
+        attempts: list[tuple[bool, dict]] = [(False, opts)]
         if self._should_retry_with_auth(req.source_url):
-            tuned_auth_opts = self._apply_yt_dlp_auth(
-                self._apply_youtube_auth_tuning(req.source_url, opts),
-            )
+            attempts.append((True, self._apply_yt_dlp_auth(opts)))
         try:
             info = None
             path = ""
-            try:
-                info, path = self._download_with_ytdlp(
-                    req.source_url,
-                    opts=tuned_auth_opts or opts,
-                    temp_dir=temp_dir,
-                )
-            except Exception:
-                if tuned_auth_opts is None:
-                    raise
-                self._clear_temp_dir_files(temp_dir)
-                info, path = self._download_with_ytdlp(
-                    req.source_url,
-                    opts=opts,
-                    temp_dir=temp_dir,
-                )
+            last_error: Optional[Exception] = None
+            for auth_attempted, attempt_opts in attempts:
+                try:
+                    info, path = self._download_with_ytdlp(
+                        req.source_url,
+                        opts=attempt_opts,
+                        temp_dir=temp_dir,
+                    )
+                    break
+                except Exception as attempt_error:
+                    last_error = attempt_error
+                    self._log_ytdlp_attempt_failure(
+                        "download",
+                        auth_attempted=auth_attempted,
+                        error=attempt_error,
+                    )
+                    self._clear_temp_dir_files(temp_dir)
+            if info is None or not path:
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError("yt-dlp did not produce a playable audio file.")
         except Exception as e:
             try:
                 self._clear_temp_dir_files(temp_dir)

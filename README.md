@@ -11,12 +11,13 @@ Discord XP, voice, and mini-game bot with persistent per-guild storage.
 - Global user settings: `paragon_data/_user_settings.db`
 - Voice features need FFmpeg
 - `!say` uses ElevenLabs and needs `ELEVEN_API`
-- `!play` uses `yt-dlp`; `YTDLP_COOKIES_FROM_BROWSER` or `YTDLP_COOKIE_FILE` can help with restricted YouTube playback
-- Restricted YouTube playback works best with a current exported cookie file plus a JavaScript runtime such as `node`
+- `!play` uses a pinned `yt-dlp` nightly plus the bgutil PO-token provider; keep these dependencies current because YouTube changes frequently
+- YouTube playback requires Node.js 22 or newer so `yt-dlp-ejs` can solve current JavaScript challenges
+- `YTDLP_COOKIES_FROM_BROWSER` or `YTDLP_COOKIE_FILE` are optional fallbacks for age-restricted, private, or members-only YouTube playback
 - Keep YouTube cookies local only. Do not commit browser cookies or exported `cookies.txt` files to the repo.
-- Preferred local setup for Chrome: add `YTDLP_COOKIES_FROM_BROWSER=chrome` to your local `.env`
+- For local Chrome fallback, add `YTDLP_COOKIES_FROM_BROWSER=chrome` to your local `.env`
 - If your YouTube login lives in a non-default Chrome profile, use `YTDLP_COOKIES_FROM_BROWSER=chrome:Profile 1` or `chrome:Profile 2`
-- Use `YTDLP_COOKIE_FILE` only for a local exported cookie file that stays gitignored
+- Use `YTDLP_COOKIE_FILE` only for a local exported cookie file that stays gitignored; it takes precedence if both cookie settings are configured
 
 ## Active Cogs
 
