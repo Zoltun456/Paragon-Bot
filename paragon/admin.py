@@ -34,8 +34,10 @@ from .xp import (
     _compute_level_from_total_xp,
     apply_xp_change,
     get_gain_state,
+    get_xp_balance,
     prestige_cost,
     prestige_state_from_spent_xp,
+    set_xp_balance,
 )
 
 SOFTRESET_CONFIRM_TTL_SECONDS = 30
@@ -47,13 +49,12 @@ DATABASE_CONFIRM_TTL_SECONDS = 30
 def _set_member_xp_fields(member: discord.Member, xp_amount: int, *, source: str = "admin setxp"):
         u = _udict(member.guild.id, member.id)
         old_level = int(u.get("level", 1))
-        old_xp = float(u.get("xp_f", u.get("xp", 0)))
+        old_xp = get_xp_balance(u)
 
-        u["xp_f"] = float(xp_amount)
-        u["xp"] = int(xp_amount)
+        set_xp_balance(u, xp_amount)
         u["level"] = _compute_level_from_total_xp(int(xp_amount))
-        delta = float(xp_amount) - old_xp
-        if delta != 0.0:
+        delta = int(xp_amount) - old_xp
+        if delta != 0:
             record_xp_change(member.guild.id, member.id, delta, source=source)
         return old_level, u["level"]
 
@@ -95,10 +96,9 @@ def _soft_reset_member_state(member: discord.Member) -> dict[str, int]:
         had_wheel_buffs = 1 if isinstance(u.get("wheel_buffs"), dict) and u.get("wheel_buffs") else 0
         u.pop("wheel_buffs", None)
 
-        old_xp = int(u.get("xp_f", u.get("xp", 0)))
+        old_xp = get_xp_balance(u)
         old_prestige = max(0, int(u.get("prestige", 0)))
-        u["xp_f"] = 0.0
-        u["xp"] = 0
+        set_xp_balance(u, 0)
         u["level"] = _compute_level_from_total_xp(0)
         u["prestige"] = 0
 

@@ -46,7 +46,9 @@ class ShopMaxTests(unittest.IsolatedAsyncioTestCase):
         ):
             await ShopCog.buy.callback(cog, ctx, "2", "max")
 
-        apply_xp_change.assert_awaited_once_with(ctx.author, -90, source="shop bait_crate")
+        apply_xp_change.assert_awaited_once_with(
+            ctx.author, -90, source="shop bait_crate", persist=False
+        )
         add_bait.assert_called_once_with(1, 2, amount=75)
         record_game_fields.assert_called_once_with(
             1,

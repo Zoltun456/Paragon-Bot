@@ -14,9 +14,9 @@ def ensure_user_stats(gid: int, uid: int) -> dict:
 
     xp = _as_dict(stats.get("xp"))
     stats["xp"] = xp
-    xp.setdefault("gained_total", 0.0)
-    xp.setdefault("lost_total", 0.0)
-    xp.setdefault("net_total", 0.0)
+    xp.setdefault("gained_total", 0)
+    xp.setdefault("lost_total", 0)
+    xp.setdefault("net_total", 0)
     xp.setdefault("event_count", 0)
     xp.setdefault("gain_events", 0)
     xp.setdefault("loss_events", 0)
@@ -63,7 +63,9 @@ def record_xp_change(
 ) -> None:
     stats = ensure_user_stats(gid, uid)
     xp = stats["xp"]
-    delta = float(delta_xp)
+    # Preserve arbitrary-precision integer economy totals.  Passive/fractional
+    # telemetry can still use floats without making balances inexact.
+    delta = delta_xp if isinstance(delta_xp, int) and not isinstance(delta_xp, bool) else float(delta_xp)
     src = (source or "unspecified").strip().lower()
 
     _inc_num(xp, "event_count", 1)
@@ -105,6 +107,7 @@ def record_xp_boost(
     reward_seed_xp: int | float,
     pct: int | float,
     minutes: int,
+    count: int = 1,
 ) -> None:
     stats = ensure_user_stats(gid, uid)
     xp = stats["xp"]
@@ -115,10 +118,11 @@ def record_xp_boost(
     row = _as_dict(boosts_by_source.get(src))
     boosts_by_source[src] = row
 
-    _inc_num(row, "count", 1)
-    _inc_num(row, "reward_seed_xp_total", float(reward_seed_xp))
-    _inc_num(row, "percent_total", float(pct) * 100.0)
-    _inc_num(row, "minutes_total", int(minutes))
+    n = max(1, int(count))
+    _inc_num(row, "count", n)
+    _inc_num(row, "reward_seed_xp_total", float(reward_seed_xp) * n)
+    _inc_num(row, "percent_total", float(pct) * 100.0 * n)
+    _inc_num(row, "minutes_total", int(minutes) * n)
 
 
 def get_user_stats(gid: int, uid: int) -> dict:

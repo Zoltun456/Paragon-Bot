@@ -3,6 +3,7 @@ from __future__ import annotations
 """Shared generic helpers for small coercion, formatting, and UTC/ISO utilities."""
 
 from datetime import datetime, timezone
+import math
 from typing import Any, Optional
 
 
@@ -29,7 +30,11 @@ def _as_float(value: Any, default: float = 0.0) -> float:
 
 
 def _fmt_num(value: int | float) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"{value:,}"
     f = _as_float(value, 0.0)
+    if not math.isfinite(f):
+        return str(value)
     if abs(f - round(f)) < 1e-9:
         return f"{int(round(f)):,}"
     return f"{f:,.2f}"
@@ -58,7 +63,11 @@ def _inc_num(d: dict, key: str, amount: int | float) -> None:
     old = d.get(key, 0)
     if isinstance(old, bool):
         old = 0
-    if isinstance(amount, int) and isinstance(old, int):
-        d[key] = old + amount
-        return
+    if isinstance(amount, int) and not isinstance(amount, bool):
+        if isinstance(old, int) and not isinstance(old, bool):
+            d[key] = old + amount
+            return
+        if isinstance(old, float) and math.isfinite(old) and old.is_integer():
+            d[key] = int(old) + amount
+            return
     d[key] = _as_float(old) + float(amount)

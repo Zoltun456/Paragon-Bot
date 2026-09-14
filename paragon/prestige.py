@@ -7,15 +7,19 @@ from discord.ext import commands
 
 from .config import PRESTIGE_BOARD_LIMIT
 from .ownership import is_control_user_id, owner_only
+from .economy_lock import economy_lock
 from .roles import enforce_level6_exclusive
 from .stats_store import record_xp_change
 from .storage import _gdict, _udict, save_data
 from .xp import (
+    get_xp_balance,
     get_gain_state,
     prestige_base_rate,
+    prestige_bulk_cost,
     prestige_cost,
     prestige_multiplier,
     prestige_passive_rate,
+    set_xp_balance,
 )
 
 
@@ -54,21 +58,19 @@ class PrestigeCog(commands.Cog):
         return bool(perms.manage_guild or perms.administrator)
 
     def _max_affordable_prestiges(self, total_xp: int, prestige_level: int) -> Tuple[int, int, int]:
-        remaining_xp = max(0, int(total_xp))
+        available = max(0, int(total_xp))
         current_prestige = max(0, int(prestige_level))
-        count = 0
-        spent = 0
-
-        while True:
-            cost = prestige_cost(current_prestige)
-            if cost <= 0 or remaining_xp < cost:
-                break
-            remaining_xp -= cost
-            spent += cost
-            current_prestige += 1
-            count += 1
-
-        return count, spent, remaining_xp
+        low, high = 0, 1
+        while prestige_bulk_cost(current_prestige, high) <= available:
+            low, high = high, high * 2
+        while low + 1 < high:
+            mid = (low + high) // 2
+            if prestige_bulk_cost(current_prestige, mid) <= available:
+                low = mid
+            else:
+                high = mid
+        spent = prestige_bulk_cost(current_prestige, low)
+        return low, spent, available - spent
 
     @commands.command(name="setp")
     @owner_only()
@@ -97,6 +99,13 @@ class PrestigeCog(commands.Cog):
 
     @commands.command(name="prestige", aliases=["p"], usage="[@user] [all]")
     async def prestige(self, ctx: commands.Context, first: Optional[str] = None, second: Optional[str] = None):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+        async with economy_lock(ctx.guild.id, ctx.author.id):
+            await self._prestige_locked(ctx, first, second)
+
+    async def _prestige_locked(self, ctx: commands.Context, first: Optional[str] = None, second: Optional[str] = None):
         guild = ctx.guild
         author: discord.Member = ctx.author  # type: ignore
         usage = f"`{ctx.clean_prefix}prestige [@user] [all]`"
@@ -135,7 +144,7 @@ class PrestigeCog(commands.Cog):
 
         u = _udict(guild.id, target.id)
         p = int(u.get("prestige", 0))
-        total_xp = int(u.get("xp_f", u.get("xp", 0)))
+        total_xp = get_xp_balance(u)
         cost = prestige_cost(p)
 
         if do_all:
@@ -158,13 +167,11 @@ class PrestigeCog(commands.Cog):
             return
 
         # Prestige action: spend cost, increment prestige, keep active boosts.
-        new_xp = float(max(0, remaining_xp))
-        delta = new_xp - float(total_xp)
-        u["xp_f"] = new_xp
-        u["xp"] = int(u["xp_f"])
-        u["level"] = 1
+        new_xp = max(0, int(remaining_xp))
+        delta = new_xp - total_xp
+        set_xp_balance(u, new_xp)
         u["prestige"] = p + prestige_count
-        if delta != 0.0:
+        if delta != 0:
             record_xp_change(guild.id, target.id, delta, source="prestige cost")
         await save_data()
         await enforce_level6_exclusive(guild)

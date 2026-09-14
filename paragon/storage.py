@@ -129,6 +129,18 @@ def _migrate_guild_state(payload: Dict[str, Any]) -> bool:
 
     changed = False
     for user in users.values():
+        if isinstance(user, dict):
+            try:
+                balance = max(0, int(user.get("xp", user.get("xp_f", 0))))
+            except (TypeError, ValueError, OverflowError):
+                balance = 0
+            if user.get("xp") != balance or user.get("xp_f") != balance:
+                user["xp"] = balance
+                user["xp_f"] = balance
+                changed = True
+            if "xp_remainder" not in user:
+                user["xp_remainder"] = "0"
+                changed = True
         changed = migrate_user_boost_sources(user) or changed
     return changed
 
@@ -434,8 +446,10 @@ def _persist_snapshot(snapshot: Dict[str, Any]) -> None:
 
 
 async def save_data() -> None:
-    guilds_snapshot = deepcopy(data.get("guilds", {}))
     async with SAVE_LOCK:
+        # Snapshot while holding the lock.  Taking it before the lock allowed an
+        # older snapshot to be persisted after a newer mutation.
+        guilds_snapshot = deepcopy(data.get("guilds", {}))
         await asyncio.to_thread(_persist_all_guilds_snapshot, guilds_snapshot)
 
 
@@ -457,7 +471,8 @@ def _udict(gid: int, uid: int) -> dict:
     if u is None:
         u = {
             "xp": 0,
-            "xp_f": 0.0,
+            "xp_f": 0,
+            "xp_remainder": "0",
             "level": 1,
             "xp_boosts": [],
             "xp_debuffs": [],
@@ -469,8 +484,16 @@ def _udict(gid: int, uid: int) -> dict:
             "stats": {},
         }
         users[str(uid)] = u
-    if "xp_f" not in u:
-        u["xp_f"] = float(u.get("xp", 0))
+    # XP is arbitrary-precision integer currency.  xp_f remains as an integer
+    # compatibility mirror for older command modules and persisted databases.
+    # Prefer xp because historical xp_f values may already have lost precision.
+    try:
+        balance = max(0, int(u.get("xp", u.get("xp_f", 0))))
+    except (TypeError, ValueError, OverflowError):
+        balance = 0
+    u["xp"] = balance
+    u["xp_f"] = balance
+    u.setdefault("xp_remainder", "0")
     if "level" not in u:
         u["level"] = 1
     if "xp_boosts" not in u or not isinstance(u.get("xp_boosts"), list):

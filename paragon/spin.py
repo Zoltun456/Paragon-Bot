@@ -12,6 +12,7 @@ import discord
 from discord.ext import commands
 
 from .config import SPIN_DISABLED_REWARDS, SPIN_RESET_HOUR, SPIN_RESET_MINUTE
+from .economy_lock import economy_lock
 from .emojis import EMOJI_FERRIS_WHEEL
 from .guild_state import effective_local_now, effective_unix_ts
 from .ownership import owner_only
@@ -52,6 +53,27 @@ from .roles import enforce_level6_exclusive
 
 
 RESET_TIME_RE = re.compile(r"(\d{1,2})(?::(\d{1,2}))?(am|pm)?$")
+
+
+async def _reply_lines(ctx: commands.Context, lines: list[str]) -> None:
+    """Send line-oriented output without exceeding Discord's message limit."""
+    chunks: list[str] = []
+    current = ""
+    for line in lines:
+        candidate = line if not current else f"{current}\n{line}"
+        if len(candidate) <= 1900:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        current = line
+    if current:
+        chunks.append(current)
+    if not chunks:
+        chunks = [""]
+    await ctx.reply(chunks[0])
+    for chunk in chunks[1:]:
+        await ctx.send(chunk)
 
 WHEEL_REWARDS: dict[str, dict] = {
     "bj_natural_next": {
@@ -421,6 +443,38 @@ class SpinCog(commands.Cog):
             return None
         return str(random.choices(keys, weights=weights, k=1)[0])
 
+    def _draw_reward_counts(self, st: dict, count: int) -> Counter[str]:
+        """Draw a multinomial result without allocating one entry per spin."""
+        rewards = self._eligible_rewards(st)
+        remaining = max(0, int(count))
+        remaining_weight = sum(weight for _, weight in rewards)
+        out: Counter[str] = Counter()
+        for index, (key, weight) in enumerate(rewards):
+            if remaining <= 0:
+                break
+            if index == len(rewards) - 1:
+                hits = remaining
+            else:
+                probability = max(0.0, min(1.0, weight / remaining_weight))
+                hits = random.binomialvariate(remaining, probability)
+            if hits:
+                out[key] = int(hits)
+            remaining -= int(hits)
+            remaining_weight -= weight
+        return out
+
+    @staticmethod
+    def _consume_spin_count(st: dict, count: int) -> int:
+        requested = max(0, int(count))
+        daily = max(0, int(st.get("daily_spins_remaining", 0)))
+        bonus = max(0, int(st.get("bonus_spins", 0)))
+        consumed = min(requested, daily + bonus)
+        from_daily = min(daily, consumed)
+        st["daily_spins_remaining"] = daily - from_daily
+        st["bonus_spins"] = bonus - (consumed - from_daily)
+        st["spun"] = bool(int(st.get("daily_spins_remaining", 0)) <= 0)
+        return consumed
+
     async def _animate_spin(self, ctx: commands.Context, st: dict, final_key: str) -> None:
         rewards = self._eligible_rewards(st)
         keys = [k for k, _ in rewards]
@@ -602,7 +656,7 @@ class SpinCog(commands.Cog):
             }
             pct = float(pct_map[key])
             gain = max(1, int(round(cost * pct)))
-            await apply_xp_change(ctx.author, gain, source=f"wheel {key}")
+            await apply_xp_change(ctx.author, gain, source=f"wheel {key}", persist=False)
             return _reward_result(
                 f"Flat XP awarded: **+{gain} XP** ({int(round(pct * 100.0))}% of prestige cost **{cost}**).",
                 flat_xp=gain,
@@ -680,8 +734,114 @@ class SpinCog(commands.Cog):
             lines.append(f"- **{self._short_label(key)}** x{count}")
         return lines
 
+    async def _apply_reward_counts(
+        self,
+        ctx: commands.Context,
+        reward_counts: Counter[str],
+        user_state: dict,
+        cycle: str,
+    ) -> dict[str, int]:
+        """Settle an arbitrary number of wheel rewards in bounded work."""
+        gid = int(ctx.guild.id)
+        uid = int(ctx.author.id)
+
+        simple_adders = {
+            "bj_natural_next": add_blackjack_natural_charges,
+            "wordle_hint_next": add_wordle_hint_charges,
+            "mulligan_next": add_mulligan_charges,
+            "roulette_shield_next": add_roulette_backfire_shield,
+            "clear_debuffs": add_cleanse_charges,
+            "drain_item": add_drain_charges,
+        }
+        for key, adder in simple_adders.items():
+            count = int(reward_counts.get(key, 0))
+            if count:
+                adder(gid, uid, charges=count)
+
+        setters = (
+            ("wordle_x2_next", set_wordle_reward_multiplier, {"multiplier": 2.0}),
+            ("anagram_x3_next", set_anagram_reward_multiplier, {"multiplier": 3.0}),
+            ("roulette_aim_next", set_roulette_accuracy_bonus, {"bonus": 0.20}),
+            ("coinflip_edge_next", set_coinflip_win_edge, {"bonus": 0.22}),
+            ("lotto_ticket_surge_next", set_lotto_bonus_tickets_pct, {"pct": 0.50}),
+            ("lotto_jackpot_amp_next", set_lotto_jackpot_boost_multiplier, {"multiplier": 1.75}),
+        )
+        for key, setter, kwargs in setters:
+            count = int(reward_counts.get(key, 0))
+            if count:
+                setter(gid, uid, charges=count, **kwargs)
+
+        timeout_count = int(reward_counts.get("roulette_timeout_plus_60", 0))
+        if timeout_count:
+            add_roulette_timeout_bonus_seconds(gid, uid, seconds=60 * timeout_count)
+
+        bonus_spins = 2 * int(reward_counts.get("bonus_spins_2", 0))
+        if bonus_spins:
+            _add_bonus_spins(user_state, bonus_spins)
+
+        for key, pct, minutes in (
+            ("xp_boost_minor", 0.20, 60),
+            ("xp_boost_major", 0.40, 90),
+            ("xp_boost_jackpot", 1.00, 45),
+        ):
+            count = int(reward_counts.get(key, 0))
+            if count:
+                await grant_fixed_boost(
+                    ctx.author,
+                    pct=pct,
+                    minutes=minutes,
+                    source=f"wheel {key}",
+                    persist=False,
+                    stacks=count,
+                )
+
+        prestige_gain = (
+            int(reward_counts.get("prestige_plus_1", 0))
+            + 2 * int(reward_counts.get("prestige_plus_2", 0))
+        )
+        u = _udict(gid, uid)
+        if prestige_gain:
+            u["prestige"] = max(0, int(u.get("prestige", 0))) + prestige_gain
+            await enforce_level6_exclusive(ctx.guild)
+
+        # Bulk settlement is deliberately deterministic: prestige rewards are
+        # applied before flat-XP rewards, and generated spins remain banked.
+        cost = max(1, int(prestige_cost(int(u.get("prestige", 0)))))
+        flat_xp = 0
+        for key, numerator, denominator in (
+            ("flat_xp_25pct", 25, 100),
+            ("flat_xp_60pct", 60, 100),
+            ("flat_xp_120pct", 120, 100),
+        ):
+            count = int(reward_counts.get(key, 0))
+            if count:
+                gain_each = max(1, (cost * numerator + denominator // 2) // denominator)
+                flat_xp += gain_each * count
+        if flat_xp:
+            await apply_xp_change(ctx.author, flat_xp, source="wheel bulk flat xp", persist=False)
+
+        total_spins = sum(int(v) for v in reward_counts.values())
+        record_game_fields(gid, uid, "spin", spins=total_spins)
+        for key, count in reward_counts.items():
+            record_game_fields(gid, uid, "spin", **{f"reward_{key}": int(count)})
+        user_state["cycle_key"] = cycle
+        user_state["last_reward"] = next(reversed(reward_counts), "")
+        user_state["last_spin_ts"] = effective_unix_ts(gid)
+        return {
+            "flat_xp": flat_xp,
+            "prestige_gain": prestige_gain,
+            "bonus_spins_gained": bonus_spins,
+        }
+
     @commands.command(name="spin", aliases=["wheel"], usage="[all]")
     async def spin(self, ctx: commands.Context, mode: Optional[str] = None):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
+        async with economy_lock(ctx.guild.id, ctx.author.id):
+            await self._spin_locked(ctx, mode)
+
+    async def _spin_locked(self, ctx: commands.Context, mode: Optional[str] = None):
         if ctx.guild is None:
             await ctx.reply("This command can only be used in a server.")
             return
@@ -714,7 +874,7 @@ class SpinCog(commands.Cog):
             if buffs:
                 lines.append("Active wheel buffs:")
                 lines.extend(f"- {line}" for line in buffs)
-            await ctx.reply("\n".join(lines))
+            await _reply_lines(ctx, lines)
             return
 
         if not self._eligible_rewards(st):
@@ -728,17 +888,32 @@ class SpinCog(commands.Cog):
             total_prestige_gain = 0
             total_bonus_spins_gained = 0
 
-            while _available_spins(ust) > 0:
-                spin_result = await self._perform_spin_roll(ctx, st, ust, cycle, animate=False)
-                if not spin_result:
-                    await ctx.reply("Spin wheel has no enabled rewards. Ask an admin to enable rewards.")
+            # Capture the starting bank so bonus-spin rewards cannot make this
+            # command unbounded.  Newly won spins are available next command.
+            spins_to_consume = spins_left
+            if spins_to_consume > 1:
+                reward_counts = self._draw_reward_counts(st, spins_to_consume)
+                consumed = self._consume_spin_count(ust, spins_to_consume)
+                if consumed != spins_to_consume:
+                    await ctx.reply("Your spin balance changed; please try again.")
                     return
-                reward_key = str(spin_result["reward_key"])
-                reward_counts[reward_key] += 1
-                total_spins += 1
-                total_flat_xp += int(spin_result.get("flat_xp", 0))
-                total_prestige_gain += int(spin_result.get("prestige_gain", 0))
-                total_bonus_spins_gained += int(spin_result.get("bonus_spins_gained", 0))
+                totals = await self._apply_reward_counts(ctx, reward_counts, ust, cycle)
+                total_spins = consumed
+                total_flat_xp = int(totals["flat_xp"])
+                total_prestige_gain = int(totals["prestige_gain"])
+                total_bonus_spins_gained = int(totals["bonus_spins_gained"])
+            else:
+                for _ in range(spins_to_consume):
+                    spin_result = await self._perform_spin_roll(ctx, st, ust, cycle, animate=False)
+                    if not spin_result:
+                        await ctx.reply("Spin wheel has no enabled rewards. Ask an admin to enable rewards.")
+                        return
+                    reward_key = str(spin_result["reward_key"])
+                    reward_counts[reward_key] += 1
+                    total_spins += 1
+                    total_flat_xp += int(spin_result.get("flat_xp", 0))
+                    total_prestige_gain += int(spin_result.get("prestige_gain", 0))
+                    total_bonus_spins_gained += int(spin_result.get("bonus_spins_gained", 0))
 
             await save_data()
 
@@ -755,7 +930,7 @@ class SpinCog(commands.Cog):
                 lines.append(f"Prestige gained total: **+{total_prestige_gain}**.")
             if total_bonus_spins_gained > 0:
                 lines.append(
-                    f"Bonus spins generated during the sweep: **+{total_bonus_spins_gained}** (already consumed)."
+                    f"Bonus spins generated during the sweep: **+{total_bonus_spins_gained}** (banked for your next command)."
                 )
             if any(reward_counts.get(key, 0) > 0 for key in ("xp_boost_minor", "xp_boost_major", "xp_boost_jackpot")):
                 lines.append(f"XP boosts from this sweep are active now. Use `{ctx.clean_prefix}boosts` to inspect them.")
@@ -767,7 +942,7 @@ class SpinCog(commands.Cog):
             if buffs:
                 lines.append("Active wheel buffs:")
                 lines.extend(f"- {line}" for line in buffs)
-            await ctx.reply("\n".join(lines))
+            await _reply_lines(ctx, lines)
             return
 
         spin_result = await self._perform_spin_roll(ctx, st, ust, cycle, animate=True)

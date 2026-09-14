@@ -51,7 +51,7 @@ from .include import _as_int
 from .storage import _gdict, _udict, save_data
 from .stats_store import record_game_fields, record_xp_change
 from .spin_support import consume_blackjack_natural_charge
-from .xp import apply_xp_change
+from .xp import apply_xp_change, apply_xp_delta_to_user
 from .roles import announce_level_up, sync_level_roles, enforce_level6_exclusive
 from .ownership import owner_only
 from .time_windows import LOCAL_TZ
@@ -521,12 +521,8 @@ class BlackjackCog(commands.Cog):
         if delta != 0:
             # Balance-only move (wallet lock/refund/payout); optional level sync later.
             u = _udict(guild.id, member.id)
-            total_xp = float(u.get("xp_f", u.get("xp", 0)))
-            new_total = max(0.0, total_xp + float(delta))
-            applied_delta = new_total - total_xp
-            u["xp_f"] = float(new_total)
-            u["xp"] = int(new_total)
-            if applied_delta != 0.0:
+            applied_delta = apply_xp_delta_to_user(u, delta)
+            if applied_delta != 0:
                 record_xp_change(guild.id, member.id, applied_delta, source=source)
             await save_data()
 

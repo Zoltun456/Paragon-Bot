@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from difflib import get_close_matches
-import math
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 import re
 from typing import Optional
 
@@ -14,6 +14,7 @@ from .config import (
     SPIN_RESET_MINUTE,
 )
 from .fish_support import add_bait
+from .economy_lock import economy_lock
 from .spin import (
     _add_bonus_spins,
     _available_spins,
@@ -30,7 +31,7 @@ from .spin_support import (
 )
 from .stats_store import record_game_fields
 from .storage import _udict, save_data
-from .xp import apply_xp_change, prestige_passive_rate
+from .xp import apply_xp_change, get_xp_balance, prestige_passive_rate
 
 
 def _fmt_pct(value: float) -> str:
@@ -151,7 +152,50 @@ SHOP_ITEMS: list[dict[str, object]] = [
 
 def _round_to_shop_step(value: float) -> int:
     step = max(1, int(SHOP_COST_ROUND_STEP))
-    return int(max(0, step * math.floor((float(value) / float(step)) + 0.5)))
+    try:
+        dec = Decimal(str(value))
+    except Exception:
+        return 0
+    if not dec.is_finite() or dec <= 0:
+        return 0
+    units = (dec / Decimal(step)).to_integral_value(rounding=ROUND_HALF_UP)
+    return int(units) * step
+
+
+def _shop_cumulative_minutes(item_key: str, purchase_count: int) -> int:
+    n = max(0, int(purchase_count))
+    if n <= 0:
+        return 0
+    curve = SHOP_ITEM_CURVES.get(str(item_key).strip().lower(), {})
+    start = max(0, int(curve.get("start_minutes", 0)))
+    step = max(0, int(curve.get("step_minutes", 0)))
+    growth = max(0, int(curve.get("step_growth_minutes", 0)))
+    return (
+        n * start
+        + step * n * (n - 1) // 2
+        + growth * n * (n - 1) * (n - 2) // 6
+    )
+
+
+def _shop_cumulative_cost(item_key: str, purchase_count: int, rate_per_min: float) -> int:
+    minutes = _shop_cumulative_minutes(item_key, purchase_count)
+    if minutes <= 0:
+        return 0
+    with localcontext() as ctx:
+        ctx.prec = max(50, len(str(minutes)) + len(str(rate_per_min)) + 30)
+        return _round_to_shop_step(Decimal(str(rate_per_min)) * Decimal(minutes))
+
+
+def _shop_bulk_cost(
+    item_key: str, bought_this_cycle: int, amount: int, rate_per_min: float
+) -> int:
+    bought = max(0, int(bought_this_cycle))
+    count = max(0, int(amount))
+    return max(
+        0,
+        _shop_cumulative_cost(item_key, bought + count, rate_per_min)
+        - _shop_cumulative_cost(item_key, bought, rate_per_min),
+    )
 
 
 def _shop_cycle(gid: int) -> str:
@@ -215,13 +259,8 @@ def _shop_item_costs(item: dict[str, object], gid: int, uid: int, amount: int = 
 
 
 def _shop_purchase_cost(item_key: str, purchase_number: int, rate_per_min: float) -> int:
-    minutes_equivalent = _shop_item_cost_minutes(item_key, purchase_number)
-    if minutes_equivalent <= 0:
-        return 0
-    rounded_cost = _round_to_shop_step(float(rate_per_min) * float(minutes_equivalent))
-    if rounded_cost <= 0:
-        return max(1, int(SHOP_COST_ROUND_STEP))
-    return rounded_cost
+    n = max(1, int(purchase_number))
+    return _shop_bulk_cost(item_key, n - 1, 1, rate_per_min)
 
 
 def _max_affordable_shop_amount(
@@ -245,14 +284,19 @@ def _max_affordable_shop_amount(
     counter_key = _shop_buy_counter_key(item_key)
     bought_this_cycle = max(0, int(shop_state.get(counter_key, 0)))
 
-    amount = 0
-    while True:
-        purchase_number = bought_this_cycle + amount + 1
-        next_cost = _shop_purchase_cost(item_key, purchase_number, rate_per_min)
-        if next_cost > remaining_xp:
-            return amount
-        remaining_xp -= next_cost
-        amount += 1
+    def affordable(count: int) -> bool:
+        return _shop_bulk_cost(item_key, bought_this_cycle, count, rate_per_min) <= remaining_xp
+
+    low, high = 0, 1
+    while affordable(high):
+        low, high = high, high * 2
+    while low + 1 < high:
+        mid = (low + high) // 2
+        if affordable(mid):
+            low = mid
+        else:
+            high = mid
+    return low
 
 
 def _shop_item_cost(item: dict[str, object], gid: int, uid: int) -> int:
@@ -350,6 +394,13 @@ class ShopCog(commands.Cog):
         if ctx.guild is None:
             await ctx.reply("This command can only be used in a server.")
             return
+        async with economy_lock(ctx.guild.id, ctx.author.id):
+            await self._buy_locked(ctx, *args)
+
+    async def _buy_locked(self, ctx: commands.Context, *args: str):
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used in a server.")
+            return
         if not args:
             await ctx.reply(f"Usage: `{ctx.clean_prefix}buy <index|name> [amount|max]`")
             return
@@ -394,7 +445,7 @@ class ShopCog(commands.Cog):
             return
 
         u = _udict(ctx.guild.id, ctx.author.id)
-        cur_xp = int(u.get("xp_f", u.get("xp", 0)))
+        cur_xp = get_xp_balance(u)
         if buy_max:
             amount = _max_affordable_shop_amount(item, ctx.guild.id, ctx.author.id, cur_xp)
             if amount <= 0:
@@ -405,8 +456,13 @@ class ShopCog(commands.Cog):
                 )
                 return
 
-        per_item_costs = _shop_item_costs(item, ctx.guild.id, ctx.author.id, amount)
-        total_cost = max(0, sum(per_item_costs))
+        prestige = int(u.get("prestige", 0))
+        rate_per_min = max(0.01, float(prestige_passive_rate(prestige)))
+        shop_state = _shop_state(ctx.guild.id, ctx.author.id)
+        _sync_shop_cycle_state(shop_state, _shop_cycle(ctx.guild.id))
+        counter_key = _shop_buy_counter_key(key)
+        bought_before = max(0, int(shop_state.get(counter_key, 0)))
+        total_cost = _shop_bulk_cost(key, bought_before, amount, rate_per_min)
         if cur_xp < total_cost:
             await ctx.reply(
                 f"You need **{total_cost} XP** to buy **{amount}x {item['name']}**, "
@@ -414,9 +470,7 @@ class ShopCog(commands.Cog):
             )
             return
 
-        shop_state = _shop_state(ctx.guild.id, ctx.author.id)
-        _sync_shop_cycle_state(shop_state, _shop_cycle(ctx.guild.id))
-        await apply_xp_change(ctx.author, -total_cost, source=f"shop {key}")
+        await apply_xp_change(ctx.author, -total_cost, source=f"shop {key}", persist=False)
 
         effect_text = ""
         if key == "wheel_spin":
@@ -452,7 +506,6 @@ class ShopCog(commands.Cog):
                 f"for **{state['charges']}** use(s)."
             )
 
-        counter_key = _shop_buy_counter_key(key)
         shop_state[counter_key] = max(0, int(shop_state.get(counter_key, 0))) + amount
         record_game_fields(
             ctx.guild.id,
@@ -464,15 +517,15 @@ class ShopCog(commands.Cog):
         )
         await save_data()
 
-        first_cost = per_item_costs[0] if per_item_costs else 0
-        last_cost = per_item_costs[-1] if per_item_costs else 0
+        first_cost = _shop_purchase_cost(key, bought_before + 1, rate_per_min)
+        last_cost = _shop_purchase_cost(key, bought_before + amount, rate_per_min)
         current_buys = max(0, int(shop_state.get(counter_key, 0)))
         first_purchase_number = max(1, current_buys - amount + 1)
         last_purchase_number = max(1, current_buys)
         first_minutes = _shop_item_cost_minutes(key, first_purchase_number)
         last_minutes = _shop_item_cost_minutes(key, last_purchase_number)
         next_buy = max(0, int(shop_state.get(counter_key, 0))) + 1
-        next_cost = sum(_shop_item_costs(item, ctx.guild.id, ctx.author.id, 1))
+        next_cost = _shop_purchase_cost(key, next_buy, rate_per_min)
         next_minutes = _shop_item_cost_minutes(key, next_buy)
         next_curve_text = (
             "free"

@@ -1,6 +1,7 @@
 # paragon/xp.py
 from __future__ import annotations
 from typing import Optional, Tuple
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import math
 import time
 
@@ -33,6 +34,62 @@ def _now_ts(guild_id: Optional[int] = None) -> int:
     if guild_id is None:
         return int(time.time())
     return effective_unix_ts(guild_id)
+
+
+def get_xp_balance(u: dict) -> int:
+    """Return the canonical arbitrary-precision XP balance."""
+    try:
+        return max(0, int(u.get("xp", u.get("xp_f", 0))))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _xp_remainder(u: dict) -> Decimal:
+    try:
+        value = Decimal(str(u.get("xp_remainder", "0")))
+    except (InvalidOperation, ValueError):
+        return Decimal(0)
+    return value if value.is_finite() and Decimal(0) <= value < Decimal(1) else Decimal(0)
+
+
+def set_xp_balance(u: dict, amount: int, *, remainder: Decimal = Decimal(0)) -> None:
+    balance = max(0, int(amount))
+    u["xp"] = balance
+    # Compatibility mirror: deliberately an int, despite the historical name.
+    u["xp_f"] = balance
+    u["xp_remainder"] = format(remainder, "f") if remainder else "0"
+    u["level"] = 1
+
+
+def apply_xp_delta_to_user(u: dict, delta_xp: int | float | Decimal) -> int | float:
+    """Apply a delta exactly for integers and with a persisted fractional remainder."""
+    old_balance = get_xp_balance(u)
+    old_remainder = _xp_remainder(u)
+    if isinstance(delta_xp, int) and not isinstance(delta_xp, bool) and not old_remainder:
+        new_balance = max(0, old_balance + delta_xp)
+        set_xp_balance(u, new_balance)
+        return new_balance - old_balance
+    try:
+        delta = Decimal(delta_xp) if isinstance(delta_xp, int) else Decimal(str(delta_xp))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError("XP delta must be a finite number")
+    if not delta.is_finite():
+        raise ValueError("XP delta must be a finite number")
+
+    with localcontext() as ctx:
+        ctx.prec = max(50, len(str(old_balance)) + 50, len(str(delta).replace("-", "")) + 50)
+        total = Decimal(old_balance) + old_remainder + delta
+        if total <= 0:
+            new_balance = 0
+            new_remainder = Decimal(0)
+        else:
+            new_balance = int(total.to_integral_value(rounding=ROUND_FLOOR))
+            new_remainder = total - Decimal(new_balance)
+        set_xp_balance(u, new_balance, remainder=new_remainder)
+        applied = (Decimal(new_balance) + new_remainder) - (Decimal(old_balance) + old_remainder)
+    if applied == applied.to_integral_value():
+        return int(applied)
+    return float(applied)
 
 
 def prestige_base_rate(prestige_level: int) -> float:
@@ -77,13 +134,109 @@ def prestige_target_minutes(prestige_level: int) -> float:
 
 def prestige_cost(prestige_level: int) -> int:
     p = max(0, int(prestige_level))
-    legacy_cost = prestige_legacy_cost(p)
     if p < max(0, int(PRESTIGE_LINEAR_START_LEVEL)):
-        return legacy_cost
+        return prestige_legacy_cost(p)
 
-    target_minutes = prestige_target_minutes(p)
-    linear_cost = int(round(prestige_permanent_rate(p) * target_minutes))
-    return max(legacy_cost, linear_cost, 1)
+    # Decimal avoids both precision loss and float overflow for very large
+    # prestige values.
+    with localcontext() as ctx:
+        ctx.prec = max(50, len(str(p)) * 4 + 30)
+        pd = Decimal(p)
+        base = Decimal(str(BASE_XP_PER_MINUTE)) + (
+            Decimal(p // PRESTIGE_BASE_STEP_LEVELS) * Decimal(str(PRESTIGE_BASE_STEP_XP_PER_MIN))
+        )
+        mult = Decimal(1) + Decimal(str(PRESTIGE_RATE_K)) * pd
+        extra = max(0, p - int(PRESTIGE_LINEAR_START_LEVEL))
+        target = Decimal(str(PRESTIGE_LINEAR_START_MINUTES)) + (
+            Decimal(str(PRESTIGE_LINEAR_MINUTES_PER_LEVEL)) * Decimal(extra)
+        )
+        return max(1, int((base * mult * target).to_integral_value(rounding=ROUND_HALF_EVEN)))
+
+
+def _sum_powers(count: int, power: int) -> int:
+    """sum(p**power for p in range(count)), for powers used by the curve."""
+    n = max(0, int(count))
+    if power == 0:
+        return n
+    if power == 1:
+        return n * (n - 1) // 2
+    if power == 2:
+        return n * (n - 1) * (2 * n - 1) // 6
+    if power == 3:
+        t = n * (n - 1) // 2
+        return t * t
+    raise ValueError("unsupported power")
+
+
+def _sum_floor_block_power(count: int, block_size: int, power: int) -> int:
+    """sum(floor(p/block_size) * p**power for p in range(count))."""
+    n = max(0, int(count))
+    s = max(1, int(block_size))
+    blocks, rem = divmod(n, s)
+    sum_q1 = _sum_powers(blocks, 1)
+    if power == 0:
+        full = s * sum_q1
+    elif power == 1:
+        r1 = s * (s - 1) // 2
+        full = s * s * _sum_powers(blocks, 2) + r1 * sum_q1
+    elif power == 2:
+        r1 = s * (s - 1) // 2
+        r2 = s * (s - 1) * (2 * s - 1) // 6
+        full = (
+            s**3 * _sum_powers(blocks, 3)
+            + 2 * s * r1 * _sum_powers(blocks, 2)
+            + r2 * sum_q1
+        )
+    else:
+        raise ValueError("unsupported power")
+
+    start = blocks * s
+    tail_power = _sum_powers(start + rem, power) - _sum_powers(start, power)
+    return full + blocks * tail_power
+
+
+def prestige_cumulative_cost(prestige_level: int) -> int:
+    """Cumulative cost to reach a prestige level in constant time."""
+    end = max(0, int(prestige_level))
+    start = max(0, int(PRESTIGE_LINEAR_START_LEVEL))
+    legacy_end = min(end, start)
+    legacy = sum(prestige_legacy_cost(p) for p in range(legacy_end))
+    if end <= start:
+        return legacy
+
+    # For p >= start, rate*target is a quadratic multiplied by a stepped
+    # linear base.  Sum that polynomial and floor-block term analytically.
+    with localcontext() as ctx:
+        ctx.prec = max(50, len(str(end)) * 5 + 30)
+        k = Decimal(str(PRESTIGE_RATE_K))
+        slope = Decimal(str(PRESTIGE_LINEAR_MINUTES_PER_LEVEL))
+        intercept = Decimal(str(PRESTIGE_LINEAR_START_MINUTES)) - slope * Decimal(start)
+        q0 = intercept
+        q1 = slope + k * intercept
+        q2 = k * slope
+        base0 = Decimal(str(BASE_XP_PER_MINUTE))
+        base_step = Decimal(str(PRESTIGE_BASE_STEP_XP_PER_MIN))
+        block = max(1, int(PRESTIGE_BASE_STEP_LEVELS))
+
+        def range_sum(fn, power: int) -> int:
+            return fn(end, block, power) - fn(start, block, power)
+
+        plain = [
+            _sum_powers(end, power) - _sum_powers(start, power)
+            for power in range(3)
+        ]
+        stepped = [range_sum(_sum_floor_block_power, power) for power in range(3)]
+        raw = sum(
+            coeff * (base0 * Decimal(ps) + base_step * Decimal(fs))
+            for coeff, ps, fs in zip((q0, q1, q2), plain, stepped)
+        )
+        return legacy + max(0, int(raw.to_integral_value(rounding=ROUND_HALF_EVEN)))
+
+
+def prestige_bulk_cost(prestige_level: int, count: int) -> int:
+    p = max(0, int(prestige_level))
+    n = max(0, int(count))
+    return prestige_cumulative_cost(p + n) - prestige_cumulative_cost(p)
 
 
 def prestige_passive_rate(prestige_level: int, *, boost_multiplier: float = 1.0) -> float:
@@ -92,19 +245,24 @@ def prestige_passive_rate(prestige_level: int, *, boost_multiplier: float = 1.0)
 
 
 def prestige_state_from_spent_xp(spent_xp: int | float) -> tuple[int, int, int]:
-    remaining_xp = max(0, int(round(float(spent_xp))))
-    prestige_level = 0
-    spent_used = 0
-
-    while True:
-        cost = prestige_cost(prestige_level)
-        if cost <= 0 or remaining_xp < cost:
-            break
-        remaining_xp -= cost
-        spent_used += cost
-        prestige_level += 1
-
-    return prestige_level, spent_used, remaining_xp
+    if isinstance(spent_xp, int) and not isinstance(spent_xp, bool):
+        available = max(0, spent_xp)
+    else:
+        try:
+            available = max(0, int(Decimal(str(spent_xp)).to_integral_value(rounding=ROUND_HALF_EVEN)))
+        except (InvalidOperation, ValueError, OverflowError):
+            available = 0
+    low, high = 0, 1
+    while prestige_cumulative_cost(high) <= available:
+        low, high = high, high * 2
+    while low + 1 < high:
+        mid = (low + high) // 2
+        if prestige_cumulative_cost(mid) <= available:
+            low = mid
+        else:
+            high = mid
+    spent_used = prestige_cumulative_cost(low)
+    return low, spent_used, available - spent_used
 
 
 def compress_stack_multiplier(raw_multiplier: float, *, cap: float = PRESTIGE_STACK_SOFTCAP) -> float:
@@ -317,6 +475,7 @@ async def grant_fixed_boost(
     source: str = "activity",
     reward_seed_xp: int | float = 0,
     persist: bool = True,
+    stacks: int = 1,
 ) -> dict:
     """
     Grant an explicit temporary XP/min boost.
@@ -328,7 +487,9 @@ async def grant_fixed_boost(
     changed = _prune_expired_boosts(u, now=now)
     changed = _prune_expired_debuffs(u, now=now) or changed
     boosts = _coerce_boosts(u)
-    pct = max(0.0, float(pct))
+    stack_count = max(1, int(stacks))
+    pct_each = max(0.0, float(pct))
+    pct = pct_each * stack_count
     minutes = max(1, int(minutes))
     until = now + (minutes * 60)
     source_key = canonical_boost_source(source, default="activity")
@@ -343,8 +504,9 @@ async def grant_fixed_boost(
         member.id,
         source=source_key,
         reward_seed_xp=float(reward_seed_xp),
-        pct=float(pct),
+        pct=float(pct_each),
         minutes=int(minutes),
+        count=stack_count,
     )
     if persist:
         await save_data()
@@ -658,7 +820,11 @@ def _compute_level_from_total_xp(total_xp: float) -> int:
 def level_progress(total_xp: float) -> tuple[int, int, int]:
     # Legacy shape: (level, xp_into_level, xp_needed_for_next)
     # We now expose total XP in the middle position.
-    return 1, int(max(0.0, float(total_xp))), 0
+    try:
+        total = max(0, int(total_xp))
+    except (TypeError, ValueError, OverflowError):
+        total = 0
+    return 1, total, 0
 
 
 async def apply_xp_change(
@@ -666,22 +832,18 @@ async def apply_xp_change(
     delta_xp: int | float,
     *,
     source: str = "unspecified",
+    persist: bool = True,
 ) -> Optional[Tuple[int, int]]:
     """
     Directly add/subtract from total XP (currency-style), clamp at 0.
     Level logic is retired; this always returns None.
     """
     u = _udict(member.guild.id, member.id)
-    total_xp = float(u.get("xp_f", u.get("xp", 0)))
-    delta = float(delta_xp)
-    new_total = max(0.0, total_xp + delta)
-    applied_delta = new_total - total_xp
-    u["xp_f"] = float(new_total)
-    u["xp"] = int(new_total)
-    u["level"] = 1
-    if applied_delta != 0.0:
+    applied_delta = apply_xp_delta_to_user(u, delta_xp)
+    if applied_delta != 0:
         record_xp_change(member.guild.id, member.id, applied_delta, source=source)
-    await save_data()
+    if persist:
+        await save_data()
     return None
 
 
@@ -708,21 +870,16 @@ async def apply_delta(
     changed = _prune_expired_debuffs(u, now=now) or changed
     prestige = int(u.get("prestige", 0))
     gain_per_min = prestige_passive_rate(prestige, boost_multiplier=_actual_boost_multiplier(u, now=now))
-    delta = float(minutes) * gain_per_min
-
-    total_xp = float(u.get("xp_f", u.get("xp", 0)))
-    new_total = max(0.0, total_xp + delta)
-    u["xp_f"] = float(new_total)
-    u["xp"] = int(new_total)
-    u["level"] = 1
+    delta = Decimal(int(minutes)) * Decimal(str(gain_per_min))
+    applied_delta = apply_xp_delta_to_user(u, delta)
     u["total_active_minutes"] = int(u.get("total_active_minutes", 0)) + int(minutes)
     if inactive_minutes > 0:
         u["total_inactive_minutes"] = int(u.get("total_inactive_minutes", 0)) + int(inactive_minutes)
-    if delta != 0.0 or minutes > 0:
+    if applied_delta != 0 or minutes > 0:
         record_xp_change(
             member.guild.id,
             member.id,
-            delta,
+            applied_delta,
             source=source,
             passive_minutes=minutes,
         )
