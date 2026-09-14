@@ -443,9 +443,16 @@ class SpinCog(commands.Cog):
             return None
         return str(random.choices(keys, weights=weights, k=1)[0])
 
-    def _draw_reward_counts(self, st: dict, count: int) -> Counter[str]:
+    def _draw_reward_counts(
+        self,
+        st: dict,
+        count: int,
+        *,
+        exclude: Optional[set[str]] = None,
+    ) -> Counter[str]:
         """Draw a multinomial result without allocating one entry per spin."""
-        rewards = self._eligible_rewards(st)
+        excluded = exclude or set()
+        rewards = [(key, weight) for key, weight in self._eligible_rewards(st) if key not in excluded]
         remaining = max(0, int(count))
         remaining_weight = sum(weight for _, weight in rewards)
         out: Counter[str] = Counter()
@@ -462,6 +469,49 @@ class SpinCog(commands.Cog):
             remaining -= int(hits)
             remaining_weight -= weight
         return out
+
+    def _draw_sweep_reward_counts(
+        self, st: dict, initial_spins: int
+    ) -> tuple[Counter[str], int, int, int]:
+        """Roll generated bonus spins until the sweep reaches zero.
+
+        Returns (reward counts, total spins rolled, bonus spins generated,
+        safeguard spins).  The safeguard makes termination deterministic when
+        the configured +2 reward has a reproduction rate of one or greater.
+        """
+        eligible = self._eligible_rewards(st)
+        total_weight = sum(weight for _, weight in eligible)
+        bonus_weight = sum(weight for key, weight in eligible if key == "bonus_spins_2")
+        non_terminating_table = bonus_weight * 2.0 >= total_weight if total_weight > 0 else False
+
+        all_counts: Counter[str] = Counter()
+        pending = max(0, int(initial_spins))
+        total_spins = 0
+        total_bonus_generated = 0
+        safeguard_spins = 0
+        generation = 0
+
+        while pending > 0:
+            # Under normal reward weights the branching process quickly dies
+            # out.  Pathological tables and extreme random tails switch spawned
+            # spins to non-bonus rewards so the command always terminates.
+            exclude_bonus = generation > 0 and (non_terminating_table or generation >= 128)
+            counts = self._draw_reward_counts(
+                st,
+                pending,
+                exclude={"bonus_spins_2"} if exclude_bonus else None,
+            )
+            total_spins += pending
+            if not counts:
+                safeguard_spins += pending
+                break
+            all_counts.update(counts)
+            generated = 2 * int(counts.get("bonus_spins_2", 0))
+            total_bonus_generated += generated
+            pending = generated
+            generation += 1
+
+        return all_counts, total_spins, total_bonus_generated, safeguard_spins
 
     @staticmethod
     def _consume_spin_count(st: dict, count: int) -> int:
@@ -740,6 +790,9 @@ class SpinCog(commands.Cog):
         reward_counts: Counter[str],
         user_state: dict,
         cycle: str,
+        *,
+        bank_bonus_spins: bool = True,
+        spins_processed: Optional[int] = None,
     ) -> dict[str, int]:
         """Settle an arbitrary number of wheel rewards in bounded work."""
         gid = int(ctx.guild.id)
@@ -776,7 +829,7 @@ class SpinCog(commands.Cog):
             add_roulette_timeout_bonus_seconds(gid, uid, seconds=60 * timeout_count)
 
         bonus_spins = 2 * int(reward_counts.get("bonus_spins_2", 0))
-        if bonus_spins:
+        if bonus_spins and bank_bonus_spins:
             _add_bonus_spins(user_state, bonus_spins)
 
         for key, pct, minutes in (
@@ -820,7 +873,11 @@ class SpinCog(commands.Cog):
         if flat_xp:
             await apply_xp_change(ctx.author, flat_xp, source="wheel bulk flat xp", persist=False)
 
-        total_spins = sum(int(v) for v in reward_counts.values())
+        total_spins = (
+            sum(int(v) for v in reward_counts.values())
+            if spins_processed is None
+            else max(0, int(spins_processed))
+        )
         record_game_fields(gid, uid, "spin", spins=total_spins)
         for key, count in reward_counts.items():
             record_game_fields(gid, uid, "spin", **{f"reward_{key}": int(count)})
@@ -887,33 +944,28 @@ class SpinCog(commands.Cog):
             total_flat_xp = 0
             total_prestige_gain = 0
             total_bonus_spins_gained = 0
+            safeguard_spins = 0
 
-            # Capture the starting bank so bonus-spin rewards cannot make this
-            # command unbounded.  Newly won spins are available next command.
+            # Capture and consume the starting bank, then settle generated
+            # bonus spins as additional generations until none remain.
             spins_to_consume = spins_left
-            if spins_to_consume > 1:
-                reward_counts = self._draw_reward_counts(st, spins_to_consume)
-                consumed = self._consume_spin_count(ust, spins_to_consume)
-                if consumed != spins_to_consume:
-                    await ctx.reply("Your spin balance changed; please try again.")
-                    return
-                totals = await self._apply_reward_counts(ctx, reward_counts, ust, cycle)
-                total_spins = consumed
-                total_flat_xp = int(totals["flat_xp"])
-                total_prestige_gain = int(totals["prestige_gain"])
-                total_bonus_spins_gained = int(totals["bonus_spins_gained"])
-            else:
-                for _ in range(spins_to_consume):
-                    spin_result = await self._perform_spin_roll(ctx, st, ust, cycle, animate=False)
-                    if not spin_result:
-                        await ctx.reply("Spin wheel has no enabled rewards. Ask an admin to enable rewards.")
-                        return
-                    reward_key = str(spin_result["reward_key"])
-                    reward_counts[reward_key] += 1
-                    total_spins += 1
-                    total_flat_xp += int(spin_result.get("flat_xp", 0))
-                    total_prestige_gain += int(spin_result.get("prestige_gain", 0))
-                    total_bonus_spins_gained += int(spin_result.get("bonus_spins_gained", 0))
+            reward_counts, total_spins, total_bonus_spins_gained, safeguard_spins = (
+                self._draw_sweep_reward_counts(st, spins_to_consume)
+            )
+            consumed = self._consume_spin_count(ust, spins_to_consume)
+            if consumed != spins_to_consume:
+                await ctx.reply("Your spin balance changed; please try again.")
+                return
+            totals = await self._apply_reward_counts(
+                ctx,
+                reward_counts,
+                ust,
+                cycle,
+                bank_bonus_spins=False,
+                spins_processed=total_spins,
+            )
+            total_flat_xp = int(totals["flat_xp"])
+            total_prestige_gain = int(totals["prestige_gain"])
 
             await save_data()
 
@@ -930,7 +982,11 @@ class SpinCog(commands.Cog):
                 lines.append(f"Prestige gained total: **+{total_prestige_gain}**.")
             if total_bonus_spins_gained > 0:
                 lines.append(
-                    f"Bonus spins generated during the sweep: **+{total_bonus_spins_gained}** (banked for your next command)."
+                    f"Bonus spins generated and automatically rolled during the sweep: **+{total_bonus_spins_gained}**."
+                )
+            if safeguard_spins > 0:
+                lines.append(
+                    f"Recursion safeguard consumed **{safeguard_spins}** generated spin(s) because no terminating reward was enabled."
                 )
             if any(reward_counts.get(key, 0) > 0 for key in ("xp_boost_minor", "xp_boost_major", "xp_boost_jackpot")):
                 lines.append(f"XP boosts from this sweep are active now. Use `{ctx.clean_prefix}boosts` to inspect them.")

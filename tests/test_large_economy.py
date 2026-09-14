@@ -9,7 +9,7 @@ os.environ.setdefault("DISCORD_TOKEN", "test-token")
 
 from paragon.prestige import PrestigeCog
 from paragon.shop import ShopCog, _shop_bulk_cost
-from paragon.spin import SpinCog
+from paragon.spin import SpinCog, WHEEL_REWARDS
 from paragon.xp import apply_xp_delta_to_user, prestige_bulk_cost
 
 
@@ -76,12 +76,23 @@ class LargeEconomyTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(counts), 22)
         self.assertLess(time.perf_counter() - started, 1.0)
 
-    async def test_bonus_spin_reward_does_not_extend_current_sweep(self):
+    async def test_bonus_spin_reward_is_auto_spun_to_zero_with_safeguard(self):
         cog = SpinCog(SimpleNamespace())
         state = {"daily_spins_remaining": 0, "bonus_spins": 10}
         consumed = cog._consume_spin_count(state, 10)
         self.assertEqual(consumed, 10)
         self.assertEqual(state["bonus_spins"], 0)
+
+        wheel = {
+            "reward_overrides": {
+                key: key == "bonus_spins_2" for key in WHEEL_REWARDS
+            }
+        }
+        counts, total_spins, generated, safeguarded = cog._draw_sweep_reward_counts(wheel, 10)
+        self.assertEqual(counts, Counter({"bonus_spins_2": 10}))
+        self.assertEqual(total_spins, 30)
+        self.assertEqual(generated, 20)
+        self.assertEqual(safeguarded, 20)
 
         guild = SimpleNamespace(id=5)
         author = SimpleNamespace(id=6, guild=guild)
@@ -92,11 +103,16 @@ class LargeEconomyTests(unittest.IsolatedAsyncioTestCase):
             patch("paragon.spin.record_game_fields"),
         ):
             totals = await cog._apply_reward_counts(
-                ctx, Counter({"bonus_spins_2": 10}), state, "cycle"
+                ctx,
+                counts,
+                state,
+                "cycle",
+                bank_bonus_spins=False,
+                spins_processed=total_spins,
             )
 
         self.assertEqual(totals["bonus_spins_gained"], 20)
-        self.assertEqual(state["bonus_spins"], 20)
+        self.assertEqual(state["bonus_spins"], 0)
 
     def test_prestige_all_handles_astronomical_balance(self):
         cog = PrestigeCog(SimpleNamespace())
